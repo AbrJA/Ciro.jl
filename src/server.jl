@@ -108,43 +108,41 @@ function handle_event(engine, conn_ptr, res)
         # Parse Request
         req_parsed = PicoHTTPParser.parse_request(raw_data)
 
-        # Construct Request Object
-        headers_dict = Dict{String,String}()
-        for (k, v) in req_parsed.headers
-            headers_dict[String(k)] = String(v)
-        end
+        if req_parsed !== nothing
+            handler, params = Tries.lookup(GLOBAL_ROUTER.trie, req_parsed.method, req_parsed.path)
 
-        handler, params = Tries.lookup(GLOBAL_ROUTER.trie, req_parsed.method, req_parsed.path)
-
-        request = Request(
-            req_parsed.method,
-            req_parsed.path,
-            headers_dict,
-            Vector{UInt8}(),
-            params
-        )
-
-        response = nothing
-        if handler !== nothing
-            # Apply Middlewares
-            final_handler = handler
-            for mw in reverse(GLOBAL_ROUTER.middlewares)
-                final_handler = mw(final_handler)
-            end
-
-            try
-                res_obj = final_handler(request)
-                if isa(res_obj, Response)
-                    response = res_obj
-                else
-                    response = text(string(res_obj))
+            response = nothing
+            if handler !== nothing
+                # Apply Middlewares
+                final_handler = handler
+                for mw in reverse(GLOBAL_ROUTER.middlewares)
+                    final_handler = mw(final_handler)
                 end
-            catch e
-                @error "Handler failed" exception = (e, catch_backtrace())
-                response = Response(500, "Internal Server Error")
+
+                try
+                    # Pass req_parsed directly as Request
+                    res_obj = final_handler(req_parsed, params)
+                    if isa(res_obj, Response)
+                        response = res_obj
+                    else
+                        response = text(string(res_obj))
+                    end
+                catch e
+                    @error "Handler failed" exception = (e, catch_backtrace())
+                    response = Response(500, "Internal Server Error")
+                end
+            else
+                response = Response(404, "Not Found")
             end
         else
-            response = Response(404, "Not Found")
+            # Failed to parse or partial.
+            # If partial, we should wait for more data... but current implementation is simple read once.
+            # For now, just error or return.
+            # println("Failed to parse request")
+            # Cleanup handled by caller if we return
+            # But we need to ensure we don't leak or close prematurely if partial.
+            # Assuming simple implementation for now as per instructions.
+            response = Response(400, "Bad Request")
         end
 
         # Serialize Response Headers

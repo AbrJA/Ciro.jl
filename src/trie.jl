@@ -10,7 +10,7 @@ mutable struct TrieNode
     handler::Union{Function,Nothing}
 end
 
-function TrieNode(part::String="", is_param::Bool=false)
+function TrieNode(part::AbstractString="", is_param::Bool=false)
     return TrieNode(part, TrieNode[], is_param, nothing)
 end
 
@@ -22,7 +22,7 @@ function RadixTrie()
     return RadixTrie(TrieNode("", false))
 end
 
-function insert!(trie::RadixTrie, method::String, path::String, handler::Function)
+function insert!(trie::RadixTrie, method::AbstractString, path::AbstractString, handler::Function)
     # Combine method and path? Or have separate trees?
     # Let's route on path first, then check method, or compound key.
     # Standard way: Method mapping in the leaf, or just treat "METHOD /path" as the string to route.
@@ -47,7 +47,7 @@ function insert!(trie::RadixTrie, method::String, path::String, handler::Functio
 
     # We want to support Method + Path.
     # Let's make the first part the Method.
-    full_parts = [method]
+    full_parts = AbstractString[method]
     append!(full_parts, parts)
 
     for part in full_parts
@@ -77,13 +77,13 @@ function insert!(trie::RadixTrie, method::String, path::String, handler::Functio
     node.handler = handler
 end
 
-function lookup(trie::RadixTrie, method::String, path::String)
+function lookup(trie::RadixTrie, method::AbstractString, path::AbstractString)
     parts = split(strip(path, '/'), '/')
     if path == "/"
         parts = [""]
     end
 
-    full_parts = [method]
+    full_parts = AbstractString[method]
     append!(full_parts, parts)
 
     node = trie.root

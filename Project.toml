@@ -4,4 +4,7 @@ authors = ["AbrJA <abraham.jaimes.mx@gmail.com>"]
 version = "0.1.0"
 
 [deps]
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
 PicoHTTPParser = "7dfb699f-0de3-4c94-bc59-7670dfa845e2"
+StringViews = "354b36f9-a18e-4713-926e-db85100087ba"

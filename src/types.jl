@@ -1,16 +1,10 @@
 module Types
 
-using JSON
+using PicoHTTPParser
 
 export Request, Response, json, text
 
-struct Request
-    method::String
-    path::String
-    headers::Dict{String,String}
-    body::Vector{UInt8}
-    params::Dict{String,String}
-end
+const Request = PicoHTTPParser.Request
 
 struct Response
     status::Int

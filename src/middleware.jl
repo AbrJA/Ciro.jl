@@ -6,10 +6,10 @@ using ..Types
 export Logger
 
 function Logger(next::Function)
-    return function (req::Request)
+    return function (req::Request, params::Dict)
         start_time = now()
 
-        res = next(req)
+        res = next(req, params)
 
         end_time = now()
         duration = end_time - start_time
