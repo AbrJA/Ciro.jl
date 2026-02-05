@@ -94,35 +94,83 @@ void queue_accept(struct engine_state* state, conn_t* conn) {
 }
 
 // Queue a read request
+// Queue a read request
 void queue_read(struct engine_state* state, conn_t* conn) {
     struct io_uring_sqe *sqe = io_uring_get_sqe(&state->ring);
+    if (!sqe) {
+        // Handle full SQ: submit and retry? Or just return error?
+        // For now, let's just submit and try once more
+        io_uring_submit(&state->ring);
+        sqe = io_uring_get_sqe(&state->ring);
+        if (!sqe) return; // Dropped :(
+    }
     conn->type = READ;
     // Read into standard buffer
     io_uring_prep_read(sqe, conn->fd, conn->buffer, BUFFER_SIZE - 1, 0);
     io_uring_sqe_set_data(sqe, conn);
-    io_uring_submit(&state->ring);
+    // Don't auto submit
+    // io_uring_submit(&state->ring);
 }
 
 // Queue a write request
+// Queue a write request - ZERO COPY
+// Caller (Julia) MUST ensure data stays alive until completion!
 void queue_write(struct engine_state* state, conn_t* conn, const char* data, int len) {
     struct io_uring_sqe *sqe = io_uring_get_sqe(&state->ring);
+    if (!sqe) {
+        io_uring_submit(&state->ring);
+        sqe = io_uring_get_sqe(&state->ring);
+        if (!sqe) return;
+    }
     conn->type = WRITE;
 
-    // For simplicity, we copy data to buffer if needed, OR we can use the pointer passed if it persists
-    // Here we assume 'data' is safe or we copy it to conn->buffer if we want full async safety without managing external buffers
-    // Let's use conn->buffer for safety in this simple version
-    if (len > BUFFER_SIZE) len = BUFFER_SIZE;
-    memcpy(conn->buffer, data, len);
+    io_uring_prep_write(sqe, conn->fd, data, len, 0);
+    io_uring_sqe_set_data(sqe, conn);
+    // io_uring_submit(&state->ring);
+}
 
-    io_uring_prep_write(sqe, conn->fd, conn->buffer, len, 0);
+// 2. Add bulk submission support
+int submit_pending(struct engine_state* state) {
+    return io_uring_submit(&state->ring);
+}
+
+// 3. Add wait_cqe for better CPU usage
+conn_t* wait_completion(struct engine_state* state, int* res, int timeout_ms) {
+    struct io_uring_cqe *cqe;
+    struct __kernel_timespec ts = {
+        .tv_sec = timeout_ms / 1000,
+        .tv_nsec = (long long)(timeout_ms % 1000) * 1000000
+    };
+
+    int ret = io_uring_wait_cqe_timeout(&state->ring, &cqe, &ts);
+
+    if (ret < 0) {
+        // -ETIME, -EAGAIN, -EINTR etc.
+        return NULL;
+    }
+
+    conn_t* conn = (conn_t*)io_uring_cqe_get_data(cqe);
+    *res = cqe->res;
+    io_uring_cqe_seen(&state->ring, cqe);
+    return conn;
+}
+
+// 4. Use io_uring multishot accept (kernel 5.19+)
+void queue_multishot_accept(struct engine_state* state, conn_t* conn) {
+    struct io_uring_sqe *sqe = io_uring_get_sqe(&state->ring);
+    if (!sqe) return;
+
+    conn->type = ACCEPT;
+    // Multishot accept: Keep issuing accepts!
+    io_uring_prep_multishot_accept(sqe, state->server_fd, NULL, NULL, 0);
     io_uring_sqe_set_data(sqe, conn);
     io_uring_submit(&state->ring);
 }
 
 // Non-blocking check for completions
+// Non-blocking check for completions (optional now)
 conn_t* poll_completion(struct engine_state* state, int* res) {
     struct io_uring_cqe *cqe;
-    // Peek instead of wait so we don't block the Julia thread
     int ret = io_uring_peek_cqe(&state->ring, &cqe);
     if (ret < 0) return NULL;
 

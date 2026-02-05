@@ -6,11 +6,11 @@ using ..Tries
 export Router, GLOBAL_ROUTER, route, get, post, use
 
 struct Router
-    trie::RadixTrie
+    trie::RouterTrie
     middlewares::Vector{Function}
 end
 
-const GLOBAL_ROUTER = Router(RadixTrie(), Function[])
+const GLOBAL_ROUTER = Router(RouterTrie(), Function[])
 
 function use(middleware::Function)
     push!(GLOBAL_ROUTER.middlewares, middleware)
