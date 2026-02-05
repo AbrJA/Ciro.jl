@@ -36,19 +36,21 @@ int setup_server_socket(int port) {
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
         perror("socket");
-        exit(1);
+        return -1;
     }
 
     int opt = 1;
     if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt))) {
         perror("setsockopt reuseaddr");
-        exit(1);
+        close(server_fd);
+        return -1;
     }
 
-    // Enable SO_REUSEPORT for multithraded load balancing
+    // Enable SO_REUSEPORT for multithreaded load balancing
     if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt))) {
         perror("setsockopt reuseport");
-        exit(1);
+        close(server_fd);
+        return -1;
     }
 
     struct sockaddr_in addr;
@@ -60,26 +62,54 @@ int setup_server_socket(int port) {
     if (bind(server_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         perror("bind");
         close(server_fd);
-        exit(1);
+        return -1;
     }
 
     if (listen(server_fd, 4096) < 0) {
         perror("listen");
         close(server_fd);
-        exit(1);
+        return -1;
     }
 
     return server_fd;
 }
 
-// Initialization
+// Initialization - returns NULL on failure
 struct engine_state* init_engine(int port, int queue_depth) {
     struct engine_state* state = malloc(sizeof(struct engine_state));
+    if (!state) {
+        return NULL;
+    }
 
     state->server_fd = setup_server_socket(port);
+    if (state->server_fd < 0) {
+        free(state);
+        return NULL;
+    }
 
-    io_uring_queue_init(queue_depth, &state->ring, 0);
+    int ret = io_uring_queue_init(queue_depth, &state->ring, 0);
+    if (ret < 0) {
+        close(state->server_fd);
+        free(state);
+        return NULL;
+    }
+
     return state;
+}
+
+// Cleanup - properly releases all resources
+void cleanup_engine(struct engine_state* state) {
+    if (!state) return;
+    io_uring_queue_exit(&state->ring);
+    if (state->server_fd >= 0) {
+        close(state->server_fd);
+    }
+    free(state);
+}
+
+// Get server fd for external shutdown signaling
+int get_server_fd(struct engine_state* state) {
+    return state ? state->server_fd : -1;
 }
 
 // Queue an accept request
@@ -181,4 +211,4 @@ conn_t* poll_completion(struct engine_state* state, int* res) {
     return conn;
 }
 
-// gcc -shared -fPIC -o ./lib/ciro.so ./lib/ciro.c -luring
+// Compile: gcc -shared -fPIC -o ./lib/ciro.so ./lib/ciro.c -luring

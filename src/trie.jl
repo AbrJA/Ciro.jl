@@ -1,7 +1,7 @@
 module Tries
 
 import Base: insert!
-export RadixTrie, RouterTrie, insert!, lookup
+export RadixTrie, RouterTrie, insert!, lookup, lookup!
 
 mutable struct TrieNode
     part::String
@@ -116,9 +116,37 @@ function lookup(router::RouterTrie, method::AbstractString, path::AbstractString
     return lookup(trie, path)
 end
 
+# Version with pre-allocated params dict (reduces GC pressure)
+function lookup!(router::RouterTrie, method::AbstractString, path::AbstractString, params::Dict{String,String})
+    trie = if method == "GET"
+        router.get_trie
+    elseif method == "POST"
+        router.post_trie
+    elseif method == "PUT"
+        router.put_trie
+    elseif method == "DELETE"
+        router.delete_trie
+    elseif method == "PATCH"
+        router.patch_trie
+    elseif method == "OPTIONS"
+        router.options_trie
+    elseif method == "HEAD"
+        router.head_trie
+    else
+        return nothing, params
+    end
+
+    return lookup!(trie, path, params)
+end
+
 function lookup(trie::RadixTrie, path::AbstractString)
-    node = trie.root
     params = Dict{String,String}()
+    return lookup!(trie, path, params)
+end
+
+# In-place version with pre-allocated params dict
+function lookup!(trie::RadixTrie, path::AbstractString, params::Dict{String,String})
+    node = trie.root
 
     len = lastindex(path)
     i = firstindex(path)
@@ -170,7 +198,7 @@ function lookup(trie::RadixTrie, path::AbstractString)
         end
 
         if found === nothing
-            return nothing, Dict{String,String}()
+            return nothing, params
         end
 
         node = found

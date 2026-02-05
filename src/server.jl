@@ -109,23 +109,12 @@ end
 
 function worker_loop(port, thread_id)
     engine = ccall((:init_engine, lib), Ptr{Cvoid}, (Cint, Cint), port, 4096)
+    if engine == C_NULL
+        error("[Thread $thread_id] Failed to initialize engine on port $port")
+    end
     println("  [Thread $thread_id] Engine initialized")
 
-    # Multishot Accept
-    # We create one master accept connection struct and reuse/submit it?
-    # No, io_uring multishot accept keeps generating CQEs.
-    # We just need to submit it ONCE.
-    # Wait, multishot accept produces a NEW fd for each CQE.
-    # Where is the conn struct for the NEW fd?
-    # The 'conn' passed to prep_multishot_accept is just the "request" handle.
-    # The CQE result is the new FD.
-    # We need to allocate a NEW conn struct for the new client!
-    # Ah, my C implementation of queue_multishot_accept assigns `io_uring_sqe_set_data(sqe, conn)`.
-    # So when an accept happens, we get `conn` back.
-    # BUT, we treat `conn` as the client connection usually?
-    # No, for ACCEPT, it is the acceptor context.
-
-    # We need a dedicated acceptor connection object.
+    # Multishot Accept - single submission generates multiple CQEs
     accept_conn = ccall((:create_connection, lib), Ptr{Conn}, ())
     ccall((:queue_multishot_accept, lib), Cvoid, (Ptr{Cvoid}, Ptr{Conn}), engine, accept_conn)
 
@@ -133,48 +122,54 @@ function worker_loop(port, thread_id)
     buffer_pool = BUFFER_POOL[thread_id]
     pending_writes = Dict{Ptr{Conn},Vector{UInt8}}()
 
+    # Pre-allocate params dict for reuse (reduces allocations per request)
+    reusable_params = Dict{String,String}()
+
     println("  [Thread $thread_id] Loop starting")
 
     res = Ref{Cint}(0)
 
-    while SERVER_RUNNING[]
-        # Wait for at least one event (10ms timeout)
-        conn_ptr = ccall((:wait_completion, lib), Ptr{Conn}, (Ptr{Cvoid}, Ref{Cint}, Cint), engine, res, 10)
+    try
+        while SERVER_RUNNING[]
+            # Wait for at least one event (10ms timeout)
+            conn_ptr = ccall((:wait_completion, lib), Ptr{Conn}, (Ptr{Cvoid}, Ref{Cint}, Cint), engine, res, 10)
 
-        events_processed = 0
-        if conn_ptr != C_NULL
-            handle_event(engine, conn_ptr, res[], pending_writes, buffer_pool, conn_pool, accept_conn)
-            events_processed += 1
-
-            # Process up to 63 more (batch 64)
-            for _ in 1:63
-                conn_ptr = ccall((:wait_completion, lib), Ptr{Conn}, (Ptr{Cvoid}, Ref{Cint}, Cint), engine, res, 0)
-                if conn_ptr == C_NULL
-                    break
-                end
-                handle_event(engine, conn_ptr, res[], pending_writes, buffer_pool, conn_pool, accept_conn)
+            events_processed = 0
+            if conn_ptr != C_NULL
+                handle_event(engine, conn_ptr, res[], pending_writes, buffer_pool, conn_pool, accept_conn, reusable_params)
                 events_processed += 1
+
+                # Process up to 63 more (batch 64)
+                for _ in 1:63
+                    conn_ptr = ccall((:wait_completion, lib), Ptr{Conn}, (Ptr{Cvoid}, Ref{Cint}, Cint), engine, res, 0)
+                    if conn_ptr == C_NULL
+                        break
+                    end
+                    handle_event(engine, conn_ptr, res[], pending_writes, buffer_pool, conn_pool, accept_conn, reusable_params)
+                    events_processed += 1
+                end
+            end
+
+            # Submit any pending reads/writes generated
+            if events_processed > 0
+                ccall((:submit_pending, lib), Cint, (Ptr{Cvoid},), engine)
+            end
+
+            # Yield to allow other tasks/GC if no events
+            if events_processed == 0
+                yield()
             end
         end
-
-        # Submit any pending reads/writes generated
-        if events_processed > 0
-            ccall((:submit_pending, lib), Cint, (Ptr{Cvoid},), engine)
-        end
-
-        # Don't yield if we are blocking in wait_completion?
-        # wait_completion releases GIL? No, ccall blocks.
-        # But we use small timeout.
-        # If we didn't process anything, we should yield to allow other tasks/GC (though we are pinned mostly)
-        if events_processed == 0
-            yield()
-        end
+    finally
+        # Cleanup resources
+        println("  [Thread $thread_id] Cleaning up...")
+        ccall((:free_connection, lib), Cvoid, (Ptr{Conn},), accept_conn)
+        ccall((:cleanup_engine, lib), Cvoid, (Ptr{Cvoid},), engine)
+        println("  [Thread $thread_id] Exited")
     end
-
-    println("  [Thread $thread_id] Exiting loop")
 end
 
-function handle_event(engine, conn_ptr, res, pending_writes, buffer_pool, conn_pool, accept_conn)
+function handle_event(engine, conn_ptr, res, pending_writes, buffer_pool, conn_pool, accept_conn, reusable_params)
     # Check if it is the ACCEPT cqe
     # Since we use multishot, we get the same accept_conn pointer back every time a new connection arrives!
 
@@ -226,7 +221,9 @@ function handle_event(engine, conn_ptr, res, pending_writes, buffer_pool, conn_p
         req_parsed = PicoHTTPParser.parse_request(raw_data)
 
         if req_parsed !== nothing
-            handler, params = Tries.lookup(GLOBAL_ROUTER.trie, req_parsed.method, req_parsed.path)
+            # Clear and reuse params dict
+            empty!(reusable_params)
+            handler, params = Tries.lookup!(GLOBAL_ROUTER.trie, req_parsed.method, req_parsed.path, reusable_params)
 
             response = nothing
             if handler !== nothing
@@ -288,7 +285,9 @@ function handle_event(engine, conn_ptr, res, pending_writes, buffer_pool, conn_p
         # Status
         cursor = write_bytes!(out_buf, cursor, "HTTP/1.1 ")
         cursor = write_int!(out_buf, cursor, response.status)
-        cursor = write_bytes!(out_buf, cursor, " OK\r\n")
+        cursor = write_bytes!(out_buf, cursor, " ")
+        cursor = write_bytes!(out_buf, cursor, get_status_text(response.status))
+        cursor = write_bytes!(out_buf, cursor, "\r\n")
 
         # Headers
         for (k, v) in response.headers
@@ -339,15 +338,77 @@ function handle_event(engine, conn_ptr, res, pending_writes, buffer_pool, conn_p
     end
 end
 
+# HTTP Status text lookup table
+const STATUS_TEXTS = Dict{Int,String}(
+    200 => "OK",
+    201 => "Created",
+    204 => "No Content",
+    301 => "Moved Permanently",
+    302 => "Found",
+    304 => "Not Modified",
+    400 => "Bad Request",
+    401 => "Unauthorized",
+    403 => "Forbidden",
+    404 => "Not Found",
+    405 => "Method Not Allowed",
+    500 => "Internal Server Error",
+    502 => "Bad Gateway",
+    503 => "Service Unavailable",
+)
+
+@inline function get_status_text(status::Int)
+    return get(STATUS_TEXTS, status, "Unknown")
+end
+
 @inline function write_bytes!(buf, cursor, data::String)
     n = sizeof(data)
     unsafe_copyto!(pointer(buf, cursor), pointer(data), n)
     return cursor + n
 end
 
+@inline function write_bytes!(buf, cursor, data::SubString{String})
+    n = sizeof(data)
+    GC.@preserve data begin
+        unsafe_copyto!(pointer(buf, cursor), pointer(data), n)
+    end
+    return cursor + n
+end
+
+# Zero-allocation integer to ASCII conversion
+# Pre-computed digits table for fast conversion
+const DIGIT_PAIRS = [string(div(i, 10), i % 10) for i in 0:99]
+
 @inline function write_int!(buf, cursor, val::Int)
-    s = string(val) # Allocation? optimize later with itoa
-    return write_bytes!(buf, cursor, s)
+    if val == 0
+        buf[cursor] = UInt8('0')
+        return cursor + 1
+    end
+
+    if val < 0
+        buf[cursor] = UInt8('-')
+        cursor += 1
+        val = -val
+    end
+
+    # Count digits first
+    temp = val
+    n_digits = 0
+    while temp > 0
+        temp = div(temp, 10)
+        n_digits += 1
+    end
+
+    # Write digits in reverse order
+    # For cursor=1, n_digits=3: write to positions 3, 2, 1, return 4
+    end_cursor = cursor + n_digits
+    write_pos = end_cursor - 1  # Start at last position
+    while val > 0
+        buf[write_pos] = UInt8('0') + (val % 10)
+        val = div(val, 10)
+        write_pos -= 1
+    end
+
+    return end_cursor
 end
 
 end

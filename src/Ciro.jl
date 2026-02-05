@@ -17,19 +17,21 @@ using .Middlewares
 export Logger
 
 using .Routers
-# Explicitly use Routers.get to shadow Base.get in this module context if intended,
-# or just export it.
-# To avoid the warning "both Routers and Base export get", we need to be specific.
-# Since we want Senciro.get to be the router get, we should shadow it.
+# HTTP method convenience functions
 const get = Routers.get
 const post = Routers.post
+const put = Routers.put
+const delete = Routers.delete
+const patch = Routers.patch
+const options = Routers.options
+const head = Routers.head
 const route = Routers.route
 const use = Routers.use
 const GLOBAL_ROUTER = Routers.GLOBAL_ROUTER
 
-export route, get, post, use, GLOBAL_ROUTER
+export route, get, post, put, delete, patch, options, head, use, GLOBAL_ROUTER
 
 using .Servers
-export start_server
+export start_server, stop_server
 
 end # module Ciro

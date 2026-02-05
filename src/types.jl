@@ -1,6 +1,7 @@
 module Types
 
 using PicoHTTPParser
+using JSON
 
 export Request, Response, json, text
 

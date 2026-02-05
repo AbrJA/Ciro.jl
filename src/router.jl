@@ -3,7 +3,7 @@ module Routers
 using ..Types
 using ..Tries
 
-export Router, GLOBAL_ROUTER, route, get, post, use
+export Router, GLOBAL_ROUTER, route, get, post, put, delete, patch, options, head, use
 
 struct Router
     trie::RouterTrie
@@ -26,6 +26,26 @@ end
 
 function post(handler::Function, path::String)
     route("POST", path, handler)
+end
+
+function put(handler::Function, path::String)
+    route("PUT", path, handler)
+end
+
+function delete(handler::Function, path::String)
+    route("DELETE", path, handler)
+end
+
+function patch(handler::Function, path::String)
+    route("PATCH", path, handler)
+end
+
+function options(handler::Function, path::String)
+    route("OPTIONS", path, handler)
+end
+
+function head(handler::Function, path::String)
+    route("HEAD", path, handler)
 end
 
 end
