@@ -78,24 +78,64 @@ function insert!(trie::RadixTrie, method::AbstractString, path::AbstractString, 
 end
 
 function lookup(trie::RadixTrie, method::AbstractString, path::AbstractString)
-    parts = split(strip(path, '/'), '/')
-    if path == "/"
-        parts = [""]
-    end
-
-    full_parts = AbstractString[method]
-    append!(full_parts, parts)
-
     node = trie.root
     params = Dict{String,String}()
 
-    for part in full_parts
-        if isempty(part)
+    # 1. Match Method (First layer)
+    found_method = nothing
+    for child in node.children
+        if child.part == method
+            found_method = child
+            break
+        end
+    end
+
+    if found_method === nothing
+        # Method not found (and we assume method is never a param for now, or fallback)
+        return nothing, Dict{String,String}()
+    end
+    node = found_method
+
+    # 2. Iterate Path
+    # We iterate manually to avoid 'split' allocation
+    len = lastindex(path)
+    i = firstindex(path)
+
+    while i <= len
+        # Skip slashes
+        if path[i] == '/'
+            i = nextind(path, i)
             continue
         end
 
+        # Find end of this segment
+        # We can't use findnext easily with AbstractString/StringView in a generic way that is zero-alloc
+        # if the underlying type doesn't support optimized search.
+        # But 'findnext' on StringView should be fine?
+        # Let's simple loop until '/' or end.
+        start_idx = i
+        end_idx = i
+
+        # Scan for separator
+        found_sep = false
+        while i <= len
+            c = path[i]
+            if c == '/'
+                end_idx = prevind(path, i)
+                found_sep = true
+                break
+            end
+            end_idx = i
+            i = nextind(path, i)
+        end
+
+        # Current segment is path[start_idx:end_idx]
+        # We use a view to avoid allocation
+        part = view(path, start_idx:end_idx)
+
+        # Match Part
         found = nothing
-        # 1. Exact match
+        # A. Exact Match
         for child in node.children
             if child.part == part
                 found = child
@@ -103,14 +143,15 @@ function lookup(trie::RadixTrie, method::AbstractString, path::AbstractString)
             end
         end
 
-        # 2. Param match
+        # B. Param Match
         if found === nothing
             for child in node.children
                 if child.is_param
                     found = child
                     # Extract param
                     key = child.part[2:end] # remove ':'
-                    params[key] = part
+                    # verify implicit conversion or keep as SubString
+                    params[key] = String(part) # Allocate only when storing param (unavoidable for Dict{String,String})
                     break
                 end
             end
@@ -121,6 +162,13 @@ function lookup(trie::RadixTrie, method::AbstractString, path::AbstractString)
         end
 
         node = found
+
+        if found_sep
+            i = nextind(path, end_idx) # Move past the last char we read
+            # Actually our outer loop 'i' is already at the '/' because of the inner while loop break
+            # just need to advance past '/'
+            i = nextind(path, i)
+        end
     end
 
     return node.handler, params
