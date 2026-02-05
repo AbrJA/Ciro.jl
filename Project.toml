@@ -1,12 +1,7 @@
-name = "Example"
-uuid = "7876af07-990d-54b4-ab0e-23690620f79a"
-version = "0.5.5"
+name = "Ciro"
+uuid = "655fe02a-3bfd-4ae8-acc9-72bd0b20a31a"
+authors = ["AbrJA <abraham.jaimes.mx@gmail.com>"]
+version = "0.1.0"
 
-[compat]
-julia = "1"
-
-[extras]
-Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
-
-[targets]
-test = ["Test"]
+[deps]
+PicoHTTPParser = "7dfb699f-0de3-4c94-bc59-7670dfa845e2"
