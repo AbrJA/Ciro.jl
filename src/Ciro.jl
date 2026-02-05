@@ -4,6 +4,7 @@ module Ciro
 include("types.jl")
 include("trie.jl")
 include("middleware.jl")
+include("static_router.jl")
 include("router.jl")
 include("server.jl")
 
