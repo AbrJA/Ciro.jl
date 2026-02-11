@@ -32,6 +32,14 @@ void free_connection(conn_t* conn) {
     free(conn);
 }
 
+// --- Accessors for Julia (conn_t is opaque from Julia's perspective) ---
+int get_conn_op_type(conn_t* conn) { return (int)conn->type; }
+int get_conn_fd(conn_t* conn) { return conn->fd; }
+char* get_conn_buffer(conn_t* conn) { return conn->buffer; }
+int get_conn_buffer_size() { return BUFFER_SIZE; }
+void set_conn_op_type(conn_t* conn, int t) { conn->type = (op_type)t; }
+void set_conn_fd(conn_t* conn, int fd) { conn->fd = fd; }
+
 int setup_server_socket(int port) {
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
@@ -124,7 +132,6 @@ void queue_accept(struct engine_state* state, conn_t* conn) {
 }
 
 // Queue a read request
-// Queue a read request
 void queue_read(struct engine_state* state, conn_t* conn) {
     struct io_uring_sqe *sqe = io_uring_get_sqe(&state->ring);
     if (!sqe) {
@@ -142,7 +149,6 @@ void queue_read(struct engine_state* state, conn_t* conn) {
     // io_uring_submit(&state->ring);
 }
 
-// Queue a write request
 // Queue a write request - ZERO COPY
 // Caller (Julia) MUST ensure data stays alive until completion!
 void queue_write(struct engine_state* state, conn_t* conn, const char* data, int len) {
@@ -198,7 +204,6 @@ void queue_multishot_accept(struct engine_state* state, conn_t* conn) {
 }
 
 // Non-blocking check for completions
-// Non-blocking check for completions (optional now)
 conn_t* poll_completion(struct engine_state* state, int* res) {
     struct io_uring_cqe *cqe;
     int ret = io_uring_peek_cqe(&state->ring, &cqe);

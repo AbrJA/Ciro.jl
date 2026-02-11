@@ -1,32 +1,39 @@
 using Ciro
-using Ciro.StaticRouter
 
-# Define Handlers
+# --- Handlers ---
+
 function index(req)
-    return Ciro.Response(200, "Static Router Index")
+    return Response(200, "Static Router Index")
 end
 
 function get_user(req, id)
-    return Ciro.Response(200, "User ID: $id")
+    return Response(200, "User ID: " * String(id))
 end
 
 function get_post(req, user, post_id)
-    return Ciro.Response(200, "User: $user, Post: $post_id")
+    return Response(200, "User: " * String(user) * ", Post: " * String(post_id))
 end
 
-# Define Router
-StaticRouter.@routes App begin
+# --- Middleware ---
+
+function TimingMiddleware(req, next)
+    t = time_ns()
+    resp = next(req)
+    elapsed = (time_ns() - t) / 1_000_000
+    println("Request took ", round(elapsed, digits=2), "ms")
+    return resp
+end
+
+# --- Define routes with middleware ---
+
+@routes App begin
+    middleware(TimingMiddleware)
     ("GET", "/") => index
     ("GET", "/user/:id") => get_user
     ("GET", "/user/:u/post/:p") => get_post
 end
 
-# Start Server
-# We need to bridge the server's generic handler to this specific app dispatch
-# The server expects a handler function (req) -> res
-# Ciro.start_server takes a port? No, it uses GLOBAL_ROUTER usually.
-# But StaticRouter is standalone dispatch.
-# We can use Ciro's server if we plug it in.
-# For now, just printing that logic is ready.
+# --- Start server ---
 
-println("Static Router Defined. To use with server, integration is needed in Ciro.jl's server loop to call StaticRouter.dispatch(App(), req)")
+println("Starting Ciro with middleware on port 8080...")
+start_server(App(), 8080)

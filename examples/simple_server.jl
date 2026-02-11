@@ -1,21 +1,34 @@
 using Ciro
-using Ciro.Servers
-using Ciro.Routers: get, post
-using Ciro.Types
 
-# Define routes
-get("/hello") do req, params
-    return text("Hello, World!")
+# --- Handlers ---
+
+function index(req)
+    return text("Welcome to Ciro!")
 end
 
-get("/user/:id") do req, params
-    return text("User $(params["id"])")
+function hello(req)
+    return text("Hello from Ciro!")
 end
 
-post("/echo") do req, params
-    return text("You sent: " * String(req.body))
+function get_user(req, id)
+    # id is a SubString (zero-copy from the request path)
+    return text("User ID: " * String(id))
 end
 
-# Start server
-println("Starting server on 8080...")
-start_server(8080)
+function post_data(req)
+    return text("Data received!")
+end
+
+# --- Define routes (compile-time dispatch) ---
+
+@routes App begin
+    ("GET", "/") => index
+    ("GET", "/hello") => hello
+    ("GET", "/user/:id") => get_user
+    ("POST", "/data") => post_data
+end
+
+# --- Start server ---
+
+println("Starting Ciro on port 8080...")
+start_server(App(), 8080)

@@ -1,41 +1,46 @@
-import Pkg
-Pkg.activate(joinpath(@__DIR__, ".."))
-include(joinpath(@__DIR__, "../src/Ciro.jl"))
-using .Ciro
+using Ciro
+using JSON  # Activates CiroJSON extension
 
-println("Setting up routes...")
+# --- Handlers ---
 
-# Use Middleware
-# Ciro.use(Ciro.Logger)
-
-Ciro.get("/") do req::Ciro.Request, params::Dict
-    return Ciro.text("Welcome to the User Defined Router!")
+function index(req)
+    return text("Welcome to Ciro!")
 end
 
-Ciro.get("/hello") do req::Ciro.Request, params::Dict
-    return Ciro.text("Hello from the new API!")
+function hello(req)
+    return text("Hello from the API!")
 end
 
-Ciro.get("/large") do req::Ciro.Request, params::Dict
-    # Test Zero-Copy with 5MB payload
+function large_payload(req)
+    # Test with 5MB payload
     data = repeat("A", 5 * 1024 * 1024)
-    return Ciro.text(data)
+    return text(data)
 end
 
-
-Ciro.post("/data") do req::Ciro.Request, params::Dict
-    return Ciro.text("Data received!")
+function post_data(req)
+    return text("Data received!")
 end
 
-Ciro.get("/json") do req::Ciro.Request, params::Dict
-    # Test JSON serialization
-    return Ciro.json(Dict("status" => "ok", "message" => "This is JSON"))
+function json_response(req)
+    return json(Dict("status" => "ok", "message" => "This is JSON"))
 end
 
-Ciro.get("/user/:id") do req::Ciro.Request, params::Dict
-    id = Base.get(params, "id", "unknown")
-    return Ciro.json(Dict("user_id" => id))
+function get_user(req, id)
+    return json(Dict("user_id" => String(id)))
 end
 
-println("Starting server on port 8080...")
-Ciro.start_server(8080)
+# --- Define routes ---
+
+@routes App begin
+    ("GET", "/") => index
+    ("GET", "/hello") => hello
+    ("GET", "/large") => large_payload
+    ("POST", "/data") => post_data
+    ("GET", "/json") => json_response
+    ("GET", "/user/:id") => get_user
+end
+
+# --- Start server ---
+
+println("Starting Ciro on port 8080...")
+start_server(App(), 8080)

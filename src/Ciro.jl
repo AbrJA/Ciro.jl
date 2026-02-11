@@ -1,35 +1,26 @@
 module Ciro
 
-# Include submodules
+# Core types
 include("types.jl")
-include("trie.jl")
+
+# Middleware library
 include("middleware.jl")
+
+# Static router (primary dispatch mechanism)
 include("static_router.jl")
-include("router.jl")
+
+# Server (io_uring backend)
 include("server.jl")
 
-# Re-export necessary types and functions
+# Re-export public API
 using .Types
-export Request, Response, json, text
+export Request, Response, text, json
 
-using .Tries
 using .Middlewares
 export Logger
 
-using .Routers
-# HTTP method convenience functions
-const get = Routers.get
-const post = Routers.post
-const put = Routers.put
-const delete = Routers.delete
-const patch = Routers.patch
-const options = Routers.options
-const head = Routers.head
-const route = Routers.route
-const use = Routers.use
-const GLOBAL_ROUTER = Routers.GLOBAL_ROUTER
-
-export route, get, post, put, delete, patch, options, head, use, GLOBAL_ROUTER
+using .StaticRouter
+export @routes, dispatch, AbstractApp
 
 using .Servers
 export start_server, stop_server

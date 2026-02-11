@@ -1,17 +1,29 @@
 name = "Ciro"
 uuid = "655fe02a-3bfd-4ae8-acc9-72bd0b20a31a"
 authors = ["AbrJA <abraham.jaimes.mx@gmail.com>"]
-version = "0.1.0"
+version = "0.2.0"
 
 [deps]
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
-JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
 PicoHTTPParser = "7dfb699f-0de3-4c94-bc59-7670dfa845e2"
 StringViews = "354b36f9-a18e-4713-926e-db85100087ba"
 
+[weakdeps]
+JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+
+[extensions]
+CiroJSON = "JSON"
+
+[compat]
+JSON = "^1"
+PicoHTTPParser = "0.2"
+StringViews = "1"
+julia = "1.10"
+
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 
 [targets]
-test = ["Test"]
+test = ["Test", "JSON"]
