@@ -37,6 +37,14 @@ function post_data(req)
     return text("Data received")
 end
 
+function put_data(req)
+    return text("Data updated")
+end
+
+function delete_item(req, id)
+    return text("Deleted: " * String(id))
+end
+
 # --- Middleware for testing ---
 
 function TestMiddleware(req, next)
@@ -56,11 +64,18 @@ end
 @routes ParamApp begin
     ("GET", "/user/:id") => get_user
     ("GET", "/user/:uid/post/:pid") => get_user_post
+    ("DELETE", "/item/:id") => delete_item
 end
 
 @routes MiddlewareApp begin
     middleware(TestMiddleware)
     ("GET", "/") => index_handler
+end
+
+@routes MultiMethodApp begin
+    ("GET", "/data") => hello_handler
+    ("POST", "/data") => post_data
+    ("PUT", "/data") => put_data
 end
 
 # --- Tests ---
@@ -95,6 +110,10 @@ end
     resp = dispatch(ParamApp(), mock_request("GET", "/user/10/post/99"))
     @test resp.status == 200
     @test String(resp.body) == "User 10 Post 99"
+
+    resp = dispatch(ParamApp(), mock_request("DELETE", "/item/7"))
+    @test resp.status == 200
+    @test String(resp.body) == "Deleted: 7"
 end
 
 @testset "StaticRouter Middleware" begin
@@ -111,6 +130,31 @@ end
         end
     end
     @test found_mw
+end
+
+@testset "StaticRouter Multi-Method Same Path" begin
+    resp = dispatch(MultiMethodApp(), mock_request("GET", "/data"))
+    @test resp.status == 200
+    @test String(resp.body) == "Hello!"
+
+    resp = dispatch(MultiMethodApp(), mock_request("POST", "/data"))
+    @test resp.status == 200
+    @test String(resp.body) == "Data received"
+
+    resp = dispatch(MultiMethodApp(), mock_request("PUT", "/data"))
+    @test resp.status == 200
+    @test String(resp.body) == "Data updated"
+end
+
+@testset "StaticRouter Trailing Slash Handling" begin
+    # Should work with trailing slashes
+    resp = dispatch(BasicApp(), mock_request("GET", "/hello/"))
+    @test resp.status == 200
+    @test String(resp.body) == "Hello!"
+
+    resp = dispatch(ParamApp(), mock_request("GET", "/user/42/"))
+    @test resp.status == 200
+    @test String(resp.body) == "User: 42"
 end
 
 end # module

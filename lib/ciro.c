@@ -5,8 +5,9 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <netinet/tcp.h>
 
-#define BUFFER_SIZE 2048
+#define BUFFER_SIZE 8192
 
 typedef enum { ACCEPT, READ, WRITE } op_type;
 
@@ -40,8 +41,13 @@ int get_conn_buffer_size() { return BUFFER_SIZE; }
 void set_conn_op_type(conn_t* conn, int t) { conn->type = (op_type)t; }
 void set_conn_fd(conn_t* conn, int fd) { conn->fd = fd; }
 
+static void set_tcp_nodelay(int fd) {
+    int flag = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+}
+
 int setup_server_socket(int port) {
-    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    int server_fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
     if (server_fd < 0) {
         perror("socket");
         return -1;
@@ -73,7 +79,7 @@ int setup_server_socket(int port) {
         return -1;
     }
 
-    if (listen(server_fd, 4096) < 0) {
+    if (listen(server_fd, 8192) < 0) {
         perror("listen");
         close(server_fd);
         return -1;
@@ -95,11 +101,20 @@ struct engine_state* init_engine(int port, int queue_depth) {
         return NULL;
     }
 
-    int ret = io_uring_queue_init(queue_depth, &state->ring, 0);
+    // Use SQPOLL for kernel-side submission (reduces syscalls)
+    struct io_uring_params params;
+    memset(&params, 0, sizeof(params));
+    params.flags = IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SINGLE_ISSUER;
+
+    int ret = io_uring_queue_init_params(queue_depth, &state->ring, &params);
     if (ret < 0) {
-        close(state->server_fd);
-        free(state);
-        return NULL;
+        // Fallback: try without advanced flags
+        ret = io_uring_queue_init(queue_depth, &state->ring, 0);
+        if (ret < 0) {
+            close(state->server_fd);
+            free(state);
+            return NULL;
+        }
     }
 
     return state;
@@ -129,6 +144,11 @@ void queue_accept(struct engine_state* state, conn_t* conn) {
     io_uring_prep_accept(sqe, state->server_fd, (struct sockaddr*)&conn->addr, &conn->addr_len, 0);
     io_uring_sqe_set_data(sqe, conn);
     io_uring_submit(&state->ring);
+}
+
+// Set TCP_NODELAY on accepted connections (exposed to Julia)
+void configure_client_socket(int fd) {
+    set_tcp_nodelay(fd);
 }
 
 // Queue a read request

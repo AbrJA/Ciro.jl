@@ -12,7 +12,6 @@ function hello(req)
 end
 
 function large_payload(req)
-    # Test with 5MB payload
     data = repeat("A", 5 * 1024 * 1024)
     return text(data)
 end
@@ -29,12 +28,18 @@ function get_user(req, id)
     return json(Dict("user_id" => String(id)))
 end
 
+function health(req)
+    return json(Dict("status" => "healthy"))
+end
+
 # --- Define routes ---
 
 @routes App begin
+    middleware(Logger)
     ("GET", "/") => index
     ("GET", "/hello") => hello
     ("GET", "/large") => large_payload
+    ("GET", "/health") => health
     ("POST", "/data") => post_data
     ("GET", "/json") => json_response
     ("GET", "/user/:id") => get_user
