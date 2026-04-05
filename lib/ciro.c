@@ -6,6 +6,8 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netinet/tcp.h>
+#include <errno.h>
+#include <signal.h>
 
 #define BUFFER_SIZE 8192
 
@@ -15,6 +17,7 @@ typedef struct {
     op_type type;
     int fd;
     char buffer[BUFFER_SIZE];
+    int flags;  // Bit flags: CLOSE=1, WS=2, TLS=4
     struct sockaddr_in addr;
     socklen_t addr_len;
 } conn_t;
@@ -40,6 +43,8 @@ char* get_conn_buffer(conn_t* conn) { return conn->buffer; }
 int get_conn_buffer_size() { return BUFFER_SIZE; }
 void set_conn_op_type(conn_t* conn, int t) { conn->type = (op_type)t; }
 void set_conn_fd(conn_t* conn, int fd) { conn->fd = fd; }
+int get_conn_flags(conn_t* conn) { return conn->flags; }
+void set_conn_flags(conn_t* conn, int flags) { conn->flags = flags; }
 
 static void set_tcp_nodelay(int fd) {
     int flag = 1;
@@ -101,20 +106,12 @@ struct engine_state* init_engine(int port, int queue_depth) {
         return NULL;
     }
 
-    // Use SQPOLL for kernel-side submission (reduces syscalls)
-    struct io_uring_params params;
-    memset(&params, 0, sizeof(params));
-    params.flags = IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SINGLE_ISSUER;
-
-    int ret = io_uring_queue_init_params(queue_depth, &state->ring, &params);
+    // Plain init — avoid COOP_TASKRUN which conflicts with Julia's signal handlers
+    int ret = io_uring_queue_init(queue_depth, &state->ring, 0);
     if (ret < 0) {
-        // Fallback: try without advanced flags
-        ret = io_uring_queue_init(queue_depth, &state->ring, 0);
-        if (ret < 0) {
-            close(state->server_fd);
-            free(state);
-            return NULL;
-        }
+        close(state->server_fd);
+        free(state);
+        return NULL;
     }
 
     return state;
@@ -198,10 +195,20 @@ conn_t* wait_completion(struct engine_state* state, int* res, int timeout_ms) {
         .tv_nsec = (long long)(timeout_ms % 1000) * 1000000
     };
 
-    int ret = io_uring_wait_cqe_timeout(&state->ring, &cqe, &ts);
+    // Block SIGUSR2 (Julia GC signal) during io_uring wait
+    sigset_t mask, oldmask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGUSR2);
+    pthread_sigmask(SIG_BLOCK, &mask, &oldmask);
+
+    int ret;
+    do {
+        ret = io_uring_wait_cqe_timeout(&state->ring, &cqe, &ts);
+    } while (ret == -EINTR);
+
+    pthread_sigmask(SIG_SETMASK, &oldmask, NULL);
 
     if (ret < 0) {
-        // -ETIME, -EAGAIN, -EINTR etc.
         return NULL;
     }
 

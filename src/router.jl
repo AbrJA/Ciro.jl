@@ -1,4 +1,4 @@
-module StaticRouter
+module Router
 
 using StringViews
 using ..Types
@@ -59,8 +59,8 @@ end
 mutable struct TrieNode
     static_children::Dict{String, TrieNode}
     param_child::Union{Nothing, Tuple{Symbol, TrieNode}}
-    wildcard_child::Union{Nothing, Tuple{Symbol, Any}}  # (name, handler_func)
-    handler::Union{Nothing, Any}  # just the func (Expr/Symbol)
+    wildcard_child::Union{Nothing, Tuple{Symbol, Any}}
+    handler::Union{Nothing, Any}
 end
 
 TrieNode() = TrieNode(Dict{String,TrieNode}(), nothing, nothing, nothing)
@@ -87,12 +87,10 @@ function insert_route!(root::TrieNode, segments, func)
 end
 
 # --- Code Generation from Trie ---
-# `accumulated_params` tracks the param symbols captured during trie walk
 
 function generate_trie_dispatch(node::TrieNode, depth::Int, middlewares, accumulated_params::Vector{Symbol})
     stmts = Expr[]
 
-    # If this node has a handler — match when path is fully consumed
     if node.handler !== nothing
         func = node.handler
         handler_call = :($(esc(func))(req, $(accumulated_params...)))
@@ -109,13 +107,14 @@ function generate_trie_dispatch(node::TrieNode, depth::Int, middlewares, accumul
         child_code = generate_trie_dispatch(child, depth + 1, middlewares, accumulated_params)
         push!(stmts, quote
             if _idx <= _len
-                _end = StaticRouter.find_next_slash(req.path, _idx)
-                if _end == 0
+                _end = Router.find_next_slash(req.path, _idx)
+                if _end == 0 || _end > _len
                     _end = _len + 1
                 end
-                if StaticRouter.segment_eq(req.path, _idx, _end, $seg_str)
+                if Router.segment_eq(req.path, _idx, _end, $seg_str)
                     _idx_save = _idx
-                    _idx = StaticRouter.skip_slashes(req.path, _end)
+                    _idx = Router.skip_slashes(req.path, _end)
+                    _idx > _len && (_idx = _len + 1)
                     $child_code
                     _idx = _idx_save
                 end
@@ -123,21 +122,22 @@ function generate_trie_dispatch(node::TrieNode, depth::Int, middlewares, accumul
         end)
     end
 
-    # Param child — capture segment as SubString
+    # Param child
     if node.param_child !== nothing
         (param_sym, child) = node.param_child
         new_params = vcat(accumulated_params, [param_sym])
         child_code = generate_trie_dispatch(child, depth + 1, middlewares, new_params)
         push!(stmts, quote
             if _idx <= _len
-                _end = StaticRouter.find_next_slash(req.path, _idx)
-                if _end == 0
+                _end = Router.find_next_slash(req.path, _idx)
+                if _end == 0 || _end > _len
                     _end = _len + 1
                 end
                 if _idx < _end
                     $(param_sym) = view(req.path, _idx:_end-1)
                     _idx_save = _idx
-                    _idx = StaticRouter.skip_slashes(req.path, _end)
+                    _idx = Router.skip_slashes(req.path, _end)
+                    _idx > _len && (_idx = _len + 1)
                     $child_code
                     _idx = _idx_save
                 end
@@ -145,7 +145,7 @@ function generate_trie_dispatch(node::TrieNode, depth::Int, middlewares, accumul
         end)
     end
 
-    # Wildcard — match rest of path
+    # Wildcard
     if node.wildcard_child !== nothing
         (wsym, func) = node.wildcard_child
         handler_call = :($(esc(func))(req, $(accumulated_params...)))
@@ -174,7 +174,6 @@ function wrap_with_middlewares(handler_call, middlewares)
         end
     end
 
-    # Build from inside out: innermost = handler
     inner = handler_call
     for mw in reverse(middlewares)
         prev = inner
@@ -211,13 +210,14 @@ macro routes(app_type::Symbol, block)
             if line.head == :call && line.args[1] == :middleware
                 push!(middlewares, line.args[2])
             elseif line.head == :call && line.args[1] == :(=>)
-                if length(line.args[2].args) == 2
-                    (method, path) = line.args[2].args
-                    func = line.args[3]
-                    if !haskey(routes_by_method, method)
-                        routes_by_method[method] = Vector{Tuple}()
-                    end
-                    push!(routes_by_method[method], (path, func))
+                _add_route!(routes_by_method, line)
+            elseif line.head == :call && line.args[1] == :group
+                # Route groups: group("/prefix", ("GET", "/path") => handler, ...)
+                prefix = line.args[2]
+                for i in 3:length(line.args)
+                    arg = line.args[i]
+                    arg isa Expr || continue
+                    _add_route!(routes_by_method, arg; prefix=string(prefix))
                 end
             end
         end
@@ -228,7 +228,6 @@ macro routes(app_type::Symbol, block)
 
     for (method, routes) in routes_by_method
         root = TrieNode()
-
         for (path, func) in routes
             segments = parse_route_pattern(path)
             insert_route!(root, segments, func)
@@ -236,7 +235,6 @@ macro routes(app_type::Symbol, block)
 
         trie_code = generate_trie_dispatch(root, 0, middlewares, Symbol[])
 
-        # Use Methods enum for fast method dispatch
         method_tag = if method == "GET"
             :(Methods.GET)
         elseif method == "POST"
@@ -259,7 +257,11 @@ macro routes(app_type::Symbol, block)
             if _method == $method_tag
                 _idx = 1
                 _len = ncodeunits(req.path)
-                _idx = StaticRouter.skip_slashes(req.path, _idx)
+                # Strip query string — route matching ignores ?key=value
+                for _qi in 1:_len
+                    @inbounds codeunit(req.path, _qi) == UInt8('?') && (_len = _qi - 1; break)
+                end
+                _idx = Router.skip_slashes(req.path, _idx)
                 $trie_code
             end
         end)
@@ -268,11 +270,27 @@ macro routes(app_type::Symbol, block)
     dispatch_body = Expr(:block, method_blocks..., :(return Response(404, "Not Found")))
 
     quote
-        struct $(esc(app_type)) <: StaticRouter.AbstractApp end
+        struct $(esc(app_type)) <: Router.AbstractApp end
 
-        function StaticRouter.dispatch(::$(esc(app_type)), req::Request)
+        function Router.dispatch(::$(esc(app_type)), req::Request)
             _method = Methods.from_string(req.method)
             $dispatch_body
+        end
+    end
+end
+
+# Helper to extract route from a => expression
+function _add_route!(routes_by_method, expr; prefix::String="")
+    if expr isa Expr && expr.head == :call && expr.args[1] == :(=>) && length(expr.args) >= 3
+        tuple_expr = expr.args[2]
+        if tuple_expr isa Expr && length(tuple_expr.args) >= 2
+            method = tuple_expr.args[1]
+            path = string(prefix, tuple_expr.args[2])
+            func = expr.args[3]
+            if !haskey(routes_by_method, method)
+                routes_by_method[method] = Vector{Tuple}()
+            end
+            push!(routes_by_method[method], (path, func))
         end
     end
 end

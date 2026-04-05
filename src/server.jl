@@ -4,7 +4,10 @@ using Base.Threads
 using PicoHTTPParser
 using ..Types
 using ..Types: status_line, hasheader
-using ..StaticRouter: AbstractApp, dispatch
+using ..Router: AbstractApp, dispatch
+
+# Configurable request size limit (default 1 MB)
+const MAX_BODY_SIZE = Ref{Int}(1_048_576)
 
 export start_server, stop_server
 
@@ -82,12 +85,16 @@ end
 
 mutable struct PendingWrites
     slots::Vector{Union{Nothing, Vector{UInt8}}}
+    close_after::BitVector
 end
 
-PendingWrites(max_fd::Int) = PendingWrites(Vector{Union{Nothing, Vector{UInt8}}}(nothing, max_fd))
+PendingWrites(max_fd::Int) = PendingWrites(
+    Vector{Union{Nothing, Vector{UInt8}}}(nothing, max_fd),
+    falses(max_fd)
+)
 
-@inline function pw_set!(pw::PendingWrites, fd::Int, buf::Vector{UInt8})
-    idx = fd + 1  # fd is 0-based
+@inline function pw_set!(pw::PendingWrites, fd::Integer, buf::Vector{UInt8})
+    idx = Int(fd) + 1  # fd is 0-based
     if idx > length(pw.slots)
         resize!(pw.slots, max(idx, length(pw.slots) * 2))
         for i in (length(pw.slots) - (idx - length(pw.slots))):length(pw.slots)
@@ -97,8 +104,8 @@ PendingWrites(max_fd::Int) = PendingWrites(Vector{Union{Nothing, Vector{UInt8}}}
     @inbounds pw.slots[idx] = buf
 end
 
-@inline function pw_pop!(pw::PendingWrites, fd::Int)::Union{Nothing, Vector{UInt8}}
-    idx = fd + 1
+@inline function pw_pop!(pw::PendingWrites, fd::Integer)::Union{Nothing, Vector{UInt8}}
+    idx = Int(fd) + 1
     idx > length(pw.slots) && return nothing
     @inbounds buf = pw.slots[idx]
     @inbounds pw.slots[idx] = nothing
@@ -164,14 +171,22 @@ function worker_loop(app::AbstractApp, port::Int, thread_id::Int)
 
             events = 0
             if conn_ptr != C_NULL
-                handle_event(app, engine, conn_ptr, res[], pending, buffer_pool, conn_pool, accept_conn)
+                try
+                    handle_event(app, engine, conn_ptr, res[], pending, buffer_pool, conn_pool, accept_conn)
+                catch ex
+                    @error "handle_event error" exception=(ex, catch_backtrace())
+                end
                 events += 1
 
                 for _ in 2:batch_size
-                    conn_ptr = ccall((:wait_completion, lib), Ptr{Cvoid},
-                        (Ptr{Cvoid}, Ref{Cint}, Cint), engine, res, 0)
+                    conn_ptr = ccall((:poll_completion, lib), Ptr{Cvoid},
+                        (Ptr{Cvoid}, Ref{Cint}), engine, res)
                     conn_ptr == C_NULL && break
-                    handle_event(app, engine, conn_ptr, res[], pending, buffer_pool, conn_pool, accept_conn)
+                    try
+                        handle_event(app, engine, conn_ptr, res[], pending, buffer_pool, conn_pool, accept_conn)
+                    catch ex
+                        @error "handle_event error" exception=(ex, catch_backtrace())
+                    end
                     events += 1
                 end
             end
@@ -235,18 +250,37 @@ function handle_read(app, engine, conn_ptr, fd, bytes_read, pending, buffer_pool
 
     # Parse & dispatch
     req_parsed = PicoHTTPParser.parse_request(raw_data)
-    response = if req_parsed !== nothing
-        dispatch(app, req_parsed)
-    else
+
+    # Check request size limit
+    response = if req_parsed === nothing
         Response(400, "Bad Request")
+    elseif bytes_read > MAX_BODY_SIZE[]
+        Response(413, "Request Entity Too Large")
+    else
+        dispatch(app, req_parsed)
+    end
+
+    # Check Connection: close header
+    should_close = false
+    if req_parsed !== nothing
+        for (k, v) in req_parsed.headers
+            if String(k) == "Connection" && String(v) == "close"
+                should_close = true; break
+            end
+        end
     end
 
     # Serialize HTTP response
     out_buf = serialize_response(response, buffer_pool)
     final_len = length(out_buf)
 
-    # Track buffer to prevent GC during async write
+    # Track buffer and close flag
     pw_set!(pending, fd, out_buf)
+    if should_close
+        idx = Int(fd) + 1
+        idx > length(pending.close_after) && resize!(pending.close_after, idx)
+        pending.close_after[idx] = true
+    end
 
     GC.@preserve out_buf begin
         ccall((:queue_write, lib), Cvoid, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, Cint),
@@ -257,6 +291,15 @@ end
 function handle_write(engine, conn_ptr, fd, pending, buffer_pool, conn_pool)
     buf = pw_pop!(pending, fd)
     buf !== nothing && release_buffer(buffer_pool, buf)
+
+    # Check Connection: close flag
+    idx = Int(fd) + 1
+    if idx <= length(pending.close_after) && pending.close_after[idx]
+        pending.close_after[idx] = false
+        ccall(:close, Cint, (Cint,), fd)
+        release_conn(conn_pool, conn_ptr)
+        return
+    end
 
     # Keep-alive: queue next read
     set_conn_op_type!(conn_ptr, 1)

@@ -3,7 +3,7 @@ module Middlewares
 using ..Types
 using ..Types: Methods
 
-export Logger, CORS, cors
+export Logger, CORS, cors, RequestId, Timing
 
 # --- Logger Middleware ---
 
@@ -40,6 +40,22 @@ function CORS(req, next)
     end
     response = next(req)
     push!(response.headers, "Access-Control-Allow-Origin" => "*")
+    return response
+end
+
+# --- Observability Middleware ---
+
+function RequestId(req, next)
+    response = next(req)
+    push!(response.headers, "X-Request-Id" => string(Threads.threadid(), '-', time_ns()))
+    return response
+end
+
+function Timing(req, next)
+    start = time_ns()
+    response = next(req)
+    elapsed_ms = (time_ns() - start) / 1_000_000
+    push!(response.headers, "X-Response-Time" => string(round(elapsed_ms; digits=3), "ms"))
     return response
 end
 

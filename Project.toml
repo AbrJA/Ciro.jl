@@ -1,10 +1,13 @@
 name = "Ciro"
 uuid = "655fe02a-3bfd-4ae8-acc9-72bd0b20a31a"
 authors = ["AbrJA <abraham.jaimes.mx@gmail.com>"]
-version = "0.3.0"
+version = "0.4.0"
 
 [deps]
+Base64 = "2a0f44e3-6c83-55bd-87e4-b1978d98bd5f"
 PicoHTTPParser = "7dfb699f-0de3-4c94-bc59-7670dfa845e2"
+SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
+Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
 StringViews = "354b36f9-a18e-4713-926e-db85100087ba"
 
 [weakdeps]
