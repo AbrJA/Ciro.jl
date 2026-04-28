@@ -1,0 +1,214 @@
+#include <liburing.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+
+#define BUFFER_SIZE 2048
+
+typedef enum { ACCEPT, READ, WRITE } op_type;
+
+typedef struct {
+    op_type type;
+    int fd;
+    char buffer[BUFFER_SIZE];
+    struct sockaddr_in addr;
+    socklen_t addr_len;
+} conn_t;
+
+struct engine_state {
+    struct io_uring ring;
+    int server_fd;
+};
+
+// Allocation helper for Julia
+conn_t* create_connection() {
+    return (conn_t*)calloc(1, sizeof(conn_t));
+}
+
+void free_connection(conn_t* conn) {
+    free(conn);
+}
+
+int setup_server_socket(int port) {
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd < 0) {
+        perror("socket");
+        return -1;
+    }
+
+    int opt = 1;
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt))) {
+        perror("setsockopt reuseaddr");
+        close(server_fd);
+        return -1;
+    }
+
+    // Enable SO_REUSEPORT for multithreaded load balancing
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt))) {
+        perror("setsockopt reuseport");
+        close(server_fd);
+        return -1;
+    }
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(port);
+
+    if (bind(server_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        perror("bind");
+        close(server_fd);
+        return -1;
+    }
+
+    if (listen(server_fd, 4096) < 0) {
+        perror("listen");
+        close(server_fd);
+        return -1;
+    }
+
+    return server_fd;
+}
+
+// Initialization - returns NULL on failure
+struct engine_state* init_engine(int port, int queue_depth) {
+    struct engine_state* state = malloc(sizeof(struct engine_state));
+    if (!state) {
+        return NULL;
+    }
+
+    state->server_fd = setup_server_socket(port);
+    if (state->server_fd < 0) {
+        free(state);
+        return NULL;
+    }
+
+    int ret = io_uring_queue_init(queue_depth, &state->ring, 0);
+    if (ret < 0) {
+        close(state->server_fd);
+        free(state);
+        return NULL;
+    }
+
+    return state;
+}
+
+// Cleanup - properly releases all resources
+void cleanup_engine(struct engine_state* state) {
+    if (!state) return;
+    io_uring_queue_exit(&state->ring);
+    if (state->server_fd >= 0) {
+        close(state->server_fd);
+    }
+    free(state);
+}
+
+// Get server fd for external shutdown signaling
+int get_server_fd(struct engine_state* state) {
+    return state ? state->server_fd : -1;
+}
+
+// Queue an accept request
+void queue_accept(struct engine_state* state, conn_t* conn) {
+    struct io_uring_sqe *sqe = io_uring_get_sqe(&state->ring);
+    conn->type = ACCEPT;
+    conn->addr_len = sizeof(conn->addr);
+
+    io_uring_prep_accept(sqe, state->server_fd, (struct sockaddr*)&conn->addr, &conn->addr_len, 0);
+    io_uring_sqe_set_data(sqe, conn);
+    io_uring_submit(&state->ring);
+}
+
+// Queue a read request
+// Queue a read request
+void queue_read(struct engine_state* state, conn_t* conn) {
+    struct io_uring_sqe *sqe = io_uring_get_sqe(&state->ring);
+    if (!sqe) {
+        // Handle full SQ: submit and retry? Or just return error?
+        // For now, let's just submit and try once more
+        io_uring_submit(&state->ring);
+        sqe = io_uring_get_sqe(&state->ring);
+        if (!sqe) return; // Dropped :(
+    }
+    conn->type = READ;
+    // Read into standard buffer
+    io_uring_prep_read(sqe, conn->fd, conn->buffer, BUFFER_SIZE - 1, 0);
+    io_uring_sqe_set_data(sqe, conn);
+    // Don't auto submit
+    // io_uring_submit(&state->ring);
+}
+
+// Queue a write request
+// Queue a write request - ZERO COPY
+// Caller (Julia) MUST ensure data stays alive until completion!
+void queue_write(struct engine_state* state, conn_t* conn, const char* data, int len) {
+    struct io_uring_sqe *sqe = io_uring_get_sqe(&state->ring);
+    if (!sqe) {
+        io_uring_submit(&state->ring);
+        sqe = io_uring_get_sqe(&state->ring);
+        if (!sqe) return;
+    }
+    conn->type = WRITE;
+
+    io_uring_prep_write(sqe, conn->fd, data, len, 0);
+    io_uring_sqe_set_data(sqe, conn);
+    // io_uring_submit(&state->ring);
+}
+
+// 2. Add bulk submission support
+int submit_pending(struct engine_state* state) {
+    return io_uring_submit(&state->ring);
+}
+
+// 3. Add wait_cqe for better CPU usage
+conn_t* wait_completion(struct engine_state* state, int* res, int timeout_ms) {
+    struct io_uring_cqe *cqe;
+    struct __kernel_timespec ts = {
+        .tv_sec = timeout_ms / 1000,
+        .tv_nsec = (long long)(timeout_ms % 1000) * 1000000
+    };
+
+    int ret = io_uring_wait_cqe_timeout(&state->ring, &cqe, &ts);
+
+    if (ret < 0) {
+        // -ETIME, -EAGAIN, -EINTR etc.
+        return NULL;
+    }
+
+    conn_t* conn = (conn_t*)io_uring_cqe_get_data(cqe);
+    *res = cqe->res;
+    io_uring_cqe_seen(&state->ring, cqe);
+    return conn;
+}
+
+// 4. Use io_uring multishot accept (kernel 5.19+)
+void queue_multishot_accept(struct engine_state* state, conn_t* conn) {
+    struct io_uring_sqe *sqe = io_uring_get_sqe(&state->ring);
+    if (!sqe) return;
+
+    conn->type = ACCEPT;
+    // Multishot accept: Keep issuing accepts!
+    io_uring_prep_multishot_accept(sqe, state->server_fd, NULL, NULL, 0);
+    io_uring_sqe_set_data(sqe, conn);
+    io_uring_submit(&state->ring);
+}
+
+// Non-blocking check for completions
+// Non-blocking check for completions (optional now)
+conn_t* poll_completion(struct engine_state* state, int* res) {
+    struct io_uring_cqe *cqe;
+    int ret = io_uring_peek_cqe(&state->ring, &cqe);
+    if (ret < 0) return NULL;
+
+    conn_t* conn = (conn_t*)io_uring_cqe_get_data(cqe);
+    *res = cqe->res;
+
+    io_uring_cqe_seen(&state->ring, cqe);
+    return conn;
+}
+
+// Compile: gcc -shared -fPIC -o ./lib/ciro.so ./lib/ciro.c -luring

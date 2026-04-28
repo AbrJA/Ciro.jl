@@ -1,4 +1,7 @@
-using Test, Example
+using Test
+using Ciro
 
-@test hello("Julia") == "Hello, Julia"
-@test domath(2.0) ≈ 7.0
+include("trie_test.jl")
+include("router_test.jl")
+include("types_test.jl")
+include("server_utils_test.jl")
