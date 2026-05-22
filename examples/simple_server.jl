@@ -17,5 +17,5 @@ post("/echo") do req, params
 end
 
 # Start server
-println("Starting server on 8080...")
 start_server(8080)
+
