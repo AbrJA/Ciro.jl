@@ -6,7 +6,7 @@ using PicoHTTPParser
 using ..Types
 using ..Tries
 using ..Routers: GLOBAL_ROUTER
-
+using ..StaticRouter: StaticRouter, AbstractApp, dispatch
 export start_server, stop_server
 
 const lib = joinpath(@__DIR__, "../lib/ciro.so")
@@ -76,7 +76,7 @@ function release_buffer(pool::Vector{Vector{UInt8}}, buf::Vector{UInt8})
 end
 
 
-function start_server(port=8080)
+function start_server(port=8080, app::Union{AbstractApp,Nothing}=nothing)
     nt = Threads.nthreads()
     println("🚀 Julia io_uring backend starting on port $port with $nt threads")
     atomic_xchg!(SERVER_RUNNING, true)
@@ -91,7 +91,7 @@ function start_server(port=8080)
 
     try
         @threads for i in 1:nt
-            worker_loop(port, i)
+            worker_loop(port, i, app)
         end
     catch e
         if e isa InterruptException
@@ -107,7 +107,7 @@ function stop_server()
     atomic_xchg!(SERVER_RUNNING, false)
 end
 
-function worker_loop(port, thread_id)
+function worker_loop(port, thread_id, app)
     engine = ccall((:init_engine, lib), Ptr{Cvoid}, (Cint, Cint), port, 4096)
     if engine == C_NULL
         error("[Thread $thread_id] Failed to initialize engine on port $port")
@@ -136,7 +136,7 @@ function worker_loop(port, thread_id)
 
             events_processed = 0
             if conn_ptr != C_NULL
-                handle_event(engine, conn_ptr, res[], pending_writes, buffer_pool, conn_pool, accept_conn, reusable_params)
+                handle_event(engine, conn_ptr, res[], pending_writes, buffer_pool, conn_pool, accept_conn, reusable_params, app)
                 events_processed += 1
 
                 # Process up to 63 more (batch 64)
@@ -145,7 +145,7 @@ function worker_loop(port, thread_id)
                     if conn_ptr == C_NULL
                         break
                     end
-                    handle_event(engine, conn_ptr, res[], pending_writes, buffer_pool, conn_pool, accept_conn, reusable_params)
+                    handle_event(engine, conn_ptr, res[], pending_writes, buffer_pool, conn_pool, accept_conn, reusable_params, app)
                     events_processed += 1
                 end
             end
@@ -169,7 +169,7 @@ function worker_loop(port, thread_id)
     end
 end
 
-function handle_event(engine, conn_ptr, res, pending_writes, buffer_pool, conn_pool, accept_conn, reusable_params)
+function handle_event(engine, conn_ptr, res, pending_writes, buffer_pool, conn_pool, accept_conn, reusable_params, app)
     # Check if it is the ACCEPT cqe
     # Since we use multishot, we get the same accept_conn pointer back every time a new connection arrives!
 
@@ -226,8 +226,11 @@ function handle_event(engine, conn_ptr, res, pending_writes, buffer_pool, conn_p
             handler, params = Tries.lookup!(GLOBAL_ROUTER.trie, req_parsed.method, req_parsed.path, reusable_params)
 
             response = nothing
-            if handler !== nothing
-                # Middlewares
+            if app !== nothing
+                # Fast Static Path
+                response = dispatch(app, req_parsed)
+            elseif handler !== nothing
+                # Dynamic/Middleware Path
                 final_handler = handler
                 for mw in reverse(GLOBAL_ROUTER.middlewares)
                     final_handler = mw(final_handler)
@@ -235,7 +238,7 @@ function handle_event(engine, conn_ptr, res, pending_writes, buffer_pool, conn_p
 
                 try
                     res_obj = final_handler(req_parsed, params)
-                    if isa(res_obj, Response)
+                    if isa(res_obj, Response) || isa(res_obj, PreRenderedResponse)
                         response = res_obj
                     else
                         response = text(string(res_obj))
@@ -251,9 +254,20 @@ function handle_event(engine, conn_ptr, res, pending_writes, buffer_pool, conn_p
             response = Response(400, "Bad Request")
         end
 
-        # Generate Response Buffer (Zero Alloc)
+        # Handle Pre-rendered vs Normal
+        if isa(response, PreRenderedResponse)
+            out_buf = response.data
+            final_len = length(out_buf)
+            # Anchor
+            pending_writes[conn_ptr] = out_buf
+            # Queue Write
+            ccall((:queue_write, lib), Cvoid, (Ptr{Cvoid}, Ptr{Conn}, Ptr{UInt8}, Cint),
+                engine, conn_ptr, pointer(out_buf), final_len)
+            return
+        end
 
-        # Calculate size
+        # Generate Response Buffer (Zero Alloc)
+        # Calculate size ...
         # Status line: "HTTP/1.1 XXX OK\r\n" -> ~17 chars
         status_len = 15 # "HTTP/1.1 200 OK" simplified
         if response.status != 200
@@ -265,11 +279,14 @@ function handle_event(engine, conn_ptr, res, pending_writes, buffer_pool, conn_p
 
         # Headers length
         headers_len = 0
+        has_len = false
         for (k, v) in response.headers
             headers_len += sizeof(k) + 2 + sizeof(v) + 2 # ": " and "\r\n"
+            if k == "Content-Length"
+                has_len = true
+            end
         end
 
-        has_len = haskey(response.headers, "Content-Length")
         if !has_len
             headers_len += 16 + 10 + 2 # "Content-Length: " + len + "\r\n" (approx)
         end
