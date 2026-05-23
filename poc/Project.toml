@@ -1,0 +1,21 @@
+name = "CiroPOC"
+uuid = "a1b2c3d4-0099-4000-a000-000000000099"
+version = "0.1.0"
+
+[deps]
+CiroBackend = "a1b2c3d4-0005-4000-a000-000000000005"
+CiroCore = "a1b2c3d4-0002-4000-a000-000000000002"
+CiroInterfaces = "a1b2c3d4-0001-4000-a000-000000000001"
+CiroMiddleware = "a1b2c3d4-0004-4000-a000-000000000004"
+CiroRouter = "a1b2c3d4-0003-4000-a000-000000000003"
+PicoHTTPParser = "7dfb699f-0de3-4c94-bc59-7670dfa845e2"
+
+[sources]
+CiroBackend = {path = "CiroBackend"}
+CiroInterfaces = {path = "CiroInterfaces"}
+CiroCore = {path = "CiroCore"}
+CiroRouter = {path = "CiroRouter"}
+CiroMiddleware = {path = "CiroMiddleware"}
+
+[compat]
+julia = "1.10"

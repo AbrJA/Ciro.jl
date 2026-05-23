@@ -1,0 +1,6 @@
+name = "CiroBackend"
+uuid = "a1b2c3d4-0005-4000-a000-000000000005"
+version = "0.1.0"
+
+[compat]
+julia = "1.10"

@@ -187,7 +187,7 @@ int submit_pending(struct engine_state* state) {
     return io_uring_submit(&state->ring);
 }
 
-// 3. Add wait_cqe for better CPU usage
+// 3. Wait for completion — no signal mask overhead (EINTR is handled by retry)
 conn_t* wait_completion(struct engine_state* state, int* res, int timeout_ms) {
     struct io_uring_cqe *cqe;
     struct __kernel_timespec ts = {
@@ -195,18 +195,10 @@ conn_t* wait_completion(struct engine_state* state, int* res, int timeout_ms) {
         .tv_nsec = (long long)(timeout_ms % 1000) * 1000000
     };
 
-    // Block SIGUSR2 (Julia GC signal) during io_uring wait
-    sigset_t mask, oldmask;
-    sigemptyset(&mask);
-    sigaddset(&mask, SIGUSR2);
-    pthread_sigmask(SIG_BLOCK, &mask, &oldmask);
-
     int ret;
     do {
         ret = io_uring_wait_cqe_timeout(&state->ring, &cqe, &ts);
     } while (ret == -EINTR);
-
-    pthread_sigmask(SIG_SETMASK, &oldmask, NULL);
 
     if (ret < 0) {
         return NULL;
@@ -216,6 +208,66 @@ conn_t* wait_completion(struct engine_state* state, int* res, int timeout_ms) {
     *res = cqe->res;
     io_uring_cqe_seen(&state->ring, cqe);
     return conn;
+}
+
+// Fast batch drain: get up to `max` completions at once, returns count
+int drain_completions(struct engine_state* state, conn_t** conns, int* results, int max) {
+    int count = 0;
+    struct io_uring_cqe *cqe;
+
+    while (count < max) {
+        int ret = io_uring_peek_cqe(&state->ring, &cqe);
+        if (ret < 0) break;
+
+        conns[count] = (conn_t*)io_uring_cqe_get_data(cqe);
+        results[count] = cqe->res;
+        io_uring_cqe_seen(&state->ring, cqe);
+        count++;
+    }
+    return count;
+}
+
+// Combined: accept fd → set fd on conn → queue read. Saves multiple ccall round-trips.
+void accept_and_queue_read(struct engine_state* state, conn_t* conn, int client_fd) {
+    conn->fd = client_fd;
+    conn->type = READ;
+
+    struct io_uring_sqe *sqe = io_uring_get_sqe(&state->ring);
+    if (!sqe) {
+        io_uring_submit(&state->ring);
+        sqe = io_uring_get_sqe(&state->ring);
+        if (!sqe) return;
+    }
+    io_uring_prep_read(sqe, client_fd, conn->buffer, BUFFER_SIZE - 1, 0);
+    io_uring_sqe_set_data(sqe, conn);
+}
+
+// Combined: queue write + mark for close after (via io_uring linked ops)
+void queue_write_and_close(struct engine_state* state, conn_t* conn, const char* data, int len) {
+    // First: queue the write
+    struct io_uring_sqe *sqe = io_uring_get_sqe(&state->ring);
+    if (!sqe) {
+        io_uring_submit(&state->ring);
+        sqe = io_uring_get_sqe(&state->ring);
+        if (!sqe) return;
+    }
+    conn->type = WRITE;
+    io_uring_prep_write(sqe, conn->fd, data, len, 0);
+    io_uring_sqe_set_data(sqe, conn);
+    // Link: next op executes only after this completes
+    sqe->flags |= IOSQE_IO_LINK;
+
+    // Second: queue close (linked, fires after write completes)
+    sqe = io_uring_get_sqe(&state->ring);
+    if (!sqe) {
+        io_uring_submit(&state->ring);
+        sqe = io_uring_get_sqe(&state->ring);
+        if (!sqe) return;
+    }
+    io_uring_prep_close(sqe, conn->fd);
+    io_uring_sqe_set_data(sqe, conn);
+    // Mark conn so Julia knows this was a close completion
+    conn->flags |= 1;  // CLOSE flag
 }
 
 // 4. Use io_uring multishot accept (kernel 5.19+)
@@ -243,4 +295,17 @@ conn_t* poll_completion(struct engine_state* state, int* res) {
     return conn;
 }
 
-// Compile: gcc -shared -fPIC -o ./lib/ciro.so ./lib/ciro.c -luring
+// Queue read after write completion (keep-alive path)
+void queue_read_reuse(struct engine_state* state, conn_t* conn) {
+    conn->type = READ;
+    struct io_uring_sqe *sqe = io_uring_get_sqe(&state->ring);
+    if (!sqe) {
+        io_uring_submit(&state->ring);
+        sqe = io_uring_get_sqe(&state->ring);
+        if (!sqe) return;
+    }
+    io_uring_prep_read(sqe, conn->fd, conn->buffer, BUFFER_SIZE - 1, 0);
+    io_uring_sqe_set_data(sqe, conn);
+}
+
+// Compile: gcc -shared -fPIC -O3 -o ./lib/ciro.so ./lib/ciro.c -luring

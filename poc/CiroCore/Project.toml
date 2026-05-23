@@ -1,0 +1,16 @@
+name = "CiroCore"
+uuid = "a1b2c3d4-0002-4000-a000-000000000002"
+version = "0.1.0"
+
+[deps]
+CiroBackend = "a1b2c3d4-0005-4000-a000-000000000005"
+CiroInterfaces = "a1b2c3d4-0001-4000-a000-000000000001"
+PicoHTTPParser = "7dfb699f-0de3-4c94-bc59-7670dfa845e2"
+
+[sources]
+CiroBackend = {path = "../CiroBackend"}
+CiroInterfaces = {path = "../CiroInterfaces"}
+
+[compat]
+PicoHTTPParser = "0.2"
+julia = "1.10"
