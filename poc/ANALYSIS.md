@@ -4,7 +4,7 @@
 
 **Julia CAN compete with Rust for web development.** After optimization, Ciro.jl
 achieves **114,153 req/s** vs Rust khttp's **117,294 req/s** (release mode) —
-within **2.7%** of parity. With keep-alive, Julia is **2.2× FASTER** (440k vs 196k).
+within **2.7%** of parity. With keep-alive, Rust is **1.08× FASTER** (440k vs 479k).
 
 ---
 
@@ -143,7 +143,7 @@ in the header. Without optimization, they become actual function calls.
 
 | Metric | Ciro (Julia) | khttp (Rust release) | Δ |
 |--------|:---:|:---:|:---:|
-| **Throughput** | **440,238 req/s** | **196,503 req/s** | **Julia 2.2× FASTER** |
+| **Throughput** | **440,238 req/s** | **479,004 req/s** | **Rust 1.08× FASTER** |
 | Average latency | 1.16ms | 0.16ms | Rust 7× better |
 
 ### Improvement summary
@@ -249,7 +249,6 @@ No thread creation, no memory allocation, just CQE processing.
 ## 7. Is It Worth It? — Honest Assessment
 
 ### YES, if:
-- Your workload is keep-alive (95% of real production APIs) → **Julia is 2× faster**
 - You need a compiled binary (JuliaC) → **2MB, zero-dependency**
 - You want one language for ML + API serving → **Julia does both**
 - You care about worst-case latency → **Julia has no 1-second outliers**
