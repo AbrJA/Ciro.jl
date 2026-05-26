@@ -1,6 +1,6 @@
 using Test
-using Router
-using Interfaces
+using Ciro
+using PicoHTTPParser
 
 @testset "Router" begin
 
@@ -10,15 +10,9 @@ using Interfaces
         get!(r, "/about", req -> text("about"))
         post!(r, "/items", req -> text("created"))
 
-        # Match
-        h = route(r, Methods.GET, "/")
-        @test h !== nothing
-
-        h = route(r, Methods.GET, "/about")
-        @test h !== nothing
-
-        h = route(r, Methods.POST, "/items")
-        @test h !== nothing
+        @test route(r, Methods.GET, "/") !== nothing
+        @test route(r, Methods.GET, "/about") !== nothing
+        @test route(r, Methods.POST, "/items") !== nothing
 
         # No match
         @test route(r, Methods.GET, "/missing") === nothing
@@ -34,8 +28,6 @@ using Interfaces
         # Single param
         h = route(r, Methods.GET, "/users/42")
         @test h !== nothing
-        # Call the handler — it should set task-local params
-        using PicoHTTPParser
         raw = Vector{UInt8}("GET /users/42 HTTP/1.1\r\nHost: x\r\n\r\n")
         req = PicoHTTPParser.parse_request(raw)
         resp = h(req)
@@ -71,7 +63,6 @@ using Interfaces
         get!(r, "/items/:id", req -> text("param"))
         get!(r, "/items/*", req -> text("wildcard"))
 
-        using PicoHTTPParser
         raw = Vector{UInt8}("GET /items/special HTTP/1.1\r\nHost: x\r\n\r\n")
         req = PicoHTTPParser.parse_request(raw)
 
@@ -101,7 +92,6 @@ using Interfaces
         put!(r, "/resource", req -> text("put"))
         delete!(r, "/resource", req -> text("delete"))
 
-        using PicoHTTPParser
         raw = Vector{UInt8}("GET /resource HTTP/1.1\r\nHost: x\r\n\r\n")
         req = PicoHTTPParser.parse_request(raw)
 
@@ -118,11 +108,10 @@ using Interfaces
         @test String(copy(h4(req).body)) == "delete"
     end
 
-    @testset "Handler invocation" begin
+    @testset "Handler invocation with params" begin
         r = Trie()
         get!(r, "/hello/:name", req -> text("Hello, $(param(:name))!"))
 
-        using PicoHTTPParser
         raw = Vector{UInt8}("GET /hello/Julia HTTP/1.1\r\nHost: x\r\n\r\n")
         req = PicoHTTPParser.parse_request(raw)
 
@@ -132,11 +121,10 @@ using Interfaces
         @test String(copy(resp.body)) == "Hello, Julia!"
     end
 
-    @testset "Trailing slashes" begin
+    @testset "Trailing slashes normalized" begin
         r = Trie()
         get!(r, "/path", req -> text("no-slash"))
 
-        # Trailing slash is normalized — matches (lenient mode)
         @test route(r, Methods.GET, "/path/") !== nothing
         @test route(r, Methods.GET, "/path") !== nothing
     end

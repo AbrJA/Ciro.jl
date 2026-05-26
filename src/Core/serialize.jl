@@ -9,7 +9,7 @@ Serialize HTTP response into pre-allocated buffer. Returns bytes written.
 Zero-allocation for the common path (status line is a const String).
 """
 function serialize_response!(buf::Vector{UInt8}, response::Response)::Int
-    sl = status_line(response.status)
+    sl = Interfaces.status(response.status)
     sl_len = sizeof(sl)
 
     # Calculate total size needed
@@ -18,7 +18,7 @@ function serialize_response!(buf::Vector{UInt8}, response::Response)::Int
         headers_len += sizeof(k) + 2 + sizeof(v) + 2  # "key: value\r\n"
     end
 
-    has_cl = hasheader(response, "Content-Length")
+    has_cl = Interfaces.hasheader(response, "Content-Length")
     body_len = length(response.body)
 
     if !has_cl

@@ -1,5 +1,6 @@
 using Test
 using Ciro
+using PicoHTTPParser
 
 @testset "Interfaces" begin
 
@@ -47,21 +48,21 @@ using Ciro
         r = redirect("/new"; status=301)
         @test r.status == 301
 
-        r = error_response(404, "Not Found")
+        r = fail(404, "Not Found")
         @test r.status == 404
         @test String(copy(r.body)) == "Not Found"
 
-        r = error_response(500)
+        r = fail(500)
         @test r.status == 500
         @test isempty(r.body)
     end
 
-    @testset "Response utilities" begin
+    @testset "Response header utilities" begin
         r = Response(200, ["Content-Type" => "text/plain", "X-Custom" => "val"], UInt8[])
         @test hasheader(r, "Content-Type")
         @test !hasheader(r, "X-Missing")
-        @test getheader(r, "X-Custom") == "val"
-        @test getheader(r, "X-Missing", "default") == "default"
+        @test header(r, "X-Custom") == "val"
+        @test header(r, "X-Missing", "default") == "default"
     end
 
     @testset "Status lines" begin
@@ -70,12 +71,10 @@ using Ciro
         @test status(500) == "HTTP/1.1 500 Internal Server Error\r\n"
         @test status(201) == "HTTP/1.1 201 Created\r\n"
         @test status(204) == "HTTP/1.1 204 No Content\r\n"
-        # Unknown status
         @test contains(status(418), "HTTP/1.1 418")
     end
 
     @testset "Request header access" begin
-        using PicoHTTPParser
         raw = Vector{UInt8}("GET /test HTTP/1.1\r\nHost: localhost\r\nX-Custom: hello\r\n\r\n")
         req = PicoHTTPParser.parse_request(raw)
         @test header(req, "Host") == "localhost"
@@ -84,7 +83,6 @@ using Ciro
     end
 
     @testset "Path/query utilities" begin
-        using PicoHTTPParser
         raw = Vector{UInt8}("GET /path?foo=bar&baz=1 HTTP/1.1\r\nHost: x\r\n\r\n")
         req = PicoHTTPParser.parse_request(raw)
         @test path(req) == "/path"
@@ -98,16 +96,14 @@ using Ciro
 
     @testset "NullLogger" begin
         logger = NullLogger()
-        # Should not throw
-        write(logger, INFO, "test")
-        write(logger, ERROR_LEVEL, "error")
+        Ciro.Interfaces.write(logger, Info, "test")
+        Ciro.Interfaces.write(logger, Error, "error")
     end
 
-    @testset "DefaultErrorHandler" begin
-        handler = DefaultCatcher()
-        resp = handle_error(handler, ErrorException("secret internal info"), nothing)
+    @testset "DefaultCatcher" begin
+        catcher = DefaultCatcher()
+        resp = intercept(catcher, ErrorException("secret internal info"), nothing)
         @test resp.status == 500
-        # Must NOT expose internal error message (OWASP)
         body_str = String(copy(resp.body))
         @test !contains(body_str, "secret internal info")
         @test body_str == "Internal Server Error"

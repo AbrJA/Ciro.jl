@@ -1,9 +1,7 @@
 using Test
-using CiroMiddleware
-using CiroInterfaces
+using Ciro
 using PicoHTTPParser
 
-# Helper to create a request
 function make_request(method::String="GET", path::String="/")
     raw = Vector{UInt8}("$method $path HTTP/1.1\r\nHost: localhost\r\n\r\n")
     PicoHTTPParser.parse_request(raw)
@@ -14,7 +12,7 @@ function make_options_request(path::String="/")
     PicoHTTPParser.parse_request(raw)
 end
 
-@testset "CiroMiddleware" begin
+@testset "Middleware" begin
 
     @testset "WithTiming" begin
         handler = WithTiming(req -> text("ok"))
@@ -23,7 +21,6 @@ end
 
         @test resp.status == 200
         @test String(copy(resp.body)) == "ok"
-        # Must have X-Response-Time header
         timing_hdr = filter(p -> p.first == "X-Response-Time", resp.headers)
         @test length(timing_hdr) == 1
         @test endswith(timing_hdr[1].second, "ms")
@@ -98,27 +95,24 @@ end
     @testset "WithLogger" begin
         handler = WithLogger(req -> text("logged"))
         req = make_request()
-        # Should not throw, and should produce output
         resp = handler(req)
         @test resp.status == 200
         @test String(copy(resp.body)) == "logged"
     end
 
     @testset "Middleware composition" begin
-        # Stack: Timing → RequestId → handler
         composed = WithTiming(WithRequestId(req -> text("composed")))
         req = make_request()
         resp = composed(req)
 
         @test resp.status == 200
         @test String(copy(resp.body)) == "composed"
-        # Both headers present
         @test any(p -> p.first == "X-Response-Time", resp.headers)
         @test any(p -> p.first == "X-Request-Id", resp.headers)
     end
 
     @testset "Deep composition (3+ layers)" begin
-        deep = WithCORS(WithTiming(WithRequestId(req -> json_response("""{"ok":true}"""))))
+        deep = WithCORS(WithTiming(WithRequestId(req -> json("""{"ok":true}"""))))
         req = make_request()
         resp = deep(req)
 
@@ -129,16 +123,15 @@ end
         @test any(p -> p.first == "X-Request-Id", resp.headers)
     end
 
-    @testset "Custom user middleware (the pattern)" begin
-        # Demonstrates end-user can create middleware without any framework support
+    @testset "Custom user middleware pattern" begin
         struct WithAuth{H}
             handler :: H
             token   :: String
         end
 
         function (m::WithAuth)(req::PicoHTTPParser.Request)::Response
-            auth = req_header(req, "Authorization")
-            auth == "Bearer $(m.token)" || return error_response(401, "Unauthorized")
+            auth = header(req, "Authorization")
+            auth == "Bearer $(m.token)" || return fail(401, "Unauthorized")
             return m.handler(req)
         end
 

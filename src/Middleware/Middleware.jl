@@ -26,7 +26,7 @@ module Middleware
 using ..Interfaces
 using ..Interfaces: Request, Response, Methods, text, fail, header
 
-export WithLogger, WithCORS, WithTiming, WithRequestId
+export WithLogger, WithCORS, WithTiming, WithRequestId, cors
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Logger
@@ -122,6 +122,26 @@ function (m::WithRequestId)(req::Request)::Response
     id = string(Threads.threadid(), '-', time_ns())
     push!(response.headers, "X-Request-Id" => id)
     return response
+end
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CORS Factory
+# ══════════════════════════════════════════════════════════════════════════════
+
+"""
+    cors(; origins="*", methods=..., headers=..., max_age=86400)
+
+Returns a function that wraps any handler with CORS headers.
+
+```julia
+protected = cors(origins="https://mysite.com")(my_handler)
+```
+"""
+function cors(; origins="*",
+               methods="GET, POST, PUT, DELETE, PATCH, OPTIONS",
+               headers="Content-Type, Authorization, X-Requested-With",
+               max_age=86400)
+    return handler -> WithCORS(handler; origins, methods, headers, max_age)
 end
 
 end # module Middleware

@@ -12,7 +12,7 @@ trim=safe: no eval, no reflection, all concrete types.
 module Core
 
 using ..Interfaces
-using ..Interfaces: write
+using ..Interfaces: Response, status, hasheader, write
 using ..Backend
 using PicoHTTPParser
 using Base.Threads: @threads, nthreads

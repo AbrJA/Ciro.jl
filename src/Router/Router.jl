@@ -5,6 +5,9 @@ using ..Interfaces: Request, Response, Methods, AbstractRouter, text, fail
 
 export Trie, get!, post!, put!, delete!, patch!, head!, options!, params, param
 
+# Extend Base functions to avoid ambiguity with `using`
+import Base: get!, put!, delete!
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Trie Node
 # ══════════════════════════════════════════════════════════════════════════════
@@ -58,11 +61,11 @@ function Interfaces.register!(trie::Trie, method::UInt8, pattern::String, handle
     return trie
 end
 
-# Convenience registration
+# Convenience registration (extending Base where names overlap)
 Base.get!(r::Trie, p::String, h)     = (register!(r, Methods.GET, p, h); r)
 post!(r::Trie, p::String, h)    = (register!(r, Methods.POST, p, h); r)
-put!(r::Trie, p::String, h)     = (register!(r, Methods.PUT, p, h); r)
-delete!(r::Trie, p::String, h)  = (register!(r, Methods.DELETE, p, h); r)
+Base.put!(r::Trie, p::String, h)     = (register!(r, Methods.PUT, p, h); r)
+Base.delete!(r::Trie, p::String, h)  = (register!(r, Methods.DELETE, p, h); r)
 patch!(r::Trie, p::String, h)   = (register!(r, Methods.PATCH, p, h); r)
 head!(r::Trie, p::String, h)    = (register!(r, Methods.HEAD, p, h); r)
 options!(r::Trie, p::String, h) = (register!(r, Methods.OPTIONS, p, h); r)
@@ -96,8 +99,8 @@ function params()::Vector{Pair{Symbol,String}}
 end
 
 function param(name::Symbol, default::String="")::String
-    params = params()
-    for (k, v) in params
+    ps = params()
+    for (k, v) in ps
         k === name && return v
     end
     return default

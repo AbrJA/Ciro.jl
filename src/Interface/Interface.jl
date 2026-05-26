@@ -117,7 +117,21 @@ end
     return default
 end
 
-export header
+@inline function hasheader(resp::Response, key::String)::Bool
+    for (k, _) in resp.headers
+        k == key && return true
+    end
+    return false
+end
+
+@inline function hasheader(req::Request, key::String)::Bool
+    for (k, _) in req.headers
+        String(k) == key && return true
+    end
+    return false
+end
+
+export header, hasheader
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Status Line Constants (zero-allocation for common codes)
