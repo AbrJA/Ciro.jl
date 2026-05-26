@@ -1,23 +1,21 @@
+#!/usr/bin/env julia
+# Ciro.jl benchmark server — mirrors khttp routes for apples-to-apples comparison
+# Run with: julia --threads=auto --project=. benchmarks/ciro_bench.jl
 using Ciro
 
-# Handlers matching the Rust server
-index(req) = text("Welcome!")
-hello(req) = text("Hello!")
+# Handlers — same semantics as khttp/src/main.rs
+index(req)   = text("Welcome!")
+get_user(req) = text("User: $(param(:id))")
+post_user(req) = text("")
 
-function json_handler(req)
-    return Response(200, [
-        "Content-Type" => "application/json; charset=utf-8"
-    ], Vector{UInt8}("""{"message":"Hello, JSON!","status":"ok"}"""))
-end
+router = Trie()
+get!(router,  "/",          index)
+get!(router,  "/user/:id",  get_user)
+post!(router, "/user",      post_user)
 
-get_user(req, id) = text("User: " * String(id))
+server = Server(; router, port=8080, host="0.0.0.0")
 
-@routes BenchApp begin
-    ("GET", "/") => index
-    ("GET", "/hello") => hello
-    ("GET", "/json") => json_handler
-    ("GET", "/user/:id") => get_user
-end
+println("Ciro.jl benchmark server listening on :8080")
+println("Routes: GET /  |  GET /user/:id  |  POST /user")
+start!(server)
 
-println("Starting Ciro benchmark server on port 8080...")
-start_server(BenchApp(), 8080)
