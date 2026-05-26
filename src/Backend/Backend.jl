@@ -1,5 +1,5 @@
 """
-    CiroBackend
+    Backend
 
 Low-level async I/O engine built on Linux io_uring.
 Provides completion-based primitives (accept, read, write) that higher-level
@@ -11,11 +11,11 @@ Design principles:
 - Thread-per-core: one Engine per thread, no cross-thread sharing
 - Composable: event loop is a simple function users can wrap/extend
 """
-module CiroBackend
+module Backend
 
 # ── Library path (module-level const required by ccall + juliac) ─────────────
-# In production this becomes CiroBackend_jll.libciro
-const _LIB = joinpath(@__DIR__, "..", "..", "..", "lib", "ciro.so")
+# In production this becomes Ciro_jll.libciro
+const _LIB = joinpath(@__DIR__, "lib", "ciro.so")
 
 # ── Includes ────────────────────────────────────────────────────────────────
 include("types.jl")
@@ -44,4 +44,4 @@ export Engine, Connection, ConnectionPool, BufferPool,
        # Event loop
        run_eventloop!, run_eventloop_threaded!
 
-end # module CiroBackend
+end # module Backend

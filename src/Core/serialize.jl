@@ -1,5 +1,5 @@
 # ══════════════════════════════════════════════════════════════════════════════
-# Zero-copy response serialization (migrated from src/server.jl)
+# Zero-copy response serialization
 # ══════════════════════════════════════════════════════════════════════════════
 
 """

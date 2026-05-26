@@ -1,5 +1,5 @@
 """
-    CiroInterfaces
+    Interfaces
 
 The interface package for the Ciro ecosystem.
 Uses PicoHTTPParser.Request directly — zero-copy, zero-allocation parsing.
@@ -8,12 +8,12 @@ Uses PicoHTTPParser.Request directly — zero-copy, zero-allocation parsing.
 
 To create a new router:
 ```julia
-using CiroInterfaces
+using Interfaces
 struct MyRouter <: AbstractRouter end
-CiroInterfaces.route(r::MyRouter, method::UInt8, path) = ...
+Interfaces.route(r::MyRouter, method::UInt8, path) = ...
 ```
 """
-module CiroInterfaces
+module Interfaces
 
 using PicoHTTPParser
 using StringViews
@@ -82,11 +82,11 @@ end
     Response(status, ["Content-Type" => "text/html; charset=utf-8"], Vector{UInt8}(body))
 end
 
-@inline function json_response(body::String; status::Int=200)
+@inline function json(body::String; status::Int=200)
     Response(status, ["Content-Type" => "application/json; charset=utf-8"], Vector{UInt8}(body))
 end
 
-@inline function json_response(body::Vector{UInt8}; status::Int=200)
+@inline function json(body::Vector{UInt8}; status::Int=200)
     Response(status, ["Content-Type" => "application/json; charset=utf-8"], body)
 end
 
@@ -94,83 +94,67 @@ end
     Response(status, ["Location" => url], UInt8[])
 end
 
-@inline function error_response(status::Int, message::String="")
+@inline function fail(status::Int, message::String="")
     body = isempty(message) ? UInt8[] : Vector{UInt8}(message)
     Response(status, ["Content-Type" => "text/plain"], body)
 end
 
-export Response, text, html, json_response, redirect, error_response
+export Response, text, html, json, redirect, fail
 
 # ── Header utilities ────────────────────────────────────────────────────────
 
-@inline function hasheader(resp::Response, key::String)::Bool
-    for (k, _) in resp.headers
-        k == key && return true
-    end
-    return false
-end
-
-@inline function getheader(resp::Response, key::String, default::String="")::String
+@inline function header(resp::Response, key::String, default::String="")::String
     for (k, v) in resp.headers
         k == key && return v
     end
     return default
 end
 
-"""Get header from PicoHTTPParser.Request (StringView comparison)."""
-@inline function req_header(req::Request, key::String, default::String="")::String
+@inline function header(req::Request, key::String, default::String="")::String
     for (k, v) in req.headers
         String(k) == key && return String(v)
     end
     return default
 end
 
-export hasheader, getheader, req_header
+export header
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Status Line Constants (zero-allocation for common codes)
 # ══════════════════════════════════════════════════════════════════════════════
 
-const _SL_200 = "HTTP/1.1 200 OK\r\n"
-const _SL_201 = "HTTP/1.1 201 Created\r\n"
-const _SL_204 = "HTTP/1.1 204 No Content\r\n"
-const _SL_301 = "HTTP/1.1 301 Moved Permanently\r\n"
-const _SL_302 = "HTTP/1.1 302 Found\r\n"
-const _SL_304 = "HTTP/1.1 304 Not Modified\r\n"
-const _SL_400 = "HTTP/1.1 400 Bad Request\r\n"
-const _SL_401 = "HTTP/1.1 401 Unauthorized\r\n"
-const _SL_403 = "HTTP/1.1 403 Forbidden\r\n"
-const _SL_404 = "HTTP/1.1 404 Not Found\r\n"
-const _SL_405 = "HTTP/1.1 405 Method Not Allowed\r\n"
-const _SL_413 = "HTTP/1.1 413 Content Too Large\r\n"
-const _SL_422 = "HTTP/1.1 422 Unprocessable Entity\r\n"
-const _SL_429 = "HTTP/1.1 429 Too Many Requests\r\n"
-const _SL_500 = "HTTP/1.1 500 Internal Server Error\r\n"
-const _SL_502 = "HTTP/1.1 502 Bad Gateway\r\n"
-const _SL_503 = "HTTP/1.1 503 Service Unavailable\r\n"
-
-@inline function status_line(status::Int)::String
-    status == 200 && return _SL_200
-    status == 201 && return _SL_201
-    status == 204 && return _SL_204
-    status == 301 && return _SL_301
-    status == 302 && return _SL_302
-    status == 304 && return _SL_304
-    status == 400 && return _SL_400
-    status == 401 && return _SL_401
-    status == 403 && return _SL_403
-    status == 404 && return _SL_404
-    status == 405 && return _SL_405
-    status == 413 && return _SL_413
-    status == 422 && return _SL_422
-    status == 429 && return _SL_429
-    status == 500 && return _SL_500
-    status == 502 && return _SL_502
-    status == 503 && return _SL_503
-    return string("HTTP/1.1 ", status, " \r\n")
+const STATUS = let
+    v = fill("", 503)
+    v[200] = "HTTP/1.1 200 OK\r\n"
+    v[201] = "HTTP/1.1 201 Created\r\n"
+    v[204] = "HTTP/1.1 204 No Content\r\n"
+    v[301] = "HTTP/1.1 301 Moved Permanently\r\n"
+    v[302] = "HTTP/1.1 302 Found\r\n"
+    v[304] = "HTTP/1.1 304 Not Modified\r\n"
+    v[400] = "HTTP/1.1 400 Bad Request\r\n"
+    v[401] = "HTTP/1.1 401 Unauthorized\r\n"
+    v[403] = "HTTP/1.1 403 Forbidden\r\n"
+    v[404] = "HTTP/1.1 404 Not Found\r\n"
+    v[405] = "HTTP/1.1 405 Method Not Allowed\r\n"
+    v[413] = "HTTP/1.1 413 Content Too Large\r\n"
+    v[422] = "HTTP/1.1 422 Unprocessable Entity\r\n"
+    v[429] = "HTTP/1.1 429 Too Many Requests\r\n"
+    v[500] = "HTTP/1.1 500 Internal Server Error\r\n"
+    v[502] = "HTTP/1.1 502 Bad Gateway\r\n"
+    v[503] = "HTTP/1.1 503 Service Unavailable\r\n"
+    Tuple(v)
 end
 
-export status_line
+# 2. The high-performance function
+@inline function status(code::Int)::String
+    if 200 <= code <= 503
+        @inbounds line = STATUS[code]
+        line !== "" && return line
+    end
+    return string("HTTP/1.1 ", code, " \r\n")
+end
+
+export status
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Abstract Types — Extension Points
@@ -182,40 +166,40 @@ export status_line
 Interface for HTTP request dispatching.
 
 Required: `route(router, method::UInt8, path::AbstractString) -> Union{Nothing, handler}`
-Optional: `add_route!(router, method::UInt8, pattern::String, handler)`
+Optional: `register!(router, method::UInt8, pattern::String, handler)`
 """
 abstract type AbstractRouter end
 
 function route end
-function add_route! end
+function register! end
 
-export AbstractRouter, route, add_route!
+export AbstractRouter, route, register!
 
 """
     AbstractLogger
 
 System-level logger (startup/shutdown/errors). NOT for per-request logging.
-Required: `log_event(logger, level::LogLevel, msg::String)`
+Required: `write(logger, level::Severity, msg::String)`
 """
 abstract type AbstractLogger end
 
-@enum LogLevel DEBUG=1 INFO=2 WARN=3 ERROR_LEVEL=4 FATAL=5
+@enum Severity Debug=1 Info Warn Error Fatal
 
-function log_event end
+function write end
 
-export AbstractLogger, LogLevel, DEBUG, INFO, WARN, ERROR_LEVEL, FATAL, log_event
+export AbstractLogger, Severity, Debug, Info, Warn, Error, Fatal, write
 
 """
-    AbstractErrorHandler
+    AbstractCatcher
 
 Converts exceptions to HTTP responses safely.
-Required: `handle_error(handler, err::Exception, req) -> Response`
+Required: `intercept(catcher, err::Exception, req) -> Response`
 """
-abstract type AbstractErrorHandler end
+abstract type AbstractCatcher end
 
-function handle_error end
+function intercept end
 
-export AbstractErrorHandler, handle_error
+export AbstractCatcher, intercept
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Zero-Cost Defaults (compile away completely)
@@ -223,22 +207,22 @@ export AbstractErrorHandler, handle_error
 
 """Silent logger — all calls optimize away."""
 struct NullLogger <: AbstractLogger end
-@inline log_event(::NullLogger, ::LogLevel, ::String) = nothing
+@inline write(::NullLogger, ::Severity, ::String) = nothing
 
 """Default error handler — never exposes internals (OWASP safe)."""
-struct DefaultErrorHandler <: AbstractErrorHandler end
-@inline function handle_error(::DefaultErrorHandler, ::Exception, _)
-    error_response(500, "Internal Server Error")
+struct DefaultCatcher <: AbstractCatcher end
+@inline function intercept(::DefaultCatcher, ::Exception, _)
+    fail(500, "Internal Server Error")
 end
 
-export NullLogger, DefaultErrorHandler
+export NullLogger, DefaultCatcher
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Query/Path Utilities
 # ══════════════════════════════════════════════════════════════════════════════
 
 """Get the path portion (before ?) from a request."""
-@inline function clean_path(req::Request)::SubString
+@inline function path(req::Request)::SubString
     path = req.path
     len = ncodeunits(path)
     for i in 1:len
@@ -248,7 +232,7 @@ export NullLogger, DefaultErrorHandler
 end
 
 """Get the query string (after ?) from a request."""
-@inline function query_string(req::Request)::String
+@inline function query(req::Request)::String
     path = req.path
     len = ncodeunits(path)
     for i in 1:len
@@ -257,6 +241,6 @@ end
     return ""
 end
 
-export clean_path, query_string
+export path, query
 
-end # module CiroInterfaces
+end # module Interfaces

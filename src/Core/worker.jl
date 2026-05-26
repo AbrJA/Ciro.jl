@@ -1,16 +1,16 @@
 # ══════════════════════════════════════════════════════════════════════════════
-# HTTP Worker — built on CiroBackend's event loop
+# HTTP Worker — built on Backend's event loop
 # ══════════════════════════════════════════════════════════════════════════════
 #
 # Each thread runs one io_uring engine. The worker provides the HTTP protocol
-# handler that CiroBackend's event loop calls on each completion.
+# handler that Backend's event loop calls on each completion.
 # ══════════════════════════════════════════════════════════════════════════════
 
 function _start_workers(server::CiroServer, queue_depth::Int, nworkers::Int)
-    log_event(server.logger, INFO, "io_uring backend with $nworkers worker(s)")
+    write(server.logger, Info, "io_uring backend with $nworkers worker(s)")
 
     run_eventloop_threaded!(server.port; nthreads=nworkers, queue_depth, running=server._running) do engine, tid
-        log_event(server.logger, INFO, "[Thread $tid] io_uring engine ready")
+        write(server.logger, Info, "[Thread $tid] io_uring engine ready")
 
         # Thread-local state (zero cross-thread sharing)
         conn_pool = ConnectionPool()
@@ -98,9 +98,9 @@ function _handle_read(server, engine, conn::Connection, bytes_read::Cint,
 
     # Dispatch
     response = if req === nothing
-        error_response(400, "Bad Request")
+        fail(400, "Bad Request")
     elseif bytes_read > server.max_body_size
-        error_response(413, "Content Too Large")
+        fail(413, "Content Too Large")
     else
         _dispatch(server, req)
     end
@@ -183,10 +183,10 @@ end
         method = Methods.from_string(req.method)
         handler = route(server.router, method, clean)
 
-        handler === nothing && return error_response(404, "Not Found")
+        handler === nothing && return fail(404, "Not Found")
         result = handler(req)
         return result isa Response ? result : text(string(result))
     catch err
-        return handle_error(server.error_handler, err isa Exception ? err : ErrorException(string(err)), req)
+        return intercept(server.catcher, err isa Exception ? err : ErrorException(string(err)), req)
     end
 end

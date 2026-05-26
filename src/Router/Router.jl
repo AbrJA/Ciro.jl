@@ -1,22 +1,22 @@
 """
-    CiroRouter
+    Router
 
 A fast radix-trie based router. Works with PicoHTTPParser's StringView paths.
 
 # Usage
 ```julia
-using CiroRouter
+using Router
 router = Router()
 get!(router, "/", req -> text("Hello"))
 get!(router, "/users/:id", req -> text("User \$(param(router, req))"))
 ```
 """
-module CiroRouter
+module Router
 
-using CiroInterfaces
-using CiroInterfaces: Request, Response, Methods, AbstractRouter, text, error_response
+using Interfaces
+using Interfaces: Request, Response, Methods, AbstractRouter, text, fail
 
-export Router, route_get!, route_post!, route_put!, route_delete!, route_patch!, route_head!, route_options!, route_params, route_param
+export Router, get!, post!, put!, delete!, patch!, head!, options!, params, param
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Trie Node
@@ -51,7 +51,7 @@ Router() = Router(TrieNode())
 # Route Registration
 # ══════════════════════════════════════════════════════════════════════════════
 
-function CiroInterfaces.add_route!(router::Router, method::UInt8, pattern::String, handler)
+function Interfaces.register!(router::Router, method::UInt8, pattern::String, handler)
     segments = _split_path(pattern)
     node = router.root
 
@@ -78,13 +78,13 @@ function CiroInterfaces.add_route!(router::Router, method::UInt8, pattern::Strin
 end
 
 # Convenience registration
-route_get!(r::Router, p::String, h)     = (add_route!(r, Methods.GET, p, h); r)
-route_post!(r::Router, p::String, h)    = (add_route!(r, Methods.POST, p, h); r)
-route_put!(r::Router, p::String, h)     = (add_route!(r, Methods.PUT, p, h); r)
-route_delete!(r::Router, p::String, h)  = (add_route!(r, Methods.DELETE, p, h); r)
-route_patch!(r::Router, p::String, h)   = (add_route!(r, Methods.PATCH, p, h); r)
-route_head!(r::Router, p::String, h)    = (add_route!(r, Methods.HEAD, p, h); r)
-route_options!(r::Router, p::String, h) = (add_route!(r, Methods.OPTIONS, p, h); r)
+Base.get!(r::Router, p::String, h)     = (register!(r, Methods.GET, p, h); r)
+post!(r::Router, p::String, h)    = (register!(r, Methods.POST, p, h); r)
+put!(r::Router, p::String, h)     = (register!(r, Methods.PUT, p, h); r)
+delete!(r::Router, p::String, h)  = (register!(r, Methods.DELETE, p, h); r)
+patch!(r::Router, p::String, h)   = (register!(r, Methods.PATCH, p, h); r)
+head!(r::Router, p::String, h)    = (register!(r, Methods.HEAD, p, h); r)
+options!(r::Router, p::String, h) = (register!(r, Methods.OPTIONS, p, h); r)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Route Dispatch
@@ -96,7 +96,7 @@ route_options!(r::Router, p::String, h) = (add_route!(r, Methods.OPTIONS, p, h);
 Match the request to a handler. If route has params, returns a closure
 that injects params into a thread-local storage before calling the handler.
 """
-function CiroInterfaces.route(router::Router, method::UInt8, path::AbstractString)
+function Interfaces.route(router::Router, method::UInt8, path::AbstractString)
     segments = _split_path_view(path)
     params = Pair{Symbol,String}[]
 
@@ -117,28 +117,28 @@ function CiroInterfaces.route(router::Router, method::UInt8, path::AbstractStrin
 end
 
 """
-    route_params() -> Vector{Pair{Symbol,String}}
+    params() -> Vector{Pair{Symbol,String}}
 
 Get route parameters for the current request (from task-local storage).
 """
-function route_params()::Vector{Pair{Symbol,String}}
+function params()::Vector{Pair{Symbol,String}}
     get(task_local_storage(), :_ciro_params, Pair{Symbol,String}[])
 end
 
 """
-    route_param(name::Symbol, default::String="") -> String
+    param(name::Symbol, default::String="") -> String
 
 Get a single route parameter by name.
 """
-function route_param(name::Symbol, default::String="")::String
-    params = route_params()
+function param(name::Symbol, default::String="")::String
+    params = params()
     for (k, v) in params
         k === name && return v
     end
     return default
 end
 
-export route_params, route_param
+export params, param
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Internal Matching
@@ -203,4 +203,4 @@ function _split_path_view(path::AbstractString)::Vector{String}
     _split_path(String(path))
 end
 
-end # module CiroRouter
+end # module Router

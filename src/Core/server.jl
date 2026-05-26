@@ -1,5 +1,5 @@
 # ══════════════════════════════════════════════════════════════════════════════
-# CiroServer — Parametric, trimable server struct
+# Server — Parametric, trimable server struct
 # ══════════════════════════════════════════════════════════════════════════════
 
 """
@@ -8,18 +8,18 @@
 Composable HTTP server. All components are type parameters → monomorphized:
 - `R <: AbstractRouter`       — Request routing
 - `L <: AbstractLogger`       — System logging
-- `E <: AbstractErrorHandler` — Error → Response conversion
+- `C <: AbstractCatcher`      — Error → Response conversion
 
 AOT-compatible: all types are concrete, no dynamic dispatch.
 """
 struct CiroServer{
     R <: AbstractRouter,
     L <: AbstractLogger,
-    E <: AbstractErrorHandler,
+    C <: AbstractCatcher,
 }
     router        :: R
     logger        :: L
-    error_handler :: E
+    catcher       :: C
     host          :: String
     port          :: Int
     backlog       :: Int
@@ -28,20 +28,20 @@ struct CiroServer{
 end
 
 """
-    CiroServer(; router, logger=NullLogger(), error_handler=DefaultErrorHandler(), ...)
+    CiroServer(; router, logger=NullLogger(), catcher=DefaultCatcher(), ...)
 
 Create a server. Only `router` is required.
 """
 function CiroServer(;
     router::AbstractRouter,
-    logger::AbstractLogger       = NullLogger(),
-    error_handler::AbstractErrorHandler = DefaultErrorHandler(),
+    logger::AbstractLogger = NullLogger(),
+    catcher::AbstractCatcher = DefaultCatcher(),
     host::String  = "0.0.0.0",
     port::Int     = 8080,
     backlog::Int  = 8192,
     max_body_size::Int = 1_048_576,
 )
-    CiroServer(router, logger, error_handler, host, port, backlog, max_body_size,
+    CiroServer(router, logger, catcher, host, port, backlog, max_body_size,
                Threads.Atomic{Bool}(false))
 end
 
@@ -53,12 +53,12 @@ Uses one io_uring engine per worker (SO_REUSEPORT load balancing).
 """
 function start!(server::CiroServer; queue_depth::Int=4096, nworkers::Int=nthreads())
     server._running[] = true
-    log_event(server.logger, INFO, "Ciro starting on $(server.host):$(server.port)")
+    write(server.logger, Info, "Ciro starting on $(server.host):$(server.port)")
     _start_workers(server, queue_depth, nworkers)
 end
 
 """Stop the server gracefully."""
 function stop!(server::CiroServer)
     server._running[] = false
-    log_event(server.logger, INFO, "Ciro stopping")
+    write(server.logger, Info, "Ciro stopping")
 end

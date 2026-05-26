@@ -1,5 +1,5 @@
 """
-    CiroMiddleware
+    Middleware
 
 Zero-cost functor middlewares for the Ciro ecosystem.
 
@@ -21,12 +21,12 @@ end
 # Use: get!(router, "/admin", MyAuth(my_handler, "secret"))
 ```
 """
-module CiroMiddleware
+module Middleware
 
-using CiroInterfaces
-using CiroInterfaces: Request, Response, Methods, text, error_response, req_header
+using Interfaces
+using Interfaces: Request, Response, Methods, text, fail, header
 
-export WithLogger, WithCORS, WithTiming, WithRequestId, cors
+export WithLogger, WithCORS, WithTiming, WithRequestId
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Logger
@@ -91,14 +91,6 @@ function (m::WithCORS)(req::Request)::Response
     return response
 end
 
-"""Configurable CORS factory: `cors(origins="...")(handler)`"""
-function cors(; origins="*",
-               methods="GET, POST, PUT, DELETE, PATCH, OPTIONS",
-               headers="Content-Type, Authorization, X-Requested-With",
-               max_age=86400)
-    return handler -> WithCORS(handler; origins, methods, headers, max_age)
-end
-
 # ══════════════════════════════════════════════════════════════════════════════
 # Timing
 # ══════════════════════════════════════════════════════════════════════════════
@@ -132,4 +124,4 @@ function (m::WithRequestId)(req::Request)::Response
     return response
 end
 
-end # module CiroMiddleware
+end # module Middleware
