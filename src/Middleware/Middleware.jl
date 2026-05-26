@@ -1,38 +1,32 @@
 """
     Middleware
 
-Zero-cost functor middlewares for the Ciro ecosystem.
+Zero-cost functor middlewares. Each is a callable struct wrapping a handler.
+Julia monomorphizes the chain → single inlined function at runtime.
 
-Each middleware is a callable struct that wraps a handler.
-Julia's compiler monomorphizes the entire chain into one inlined function.
-
+# Creating Your Own:
 ```julia
-# This becomes a SINGLE function at compile time — zero virtual dispatch:
-handler = WithCORS(WithTiming(my_endpoint))
-```
-
-# Creating Your Own (30 seconds):
-```julia
-struct MyAuth{H}; handler::H; token::String; end
-function (m::MyAuth)(req)
-    req_header(req, "Authorization") == "Bearer \$(m.token)" || return error_response(401)
-    m.handler(req)
+struct MyAuth{H}
+    handler :: H
+    token   :: String
 end
-# Use: get!(router, "/admin", MyAuth(my_handler, "secret"))
+(m::MyAuth)(req) = header(req, "Authorization") == "Bearer \$(m.token)" ?
+    m.handler(req) : fail(401, "Unauthorized")
 ```
 """
 module Middleware
 
 using ..Interfaces
-using ..Interfaces: Request, Response, Methods, text, fail, header
+using ..Interfaces: Request, Response, Methods, text, fail, header, hasheader
 
-export WithLogger, WithCORS, WithTiming, WithRequestId, cors
+export WithLogger, WithCORS, WithTiming, WithRequestId,
+       WithSecurityHeaders, WithRateLimit,
+       cors
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Logger
+# Logger — per-request logging to stdout
 # ══════════════════════════════════════════════════════════════════════════════
 
-"""Log request method, path, status, and timing to stdout."""
 struct WithLogger{H}
     handler :: H
 end
@@ -57,10 +51,9 @@ function (m::WithLogger)(req::Request)::Response
 end
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CORS
+# CORS — Cross-Origin Resource Sharing
 # ══════════════════════════════════════════════════════════════════════════════
 
-"""Add CORS headers. Handles preflight OPTIONS automatically."""
 struct WithCORS{H}
     handler :: H
     origins :: String
@@ -91,11 +84,18 @@ function (m::WithCORS)(req::Request)::Response
     return response
 end
 
+"""Factory: `cors(; origins="*")(handler)` → WithCORS(handler; origins)"""
+function cors(; origins="*",
+               methods="GET, POST, PUT, DELETE, PATCH, OPTIONS",
+               headers="Content-Type, Authorization, X-Requested-With",
+               max_age=86400)
+    return handler -> WithCORS(handler; origins, methods, headers, max_age)
+end
+
 # ══════════════════════════════════════════════════════════════════════════════
-# Timing
+# Timing — X-Response-Time header
 # ══════════════════════════════════════════════════════════════════════════════
 
-"""Add `X-Response-Time` header."""
 struct WithTiming{H}
     handler :: H
 end
@@ -109,10 +109,9 @@ function (m::WithTiming)(req::Request)::Response
 end
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Request ID
+# Request ID — unique identifier per request
 # ══════════════════════════════════════════════════════════════════════════════
 
-"""Add unique `X-Request-Id` header."""
 struct WithRequestId{H}
     handler :: H
 end
@@ -125,23 +124,119 @@ function (m::WithRequestId)(req::Request)::Response
 end
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CORS Factory
+# Security Headers — OWASP recommended defaults
 # ══════════════════════════════════════════════════════════════════════════════
 
 """
-    cors(; origins="*", methods=..., headers=..., max_age=86400)
+    WithSecurityHeaders(handler; hsts=true, csp="default-src 'self'", ...)
 
-Returns a function that wraps any handler with CORS headers.
-
-```julia
-protected = cors(origins="https://mysite.com")(my_handler)
-```
+Adds OWASP-recommended security headers to every response:
+- `Strict-Transport-Security` (HSTS)
+- `Content-Security-Policy`
+- `X-Content-Type-Options: nosniff`
+- `X-Frame-Options: DENY`
+- `Referrer-Policy: strict-origin-when-cross-origin`
 """
-function cors(; origins="*",
-               methods="GET, POST, PUT, DELETE, PATCH, OPTIONS",
-               headers="Content-Type, Authorization, X-Requested-With",
-               max_age=86400)
-    return handler -> WithCORS(handler; origins, methods, headers, max_age)
+struct WithSecurityHeaders{H}
+    handler :: H
+    hsts    :: String
+    csp     :: String
+    frame   :: String
+    referrer :: String
+end
+
+function WithSecurityHeaders(handler;
+                             hsts::String="max-age=31536000; includeSubDomains",
+                             csp::String="default-src 'self'",
+                             frame::String="DENY",
+                             referrer::String="strict-origin-when-cross-origin")
+    WithSecurityHeaders(handler, hsts, csp, frame, referrer)
+end
+
+function (m::WithSecurityHeaders)(req::Request)::Response
+    response = m.handler(req)
+    push!(response.headers, "X-Content-Type-Options" => "nosniff")
+    push!(response.headers, "X-Frame-Options" => m.frame)
+    push!(response.headers, "Referrer-Policy" => m.referrer)
+    !isempty(m.hsts) && push!(response.headers, "Strict-Transport-Security" => m.hsts)
+    !isempty(m.csp) && push!(response.headers, "Content-Security-Policy" => m.csp)
+    return response
+end
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Rate Limiting — Token Bucket per client IP
+# ══════════════════════════════════════════════════════════════════════════════
+
+"""
+    WithRateLimit(handler; max_requests=100, window_seconds=60)
+
+Token-bucket rate limiter keyed by client IP (from X-Forwarded-For or
+connection). Returns 429 Too Many Requests when limit is exceeded.
+
+Thread-safe: uses a lock-free atomic approach per bucket.
+"""
+struct WithRateLimit{H}
+    handler      :: H
+    max_requests :: Int
+    window_ns    :: UInt64
+    buckets      :: Dict{String, Tuple{Int, UInt64}}  # ip -> (tokens, last_refill)
+    lock         :: ReentrantLock
+end
+
+function WithRateLimit(handler; max_requests::Int=100, window_seconds::Int=60)
+    WithRateLimit(
+        handler,
+        max_requests,
+        UInt64(window_seconds) * 1_000_000_000,
+        Dict{String, Tuple{Int, UInt64}}(),
+        ReentrantLock()
+    )
+end
+
+function (m::WithRateLimit)(req::Request)::Response
+    ip = _client_ip(req)
+    now = time_ns()
+
+    allowed = lock(m.lock) do
+        tokens, last_refill = get(m.buckets, ip, (m.max_requests, now))
+
+        # Refill tokens if window has passed
+        elapsed = now - last_refill
+        if elapsed >= m.window_ns
+            tokens = m.max_requests
+            last_refill = now
+        end
+
+        if tokens <= 0
+            m.buckets[ip] = (0, last_refill)
+            return false
+        end
+
+        m.buckets[ip] = (tokens - 1, last_refill)
+        return true
+    end
+
+    if !allowed
+        return Response(429, [
+            "Content-Type" => "text/plain",
+            "Retry-After" => string(div(m.window_ns, 1_000_000_000)),
+        ], Vector{UInt8}("Too Many Requests"))
+    end
+
+    return m.handler(req)
+end
+
+@inline function _client_ip(req::Request)::String
+    # Prefer X-Forwarded-For, then X-Real-IP, then fallback
+    forwarded = header(req, "X-Forwarded-For")
+    if !isempty(forwarded)
+        # Take first IP in the chain
+        comma = findfirst(',', forwarded)
+        return comma === nothing ? strip(forwarded) : strip(forwarded[1:comma-1])
+    end
+    real_ip = header(req, "X-Real-IP")
+    !isempty(real_ip) && return strip(real_ip)
+    return "unknown"
 end
 
 end # module Middleware

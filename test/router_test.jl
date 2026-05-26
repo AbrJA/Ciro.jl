@@ -10,21 +10,20 @@ using PicoHTTPParser
         get!(r, "/about", req -> text("about"))
         post!(r, "/items", req -> text("created"))
 
-        @test route(r, Methods.GET, "/") !== nothing
-        @test !(route(r, Methods.GET, "/") isa MethodNotAllowed)
-        @test route(r, Methods.GET, "/about") !== nothing
-        @test route(r, Methods.POST, "/items") !== nothing
+        @test matched(route(r, Methods.GET, "/"))
+        @test matched(route(r, Methods.GET, "/about"))
+        @test matched(route(r, Methods.POST, "/items"))
 
         # No match — 404
-        @test route(r, Methods.GET, "/missing") === nothing
+        @test not_found(route(r, Methods.GET, "/missing"))
 
         # Method not allowed — 405
         result = route(r, Methods.DELETE, "/")
-        @test result isa MethodNotAllowed
-        @test Methods.GET in result.allowed
+        @test method_not_allowed(result)
+        @test result.allowed & Methods.bitmask(Methods.GET) != 0
 
         result2 = route(r, Methods.POST, "/")
-        @test result2 isa MethodNotAllowed
+        @test method_not_allowed(result2)
     end
 
     @testset "Path parameters" begin
@@ -33,24 +32,24 @@ using PicoHTTPParser
         get!(r, "/users/:id/posts/:post_id", req -> text("post"))
 
         # Single param
-        h = route(r, Methods.GET, "/users/42")
-        @test h !== nothing
+        result = route(r, Methods.GET, "/users/42")
+        @test matched(result)
         raw = Vector{UInt8}("GET /users/42 HTTP/1.1\r\nHost: x\r\n\r\n")
         req = PicoHTTPParser.parse_request(raw)
-        resp = h(req)
+        resp = result.handler(req)
         @test resp.status == 200
         @test param(:id) == "42"
 
         # Multiple params
-        h2 = route(r, Methods.GET, "/users/7/posts/99")
-        @test h2 !== nothing
-        resp2 = h2(req)
+        result2 = route(r, Methods.GET, "/users/7/posts/99")
+        @test matched(result2)
+        resp2 = result2.handler(req)
         @test param(:id) == "7"
         @test param(:post_id) == "99"
 
         # No match — wrong depth
-        @test route(r, Methods.GET, "/users") === nothing
-        @test route(r, Methods.GET, "/users/1/posts") === nothing
+        @test not_found(route(r, Methods.GET, "/users"))
+        @test not_found(route(r, Methods.GET, "/users/1/posts"))
     end
 
     @testset "Wildcard routes" begin
@@ -58,10 +57,10 @@ using PicoHTTPParser
         get!(r, "/files/*", req -> text("wildcard"))
         get!(r, "/exact", req -> text("exact"))
 
-        @test route(r, Methods.GET, "/files/a") !== nothing
-        @test route(r, Methods.GET, "/files/a/b/c") !== nothing
-        @test route(r, Methods.GET, "/exact") !== nothing
-        @test route(r, Methods.GET, "/other") === nothing
+        @test matched(route(r, Methods.GET, "/files/a"))
+        @test matched(route(r, Methods.GET, "/files/a/b/c"))
+        @test matched(route(r, Methods.GET, "/exact"))
+        @test not_found(route(r, Methods.GET, "/other"))
     end
 
     @testset "Priority: static > param > wildcard" begin
@@ -74,21 +73,21 @@ using PicoHTTPParser
         req = PicoHTTPParser.parse_request(raw)
 
         # Static wins over param
-        h = route(r, Methods.GET, "/items/special")
-        @test h !== nothing
-        resp = h(req)
+        result = route(r, Methods.GET, "/items/special")
+        @test matched(result)
+        resp = result.handler(req)
         @test String(copy(resp.body)) == "static"
 
         # Param for other values
-        h2 = route(r, Methods.GET, "/items/123")
-        @test h2 !== nothing
-        resp2 = h2(req)
+        result2 = route(r, Methods.GET, "/items/123")
+        @test matched(result2)
+        resp2 = result2.handler(req)
         @test String(copy(resp2.body)) == "param"
 
         # Wildcard for deeper paths
-        h3 = route(r, Methods.GET, "/items/a/b")
-        @test h3 !== nothing
-        resp3 = h3(req)
+        result3 = route(r, Methods.GET, "/items/a/b")
+        @test matched(result3)
+        resp3 = result3.handler(req)
         @test String(copy(resp3.body)) == "wildcard"
     end
 
@@ -102,17 +101,17 @@ using PicoHTTPParser
         raw = Vector{UInt8}("GET /resource HTTP/1.1\r\nHost: x\r\n\r\n")
         req = PicoHTTPParser.parse_request(raw)
 
-        h1 = route(r, Methods.GET, "/resource")
-        @test String(copy(h1(req).body)) == "get"
+        r1 = route(r, Methods.GET, "/resource")
+        @test String(copy(r1.handler(req).body)) == "get"
 
-        h2 = route(r, Methods.POST, "/resource")
-        @test String(copy(h2(req).body)) == "post"
+        r2 = route(r, Methods.POST, "/resource")
+        @test String(copy(r2.handler(req).body)) == "post"
 
-        h3 = route(r, Methods.PUT, "/resource")
-        @test String(copy(h3(req).body)) == "put"
+        r3 = route(r, Methods.PUT, "/resource")
+        @test String(copy(r3.handler(req).body)) == "put"
 
-        h4 = route(r, Methods.DELETE, "/resource")
-        @test String(copy(h4(req).body)) == "delete"
+        r4 = route(r, Methods.DELETE, "/resource")
+        @test String(copy(r4.handler(req).body)) == "delete"
     end
 
     @testset "Handler invocation with params" begin
@@ -122,8 +121,8 @@ using PicoHTTPParser
         raw = Vector{UInt8}("GET /hello/Julia HTTP/1.1\r\nHost: x\r\n\r\n")
         req = PicoHTTPParser.parse_request(raw)
 
-        h = route(r, Methods.GET, "/hello/Julia")
-        resp = h(req)
+        result = route(r, Methods.GET, "/hello/Julia")
+        resp = result.handler(req)
         @test resp.status == 200
         @test String(copy(resp.body)) == "Hello, Julia!"
     end
@@ -132,8 +131,8 @@ using PicoHTTPParser
         r = Trie()
         get!(r, "/path", req -> text("no-slash"))
 
-        @test route(r, Methods.GET, "/path/") !== nothing
-        @test route(r, Methods.GET, "/path") !== nothing
+        @test matched(route(r, Methods.GET, "/path/"))
+        @test matched(route(r, Methods.GET, "/path"))
     end
 
     @testset "Typed parameters (:id::Int)" begin
@@ -145,25 +144,51 @@ using PicoHTTPParser
         req = PicoHTTPParser.parse_request(raw)
 
         # Valid integer
-        h = route(r, Methods.GET, "/users/42")
-        @test h !== nothing
-        @test !(h isa MethodNotAllowed)
-        resp = h(req)
+        result = route(r, Methods.GET, "/users/42")
+        @test matched(result)
+        resp = result.handler(req)
         @test String(copy(resp.body)) == "user 42"
         @test param(Int, :id) == 42
 
         # Invalid integer → no match on this param, falls through
-        @test route(r, Methods.GET, "/users/abc") === nothing
+        @test not_found(route(r, Methods.GET, "/users/abc"))
 
         # Negative integer
-        h2 = route(r, Methods.GET, "/users/-5")
-        @test h2 !== nothing
+        result2 = route(r, Methods.GET, "/users/-5")
+        @test matched(result2)
 
         # Untyped param accepts anything
-        h3 = route(r, Methods.GET, "/files/report.pdf")
-        @test h3 !== nothing
-        resp3 = h3(req)
+        result3 = route(r, Methods.GET, "/files/report.pdf")
+        @test matched(result3)
+        resp3 = result3.handler(req)
         @test String(copy(resp3.body)) == "file report.pdf"
+    end
+
+    @testset "Route groups" begin
+        r = Trie()
+        group!(r, "/api/v1") do g
+            get!(g, "/users", req -> text("users list"))
+            post!(g, "/users", req -> text("user created"))
+            get!(g, "/items/:id", req -> text("item $(param(:id))"))
+        end
+
+        raw = Vector{UInt8}("GET /api/v1/users HTTP/1.1\r\nHost: x\r\n\r\n")
+        req = PicoHTTPParser.parse_request(raw)
+
+        result = route(r, Methods.GET, "/api/v1/users")
+        @test matched(result)
+        @test String(copy(result.handler(req).body)) == "users list"
+
+        result2 = route(r, Methods.POST, "/api/v1/users")
+        @test matched(result2)
+        @test String(copy(result2.handler(req).body)) == "user created"
+
+        result3 = route(r, Methods.GET, "/api/v1/items/77")
+        @test matched(result3)
+        @test String(copy(result3.handler(req).body)) == "item 77"
+
+        # Outside group → 404
+        @test not_found(route(r, Methods.GET, "/api/v1/other"))
     end
 
     @testset "405 with Allow header in dispatch" begin
@@ -187,5 +212,19 @@ using PicoHTTPParser
         req2 = PicoHTTPParser.parse_request(raw2)
         resp2 = Ciro.Core._dispatch(server, req2)
         @test resp2.status == 404
+    end
+
+    @testset "HEAD auto-generated from GET" begin
+        r = Trie()
+        get!(r, "/page", req -> text("hello"))
+
+        raw = Vector{UInt8}("HEAD /page HTTP/1.1\r\nHost: x\r\n\r\n")
+        req = PicoHTTPParser.parse_request(raw)
+
+        result = route(r, Methods.HEAD, "/page")
+        @test matched(result)
+        resp = result.handler(req)
+        @test resp.status == 200
+        @test isempty(resp.body)  # HEAD = no body
     end
 end

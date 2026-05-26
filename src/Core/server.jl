@@ -1,55 +1,44 @@
 # ══════════════════════════════════════════════════════════════════════════════
-# Server — Parametric, trimable server struct
+# Server — Parametric, fully monomorphized
 # ══════════════════════════════════════════════════════════════════════════════
 
-"""
-    Server{R, L, C}
-
-Composable HTTP server. All components are type parameters → monomorphized:
-- `R <: AbstractRouter`       — Request routing
-- `L <: AbstractLogger`       — System logging
-- `C <: AbstractCatcher`      — Error → Response conversion
-
-AOT-compatible: all types are concrete, no dynamic dispatch.
-"""
 struct Server{
     R <: AbstractRouter,
     L <: AbstractLogger,
     C <: AbstractCatcher,
 }
-    router        :: R
-    logger        :: L
-    catcher       :: C
-    host          :: String
-    port          :: Int
-    backlog       :: Int
-    max_body_size :: Int
-    _running      :: Threads.Atomic{Bool}
+    router          :: R
+    logger          :: L
+    catcher         :: C
+    host            :: String
+    port            :: Int
+    backlog         :: Int
+    max_body_size   :: Int
+    shutdown_timeout:: Float64
+    _running        :: Threads.Atomic{Bool}
+    _in_flight      :: Threads.Atomic{Int}
 end
 
-"""
-    Server(; router, logger=NullLogger(), catcher=DefaultCatcher(), ...)
-
-Create a server. Only `router` is required.
-"""
 function Server(;
     router::AbstractRouter,
-    logger::AbstractLogger = NullLogger(),
-    catcher::AbstractCatcher = DefaultCatcher(),
-    host::String  = "0.0.0.0",
-    port::Int     = 8080,
-    backlog::Int  = 8192,
-    max_body_size::Int = 1_048_576,
+    logger::AbstractLogger      = NullLogger(),
+    catcher::AbstractCatcher    = DefaultCatcher(),
+    host::String                = "0.0.0.0",
+    port::Int                   = 8080,
+    backlog::Int                = 8192,
+    max_body_size::Int          = 1_048_576,
+    shutdown_timeout::Float64   = 5.0,
 )
     Server(router, logger, catcher, host, port, backlog, max_body_size,
-           Threads.Atomic{Bool}(false))
+           shutdown_timeout, Threads.Atomic{Bool}(false), Threads.Atomic{Int}(0))
 end
 
 """
     start!(server; queue_depth=4096, nworkers=nthreads())
 
-Start the server using io_uring. Blocks until `stop!()` or interrupt.
-Uses one io_uring engine per worker (SO_REUSEPORT load balancing).
+Start the server. Blocks until `stop!()` is called or an interrupt is received.
+On interrupt, performs graceful shutdown: stops accepting new connections and
+drains in-flight requests up to `shutdown_timeout` seconds.
 """
 function start!(server::Server; queue_depth::Int=4096, nworkers::Int=nthreads())
     server._running[] = true
@@ -59,7 +48,9 @@ function start!(server::Server; queue_depth::Int=4096, nworkers::Int=nthreads())
     catch e
         e isa InterruptException || rethrow(e)
     finally
+        write(server.logger, Info, "Ciro shutting down (draining in-flight requests)...")
         server._running[] = false
+        _drain(server)
         write(server.logger, Info, "Ciro stopped")
     end
 end
@@ -67,5 +58,16 @@ end
 """Stop the server gracefully."""
 function stop!(server::Server)
     server._running[] = false
-    write(server.logger, Info, "Ciro stopping")
+    write(server.logger, Info, "Ciro stop requested")
+end
+
+"""Wait for in-flight requests to complete (up to timeout)."""
+function _drain(server::Server)
+    deadline = time() + server.shutdown_timeout
+    while server._in_flight[] > 0 && time() < deadline
+        sleep(0.01)
+    end
+    remaining = server._in_flight[]
+    remaining > 0 && write(server.logger, Warn,
+        "Shutdown timeout: $remaining request(s) still in-flight")
 end

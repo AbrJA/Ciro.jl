@@ -11,7 +11,7 @@ include("Middleware/Middleware.jl")
 @reexport using .Interfaces
 @reexport using .Backend
 @reexport using .Core
-@reexport using .Middleware
 @reexport using .Router
+@reexport using .Middleware
 
 end

@@ -1,38 +1,37 @@
 module Router
 
 using ..Interfaces
-using ..Interfaces: Request, Response, Methods, AbstractRouter, MethodNotAllowed, text, fail
+using ..Interfaces: Request, Response, Methods, AbstractRouter, RouteResult,
+                    matched, not_found, method_not_allowed, text, fail
 
-export Trie, get!, post!, put!, delete!, patch!, head!, options!, params, param
+export Trie, get!, post!, put!, delete!, patch!, head!, options!,
+       params, param, group!
 
-# Extend Base functions to avoid ambiguity with `using`
 import Base: get!, put!, delete!
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Parameter Types
+# Parameter Spec — parsed at registration time, validated at match time
 # ══════════════════════════════════════════════════════════════════════════════
 
-"""Parameter constraint parsed from route pattern (e.g. `:id::Int`)."""
 struct ParamSpec
     name :: Symbol
-    type :: Symbol  # :String, :Int, :UUID
+    type :: Symbol  # :String, :Int, :Float64, :UUID
 end
 
-"""Parse a parameter segment like `:id` or `:id::Int`."""
-function _parse_param(seg::String)::ParamSpec
-    raw = seg[2:end]  # strip leading ':'
+@inline function _parse_param(seg::String)::ParamSpec
+    raw = seg[2:end]
     parts = split(raw, "::", limit=2)
     name = Symbol(parts[1])
     type = length(parts) == 2 ? Symbol(parts[2]) : :String
     return ParamSpec(name, type)
 end
 
-"""Validate a path segment against a param type constraint. Returns `nothing` on failure."""
 @inline function _validate_param(value::String, spec::ParamSpec)::Bool
     spec.type === :String && return true
     spec.type === :Int && return _is_integer(value)
-    spec.type === :UUID && return _is_uuid(value)
-    return true  # unknown types pass through
+    spec.type === :Float64 && return _is_number(value)
+    spec.type === :UUID && return ncodeunits(value) == 36
+    return true
 end
 
 @inline function _is_integer(s::String)::Bool
@@ -46,8 +45,21 @@ end
     return true
 end
 
-@inline function _is_uuid(s::String)::Bool
-    ncodeunits(s) == 36
+@inline function _is_number(s::String)::Bool
+    isempty(s) && return false
+    dot_seen = false
+    start = @inbounds(codeunit(s, 1)) == UInt8('-') ? 2 : 1
+    start > ncodeunits(s) && return false
+    for i in start:ncodeunits(s)
+        b = @inbounds codeunit(s, i)
+        if b == UInt8('.')
+            dot_seen && return false
+            dot_seen = true
+        elseif b < UInt8('0') || b > UInt8('9')
+            return false
+        end
+    end
+    return true
 end
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -58,7 +70,7 @@ mutable struct TrieNode
     children    :: Dict{String, TrieNode}
     param_child :: Union{Nothing, Tuple{ParamSpec, TrieNode}}
     wildcard    :: Union{Nothing, Any}
-    handlers    :: Dict{UInt8, Any}
+    handlers    :: Dict{UInt8, Any}  # method -> handler
 end
 
 TrieNode() = TrieNode(Dict{String,TrieNode}(), nothing, nothing, Dict{UInt8,Any}())
@@ -100,10 +112,20 @@ function Interfaces.register!(trie::Trie, method::UInt8, pattern::String, handle
     end
 
     node.handlers[method] = handler
+
+    # Auto-generate HEAD from GET (RFC 9110 §9.3.2)
+    if method == Methods.GET && !haskey(node.handlers, Methods.HEAD)
+        node.handlers[Methods.HEAD] = function(req)
+            resp = handler(req)
+            Response(resp.status, resp.headers, UInt8[])
+        end
+    end
+
     return trie
 end
 
-# Convenience registration (extending Base where names overlap)
+# ── Convenience registration ────────────────────────────────────────────────
+
 Base.get!(r::Trie, p::String, h)     = (register!(r, Methods.GET, p, h); r)
 post!(r::Trie, p::String, h)    = (register!(r, Methods.POST, p, h); r)
 Base.put!(r::Trie, p::String, h)     = (register!(r, Methods.PUT, p, h); r)
@@ -113,47 +135,83 @@ head!(r::Trie, p::String, h)    = (register!(r, Methods.HEAD, p, h); r)
 options!(r::Trie, p::String, h) = (register!(r, Methods.OPTIONS, p, h); r)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Route Dispatch
+# Route Groups — prefix-based organization
 # ══════════════════════════════════════════════════════════════════════════════
 
 """
-    route(trie::Trie, method::UInt8, path) -> handler | MethodNotAllowed | nothing
+    group!(router, prefix) do r
+        get!(r, "/items", handler)
+        post!(r, "/items", handler)
+    end
 
-Returns:
-- A callable handler on match
-- `MethodNotAllowed(allowed_methods)` if path exists but method doesn't (→ 405)
-- `nothing` if no path matches (→ 404)
+Register routes under a common prefix. The block receives a scoped
+registration proxy.
 """
-function Interfaces.route(trie::Trie, method::UInt8, path::AbstractString)
-    segments = _split_path_view(path)
+function group!(f::Function, trie::Trie, prefix::String)
+    proxy = _GroupProxy(trie, _normalize_prefix(prefix))
+    f(proxy)
+    return trie
+end
+
+struct _GroupProxy
+    trie   :: Trie
+    prefix :: String
+end
+
+Base.get!(g::_GroupProxy, p::String, h)     = (register!(g.trie, Methods.GET, g.prefix * p, h); g.trie)
+post!(g::_GroupProxy, p::String, h)    = (register!(g.trie, Methods.POST, g.prefix * p, h); g.trie)
+Base.put!(g::_GroupProxy, p::String, h)     = (register!(g.trie, Methods.PUT, g.prefix * p, h); g.trie)
+Base.delete!(g::_GroupProxy, p::String, h)  = (register!(g.trie, Methods.DELETE, g.prefix * p, h); g.trie)
+patch!(g::_GroupProxy, p::String, h)   = (register!(g.trie, Methods.PATCH, g.prefix * p, h); g.trie)
+head!(g::_GroupProxy, p::String, h)    = (register!(g.trie, Methods.HEAD, g.prefix * p, h); g.trie)
+options!(g::_GroupProxy, p::String, h) = (register!(g.trie, Methods.OPTIONS, g.prefix * p, h); g.trie)
+
+# Nested groups
+group!(f::Function, g::_GroupProxy, prefix::String) = group!(f, g.trie, g.prefix * _normalize_prefix(prefix))
+
+function _normalize_prefix(prefix::String)::String
+    # Ensure prefix starts with / and doesn't end with /
+    p = startswith(prefix, '/') ? prefix : "/" * prefix
+    endswith(p, '/') ? p[1:end-1] : p
+end
+
+export group!
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Route Dispatch — returns RouteResult (type-stable)
+# ══════════════════════════════════════════════════════════════════════════════
+
+function Interfaces.route(trie::Trie, method::UInt8, path::AbstractString)::RouteResult
+    segments = _split_path(String(path))
     captured = Pair{Symbol,String}[]
 
-    result = _match(trie.root, segments, 1, method, captured)
+    handler = _match(trie.root, segments, 1, method, captured)
 
-    # Handler found
-    if result !== nothing
+    if handler !== nothing
         if isempty(captured)
-            return result
+            return RouteResult(handler, Pair{Symbol,String}[])
         else
             params_copy = copy(captured)
-            return function(req)
+            wrapped = function(req)
                 task_local_storage(:_ciro_params, params_copy)
-                return result(req)
+                return handler(req)
             end
+            return RouteResult(wrapped, params_copy)
         end
     end
 
-    # Path matched but method didn't? Check for 405
-    allowed = _find_allowed_methods(trie.root, segments, 1)
-    if !isempty(allowed)
-        return MethodNotAllowed(allowed)
+    # No handler found — check if path exists with other methods (→ 405)
+    allowed_mask = _find_allowed(trie.root, segments, 1)
+    if allowed_mask != 0x00
+        return RouteResult(allowed_mask)
     end
 
-    return nothing
+    # No path match at all → 404
+    return RouteResult()
 end
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Parameter Access (task-local, zero-allocation on repeat access)
+# Parameter Access
 # ══════════════════════════════════════════════════════════════════════════════
 
 function params()::Vector{Pair{Symbol,String}}
@@ -182,12 +240,11 @@ end
 export params, param
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Internal Matching
+# Internal: Trie Matching
 # ══════════════════════════════════════════════════════════════════════════════
 
 function _match(node::TrieNode, segments::Vector{String}, idx::Int,
                 method::UInt8, captured::Vector{Pair{Symbol,String}})
-    # Base case: all segments consumed
     if idx > length(segments)
         return get(node.handlers, method, nothing)
     end
@@ -207,11 +264,11 @@ function _match(node::TrieNode, segments::Vector{String}, idx::Int,
             push!(captured, spec.name => seg)
             result = _match(child, segments, idx + 1, method, captured)
             result !== nothing && return result
-            pop!(captured)  # backtrack
+            pop!(captured)
         end
     end
 
-    # Priority 3: wildcard (catches all remaining segments)
+    # Priority 3: wildcard
     if node.wildcard !== nothing
         return node.wildcard
     end
@@ -219,30 +276,32 @@ function _match(node::TrieNode, segments::Vector{String}, idx::Int,
     return nothing
 end
 
-"""Find all methods registered for a given path (for 405 Allow header)."""
-function _find_allowed_methods(node::TrieNode, segments::Vector{String}, idx::Int)::Vector{UInt8}
+"""Build a bitmask of all methods registered for a path (for 405 Allow header)."""
+function _find_allowed(node::TrieNode, segments::Vector{String}, idx::Int)::UInt8
     if idx > length(segments)
-        return collect(keys(node.handlers))
+        mask = UInt8(0)
+        for m in keys(node.handlers)
+            mask |= Methods.bitmask(m)
+        end
+        return mask
     end
 
     seg = segments[idx]
 
-    # Static match
     if haskey(node.children, seg)
-        result = _find_allowed_methods(node.children[seg], segments, idx + 1)
-        !isempty(result) && return result
+        result = _find_allowed(node.children[seg], segments, idx + 1)
+        result != 0x00 && return result
     end
 
-    # Parameter match
     if node.param_child !== nothing
         (spec, child) = node.param_child
         if _validate_param(seg, spec)
-            result = _find_allowed_methods(child, segments, idx + 1)
-            !isempty(result) && return result
+            result = _find_allowed(child, segments, idx + 1)
+            result != 0x00 && return result
         end
     end
 
-    return UInt8[]
+    return 0x00
 end
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -266,10 +325,6 @@ function _split_path(path::String)::Vector{String}
         i = j
     end
     return segments
-end
-
-function _split_path_view(path::AbstractString)::Vector{String}
-    _split_path(String(path))
 end
 
 end # module Router

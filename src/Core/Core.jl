@@ -1,18 +1,16 @@
 """
     Core
 
-HTTP server engine built on Backend (io_uring).
-Provides:
-- `Server{R,L,E}` — parametric server struct (fully monomorphized)
+HTTP server engine. Provides:
+- `Server{R,L,C}` — parametric server struct (fully monomorphized)
 - Zero-copy response serialization
 - Thread-per-core request dispatch
-
-trim=safe: no eval, no reflection, all concrete types.
+- Graceful shutdown with request draining
 """
 module Core
 
 using ..Interfaces
-using ..Interfaces: Response, MethodNotAllowed, status, hasheader, write
+using ..Interfaces: Response, RouteResult, matched, not_found, method_not_allowed, status, hasheader, write
 using ..Backend
 using PicoHTTPParser
 using Base.Threads: @threads, nthreads
