@@ -11,13 +11,20 @@ using PicoHTTPParser
         post!(r, "/items", req -> text("created"))
 
         @test route(r, Methods.GET, "/") !== nothing
+        @test !(route(r, Methods.GET, "/") isa MethodNotAllowed)
         @test route(r, Methods.GET, "/about") !== nothing
         @test route(r, Methods.POST, "/items") !== nothing
 
-        # No match
+        # No match — 404
         @test route(r, Methods.GET, "/missing") === nothing
-        @test route(r, Methods.DELETE, "/") === nothing
-        @test route(r, Methods.POST, "/") === nothing
+
+        # Method not allowed — 405
+        result = route(r, Methods.DELETE, "/")
+        @test result isa MethodNotAllowed
+        @test Methods.GET in result.allowed
+
+        result2 = route(r, Methods.POST, "/")
+        @test result2 isa MethodNotAllowed
     end
 
     @testset "Path parameters" begin
@@ -127,5 +134,58 @@ using PicoHTTPParser
 
         @test route(r, Methods.GET, "/path/") !== nothing
         @test route(r, Methods.GET, "/path") !== nothing
+    end
+
+    @testset "Typed parameters (:id::Int)" begin
+        r = Trie()
+        get!(r, "/users/:id::Int", req -> text("user $(param(:id))"))
+        get!(r, "/files/:name", req -> text("file $(param(:name))"))
+
+        raw = Vector{UInt8}("GET /users/42 HTTP/1.1\r\nHost: x\r\n\r\n")
+        req = PicoHTTPParser.parse_request(raw)
+
+        # Valid integer
+        h = route(r, Methods.GET, "/users/42")
+        @test h !== nothing
+        @test !(h isa MethodNotAllowed)
+        resp = h(req)
+        @test String(copy(resp.body)) == "user 42"
+        @test param(Int, :id) == 42
+
+        # Invalid integer → no match on this param, falls through
+        @test route(r, Methods.GET, "/users/abc") === nothing
+
+        # Negative integer
+        h2 = route(r, Methods.GET, "/users/-5")
+        @test h2 !== nothing
+
+        # Untyped param accepts anything
+        h3 = route(r, Methods.GET, "/files/report.pdf")
+        @test h3 !== nothing
+        resp3 = h3(req)
+        @test String(copy(resp3.body)) == "file report.pdf"
+    end
+
+    @testset "405 with Allow header in dispatch" begin
+        router = Trie()
+        get!(router, "/api/items", req -> text("list"))
+        post!(router, "/api/items", req -> text("create"))
+
+        server = Server(; router, port=19996)
+
+        # PUT /api/items → 405
+        raw = Vector{UInt8}("PUT /api/items HTTP/1.1\r\nHost: x\r\n\r\n")
+        req = PicoHTTPParser.parse_request(raw)
+        resp = Ciro.Core._dispatch(server, req)
+        @test resp.status == 405
+        allow_hdr = header(resp, "Allow")
+        @test contains(allow_hdr, "GET")
+        @test contains(allow_hdr, "POST")
+
+        # GET /nonexistent → 404
+        raw2 = Vector{UInt8}("GET /nonexistent HTTP/1.1\r\nHost: x\r\n\r\n")
+        req2 = PicoHTTPParser.parse_request(raw2)
+        resp2 = Ciro.Core._dispatch(server, req2)
+        @test resp2.status == 404
     end
 end

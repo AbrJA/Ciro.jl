@@ -112,6 +112,13 @@ using PicoHTTPParser
         resp4 = Ciro.Core._dispatch(server, req4)
         @test resp4.status == 200
         @test String(copy(resp4.body)) == "42"
+
+        # 405 for wrong method on existing path
+        raw5 = Vector{UInt8}("POST /ok HTTP/1.1\r\nHost: x\r\n\r\n")
+        req5 = PicoHTTPParser.parse_request(raw5)
+        resp5 = Ciro.Core._dispatch(server, req5)
+        @test resp5.status == 405
+        @test contains(header(resp5, "Allow"), "GET")
     end
 
     @testset "Query string stripped from routing" begin

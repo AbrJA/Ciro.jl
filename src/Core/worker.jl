@@ -181,11 +181,22 @@ end
         clean = SubString(String(path), 1, path_end)
 
         method = Methods.from_string(req.method)
-        handler = route(server.router, method, clean)
+        result = route(server.router, method, clean)
 
-        handler === nothing && return fail(404, "Not Found")
-        result = handler(req)
-        return result isa Response ? result : text(string(result))
+        # 404 — no route matches this path
+        result === nothing && return fail(404, "Not Found")
+
+        # 405 — path exists but method not allowed
+        if result isa MethodNotAllowed
+            allowed_str = join(Methods.to_string.(result.allowed), ", ")
+            return Response(405, ["Allow" => allowed_str, "Content-Type" => "text/plain"],
+                           Vector{UInt8}("Method Not Allowed"))
+        end
+
+        # Invoke handler
+        handler = result
+        response = handler(req)
+        return response isa Response ? response : text(string(response))
     catch err
         return intercept(server.catcher, err isa Exception ? err : ErrorException(string(err)), req)
     end

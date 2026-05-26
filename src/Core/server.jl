@@ -54,7 +54,14 @@ Uses one io_uring engine per worker (SO_REUSEPORT load balancing).
 function start!(server::Server; queue_depth::Int=4096, nworkers::Int=nthreads())
     server._running[] = true
     write(server.logger, Info, "Ciro starting on $(server.host):$(server.port)")
-    _start_workers(server, queue_depth, nworkers)
+    try
+        _start_workers(server, queue_depth, nworkers)
+    catch e
+        e isa InterruptException || rethrow(e)
+    finally
+        server._running[] = false
+        write(server.logger, Info, "Ciro stopped")
+    end
 end
 
 """Stop the server gracefully."""

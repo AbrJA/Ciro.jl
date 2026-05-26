@@ -179,15 +179,25 @@ export status
 
 Interface for HTTP request dispatching.
 
-Required: `route(router, method::UInt8, path::AbstractString) -> Union{Nothing, handler}`
+Required: `route(router, method::UInt8, path::AbstractString) -> handler | MethodNotAllowed | nothing`
 Optional: `register!(router, method::UInt8, pattern::String, handler)`
 """
 abstract type AbstractRouter end
 
+"""
+    MethodNotAllowed
+
+Returned by `route()` when the path matches but the HTTP method does not.
+Contains the allowed methods for the `Allow` response header (RFC 9110 §15.5.6).
+"""
+struct MethodNotAllowed
+    allowed :: Vector{UInt8}
+end
+
 function route end
 function register! end
 
-export AbstractRouter, route, register!
+export AbstractRouter, MethodNotAllowed, route, register!
 
 """
     AbstractLogger
