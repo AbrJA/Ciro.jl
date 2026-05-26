@@ -3,17 +3,17 @@
 using Ciro
 
 # Build app
-router = Router()
-get!(router, "/", req -> text("Hello, World!"))
-get!(router, "/json", req -> json_response("""{"status":"ok"}"""))
-get!(router, "/users/:id", req -> text("User: $(param(:id))"))
-post!(router, "/echo", req -> text(String(copy(req.body))))
+trie = Trie()
+get!(trie, "/", req -> text("Hello, World!"))
+get!(trie, "/json", req -> json_response("""{"status":"ok"}"""))
+get!(trie, "/users/:id", req -> text("User: $(param(:id))"))
+post!(trie, "/echo", req -> text(String(copy(req.body))))
 
 # Middleware composition
-get!(router, "/timed", WithTiming(req -> text("fast")))
-get!(router, "/cors", WithCORS(req -> text("cors ok")))
+get!(trie, "/timed", WithTiming(req -> text("fast")))
+get!(trie, "/cors", WithCORS(req -> text("cors ok")))
 
-server = Server(; router, port=3001)
+server = Server(; router=trie, port=3001)
 
 println("Server ready on http://localhost:3001")
 println("Testing routes...")

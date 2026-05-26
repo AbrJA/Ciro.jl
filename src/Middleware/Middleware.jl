@@ -23,8 +23,8 @@ end
 """
 module Middleware
 
-using Interfaces
-using Interfaces: Request, Response, Methods, text, fail, header
+using ..Interfaces
+using ..Interfaces: Request, Response, Methods, text, fail, header
 
 export WithLogger, WithCORS, WithTiming, WithRequestId
 

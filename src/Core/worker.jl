@@ -6,7 +6,7 @@
 # handler that Backend's event loop calls on each completion.
 # ══════════════════════════════════════════════════════════════════════════════
 
-function _start_workers(server::CiroServer, queue_depth::Int, nworkers::Int)
+function _start_workers(server::Server, queue_depth::Int, nworkers::Int)
     write(server.logger, Info, "io_uring backend with $nworkers worker(s)")
 
     run_eventloop_threaded!(server.port; nthreads=nworkers, queue_depth, running=server._running) do engine, tid
@@ -170,7 +170,7 @@ end
 # ── Request Dispatch ────────────────────────────────────────────────────────
 
 """Dispatch request through router with error handling."""
-@inline function _dispatch(server::CiroServer, req::Request)::Response
+@inline function _dispatch(server::Server, req::Request)::Response
     try
         # Strip query string from path (zero-alloc scan)
         path = req.path

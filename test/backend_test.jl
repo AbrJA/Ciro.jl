@@ -1,8 +1,8 @@
 using Test
-using CiroBackend
+using Ciro
 using Sockets
 
-@testset "CiroBackend" begin
+@testset "Backend" begin
 
     @testset "Types" begin
         @test ACCEPT == EventType(0)

@@ -11,25 +11,11 @@ trim=safe: no eval, no reflection, all concrete types.
 """
 module Core
 
-using Interfaces
-using Backend
+using ..Interfaces
+using ..Interfaces: write
+using ..Backend
 using PicoHTTPParser
 using Base.Threads: @threads, nthreads
-
-# Re-export interfaces for user convenience
-using Interfaces: Request, Response, Methods, status, header, path, query,
-    NullLogger, DefaultCatcher,
-    text, html, json, redirect, fail,
-    AbstractCatcher, intercept,
-    AbstractRouter, route, register!,
-    AbstractLogger, Level, Debug, Info, Warn, Error, Fatal, write
-
-export Request, Response, Methods, status, header, path, query,
-    NullLogger, DefaultCatcher,
-    text, html, json, redirect, fail,
-    AbstractCatcher, intercept,
-    AbstractRouter, route, register!,
-    AbstractLogger, Level, Debug, Info, Warn, Error, Fatal, write
 
 include("server.jl")
 include("serialize.jl")

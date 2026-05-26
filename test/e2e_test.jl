@@ -2,26 +2,24 @@
 # End-to-end integration test.
 # Starts a real server, sends HTTP requests via Sockets, verifies responses.
 
-using CiroCore
-using CiroRouter
-using CiroMiddleware
+using Ciro
 using Sockets
 
 # Build app
 router = Router()
-route_get!(router, "/", req -> text("Hello, World!"))
-route_get!(router, "/json", req -> json_response("""{"status":"ok","version":"0.1.0"}"""))
-route_get!(router, "/users/:id", req -> text("User: $(route_param(:id))"))
-route_post!(router, "/echo", req -> text(String(copy(req.body))))
-route_get!(router, "/timed", WithTiming(req -> text("fast")))
-route_get!(router, "/cors", WithCORS(req -> text("cors")))
-route_options!(router, "/cors", WithCORS(req -> text("cors")))
-route_get!(router, "/headers", req -> begin
-    host = req_header(req, "Host")
+get!(router, "/", req -> text("Hello, World!"))
+get!(router, "/json", req -> json("""{"status":"ok","version":"0.1.0"}"""))
+get!(router, "/users/:id", req -> text("User: $(route_param(:id))"))
+post!(router, "/echo", req -> text(String(copy(req.body))))
+get!(router, "/timed", WithTiming(req -> text("fast")))
+get!(router, "/cors", WithCORS(req -> text("cors")))
+options!(router, "/cors", WithCORS(req -> text("cors")))
+get!(router, "/headers", req -> begin
+    host = header(req, "Host")
     text("Host: $host")
 end)
 
-server = CiroServer(; router, port=19876)
+server = Server(; router, port=19876)
 
 # Start in background (1 worker leaves main thread free for test client)
 task = Threads.@spawn start!(server; nworkers=1)

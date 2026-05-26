@@ -15,7 +15,7 @@ module Backend
 
 # ── Library path (module-level const required by ccall + juliac) ─────────────
 # In production this becomes Ciro_jll.libciro
-const _LIB = joinpath(@__DIR__, "lib", "ciro.so")
+const _LIB = normpath(joinpath(@__DIR__, "..", "..", "lib", "ciro.so"))
 
 # ── Includes ────────────────────────────────────────────────────────────────
 include("types.jl")

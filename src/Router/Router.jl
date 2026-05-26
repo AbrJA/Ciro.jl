@@ -1,22 +1,9 @@
-"""
-    Router
-
-A fast radix-trie based router. Works with PicoHTTPParser's StringView paths.
-
-# Usage
-```julia
-using Router
-router = Router()
-get!(router, "/", req -> text("Hello"))
-get!(router, "/users/:id", req -> text("User \$(param(router, req))"))
-```
-"""
 module Router
 
-using Interfaces
-using Interfaces: Request, Response, Methods, AbstractRouter, text, fail
+using ..Interfaces
+using ..Interfaces: Request, Response, Methods, AbstractRouter, text, fail
 
-export Router, get!, post!, put!, delete!, patch!, head!, options!, params, param
+export Trie, get!, post!, put!, delete!, patch!, head!, options!, params, param
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Trie Node
@@ -35,25 +22,19 @@ TrieNode() = TrieNode(Dict{String,TrieNode}(), nothing, nothing, Dict{UInt8,Any}
 # Router Struct
 # ══════════════════════════════════════════════════════════════════════════════
 
-"""
-    Router <: AbstractRouter
-
-Radix-trie router with path parameters (`:name`) and wildcards (`*`).
-Match priority: static > parameter > wildcard.
-"""
-struct Router <: AbstractRouter
-    root :: TrieNode
+struct Trie <: AbstractRouter
+    root::TrieNode
 end
 
-Router() = Router(TrieNode())
+Trie() = Trie(TrieNode())
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Route Registration
 # ══════════════════════════════════════════════════════════════════════════════
 
-function Interfaces.register!(router::Router, method::UInt8, pattern::String, handler)
+function Interfaces.register!(trie::Trie, method::UInt8, pattern::String, handler)
     segments = _split_path(pattern)
-    node = router.root
+    node = trie.root
 
     for seg in segments
         if startswith(seg, ':')
@@ -64,7 +45,7 @@ function Interfaces.register!(router::Router, method::UInt8, pattern::String, ha
             node = node.param_child[2]
         elseif seg == "*"
             node.wildcard = handler
-            return router
+            return trie
         else
             if !haskey(node.children, seg)
                 node.children[seg] = TrieNode()
@@ -74,33 +55,27 @@ function Interfaces.register!(router::Router, method::UInt8, pattern::String, ha
     end
 
     node.handlers[method] = handler
-    return router
+    return trie
 end
 
 # Convenience registration
-Base.get!(r::Router, p::String, h)     = (register!(r, Methods.GET, p, h); r)
-post!(r::Router, p::String, h)    = (register!(r, Methods.POST, p, h); r)
-put!(r::Router, p::String, h)     = (register!(r, Methods.PUT, p, h); r)
-delete!(r::Router, p::String, h)  = (register!(r, Methods.DELETE, p, h); r)
-patch!(r::Router, p::String, h)   = (register!(r, Methods.PATCH, p, h); r)
-head!(r::Router, p::String, h)    = (register!(r, Methods.HEAD, p, h); r)
-options!(r::Router, p::String, h) = (register!(r, Methods.OPTIONS, p, h); r)
+Base.get!(r::Trie, p::String, h)     = (register!(r, Methods.GET, p, h); r)
+post!(r::Trie, p::String, h)    = (register!(r, Methods.POST, p, h); r)
+put!(r::Trie, p::String, h)     = (register!(r, Methods.PUT, p, h); r)
+delete!(r::Trie, p::String, h)  = (register!(r, Methods.DELETE, p, h); r)
+patch!(r::Trie, p::String, h)   = (register!(r, Methods.PATCH, p, h); r)
+head!(r::Trie, p::String, h)    = (register!(r, Methods.HEAD, p, h); r)
+options!(r::Trie, p::String, h) = (register!(r, Methods.OPTIONS, p, h); r)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Route Dispatch
 # ══════════════════════════════════════════════════════════════════════════════
 
-"""
-    route(router::Router, method::UInt8, path::AbstractString) -> Union{Nothing, handler}
-
-Match the request to a handler. If route has params, returns a closure
-that injects params into a thread-local storage before calling the handler.
-"""
-function Interfaces.route(router::Router, method::UInt8, path::AbstractString)
+function Interfaces.route(trie::Trie, method::UInt8, path::AbstractString)
     segments = _split_path_view(path)
     params = Pair{Symbol,String}[]
 
-    handler = _match(router.root, segments, 1, method, params)
+    handler = _match(trie.root, segments, 1, method, params)
     handler === nothing && return nothing
 
     if isempty(params)
@@ -116,20 +91,10 @@ function Interfaces.route(router::Router, method::UInt8, path::AbstractString)
     end
 end
 
-"""
-    params() -> Vector{Pair{Symbol,String}}
-
-Get route parameters for the current request (from task-local storage).
-"""
 function params()::Vector{Pair{Symbol,String}}
     get(task_local_storage(), :_ciro_params, Pair{Symbol,String}[])
 end
 
-"""
-    param(name::Symbol, default::String="") -> String
-
-Get a single route parameter by name.
-"""
 function param(name::Symbol, default::String="")::String
     params = params()
     for (k, v) in params

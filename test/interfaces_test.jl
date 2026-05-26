@@ -1,7 +1,7 @@
 using Test
-using CiroInterfaces
+using Ciro
 
-@testset "CiroInterfaces" begin
+@testset "Interfaces" begin
 
     @testset "Methods" begin
         @test Methods.from_string("GET") == Methods.GET
@@ -32,12 +32,12 @@ using CiroInterfaces
         @test r.status == 200
         @test any(p -> contains(p.second, "text/html"), r.headers)
 
-        r = json_response("""{"ok":true}""")
+        r = json("""{"ok":true}""")
         @test r.status == 200
         @test any(p -> contains(p.second, "application/json"), r.headers)
         @test String(copy(r.body)) == """{"ok":true}"""
 
-        r = json_response("""{"ok":true}"""; status=201)
+        r = json("""{"ok":true}"""; status=201)
         @test r.status == 201
 
         r = redirect("/login")
@@ -65,46 +65,46 @@ using CiroInterfaces
     end
 
     @testset "Status lines" begin
-        @test status_line(200) == "HTTP/1.1 200 OK\r\n"
-        @test status_line(404) == "HTTP/1.1 404 Not Found\r\n"
-        @test status_line(500) == "HTTP/1.1 500 Internal Server Error\r\n"
-        @test status_line(201) == "HTTP/1.1 201 Created\r\n"
-        @test status_line(204) == "HTTP/1.1 204 No Content\r\n"
+        @test status(200) == "HTTP/1.1 200 OK\r\n"
+        @test status(404) == "HTTP/1.1 404 Not Found\r\n"
+        @test status(500) == "HTTP/1.1 500 Internal Server Error\r\n"
+        @test status(201) == "HTTP/1.1 201 Created\r\n"
+        @test status(204) == "HTTP/1.1 204 No Content\r\n"
         # Unknown status
-        @test contains(status_line(418), "HTTP/1.1 418")
+        @test contains(status(418), "HTTP/1.1 418")
     end
 
     @testset "Request header access" begin
         using PicoHTTPParser
         raw = Vector{UInt8}("GET /test HTTP/1.1\r\nHost: localhost\r\nX-Custom: hello\r\n\r\n")
         req = PicoHTTPParser.parse_request(raw)
-        @test req_header(req, "Host") == "localhost"
-        @test req_header(req, "X-Custom") == "hello"
-        @test req_header(req, "Missing", "nope") == "nope"
+        @test header(req, "Host") == "localhost"
+        @test header(req, "X-Custom") == "hello"
+        @test header(req, "Missing", "nope") == "nope"
     end
 
     @testset "Path/query utilities" begin
         using PicoHTTPParser
         raw = Vector{UInt8}("GET /path?foo=bar&baz=1 HTTP/1.1\r\nHost: x\r\n\r\n")
         req = PicoHTTPParser.parse_request(raw)
-        @test clean_path(req) == "/path"
-        @test query_string(req) == "foo=bar&baz=1"
+        @test path(req) == "/path"
+        @test query(req) == "foo=bar&baz=1"
 
         raw2 = Vector{UInt8}("GET /noquery HTTP/1.1\r\nHost: x\r\n\r\n")
         req2 = PicoHTTPParser.parse_request(raw2)
-        @test clean_path(req2) == "/noquery"
-        @test query_string(req2) == ""
+        @test path(req2) == "/noquery"
+        @test query(req2) == ""
     end
 
     @testset "NullLogger" begin
         logger = NullLogger()
         # Should not throw
-        log_event(logger, INFO, "test")
-        log_event(logger, ERROR_LEVEL, "error")
+        write(logger, INFO, "test")
+        write(logger, ERROR_LEVEL, "error")
     end
 
     @testset "DefaultErrorHandler" begin
-        handler = DefaultErrorHandler()
+        handler = DefaultCatcher()
         resp = handle_error(handler, ErrorException("secret internal info"), nothing)
         @test resp.status == 500
         # Must NOT expose internal error message (OWASP)
