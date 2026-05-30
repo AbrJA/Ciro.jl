@@ -1,5 +1,6 @@
 using Test
 using Ciro
+using Ciro.Backend
 
 # The Backend module requires the C library (lib/ciro.so).
 # Gate tests that call ccall behind library availability.

@@ -174,6 +174,12 @@ cookies(ctx)                         # Dict{String,String}
 
 ### Middleware
 
+Middleware lives in `ext/CiroMiddleware/` and is loaded explicitly:
+
+```julia
+using Ciro.Middleware
+```
+
 Middleware is a callable struct wrapping an inner handler. Julia monomorphizes the full chain — **zero virtual dispatch overhead**:
 
 ```julia
@@ -279,10 +285,10 @@ Each module is a self-contained unit with clear interfaces:
 
 | Module | Purpose | Extend by |
 |--------|---------|-----------|
-| `Backend` | io_uring async I/O | Implement alternative backends (epoll, kqueue) |
+| `Backend` | io_uring async I/O | Implement `AbstractBackend` for alternative backends (epoll, kqueue) |
 | `Interfaces` | Types + abstract contracts | Add new abstract types |
 | `Router` | Trie-based dispatch | Implement `AbstractRouter` |
-| `Middleware` | Request/response transforms | Any `struct{H}` with `(m::T)(ctx)::Response` |
+| `Middleware` | Request/response transforms (in `ext/`) | Any `struct{H}` with `(m::T)(ctx)::Response` |
 | `Core` | HTTP server engine | Wrap or replace `start!` |
 
 ## Running Tests
@@ -291,7 +297,7 @@ Each module is a self-contained unit with clear interfaces:
 # Build C library (required for Backend tests)
 gcc -shared -fPIC -O3 -march=native -o lib/ciro.so lib/ciro.c -luring
 
-# Run full test suite (381 tests + Aqua.jl + JET.jl quality checks)
+# Run full test suite (405 tests + Aqua.jl + JET.jl quality checks)
 julia --project=. -e 'using Pkg; Pkg.test()'
 ```
 

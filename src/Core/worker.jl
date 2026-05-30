@@ -112,17 +112,22 @@ end
 @inline function _wants_close(req)::Bool
     req === nothing && return true
     for (k, v) in req.headers
-        if length(k) == 10
-            b = @inbounds codeunit(k, 1)
-            if b == UInt8('C') || b == UInt8('c')
-                if length(v) == 5
-                    vb = @inbounds codeunit(v, 1)
-                    (vb == UInt8('c') || vb == UInt8('C')) && return true
-                end
-            end
+        if ncodeunits(k) == 10 && ncodeunits(v) >= 5
+            _header_eq(k, "Connection") || _header_eq(k, "connection") || continue
+            _header_eq(v, "close") || _header_eq(v, "Close") || continue
+            return true
         end
     end
     return false
+end
+
+"""Zero-allocation case-sensitive string comparison for header keys/values."""
+@inline function _header_eq(a, b::String)::Bool
+    ncodeunits(a) != ncodeunits(b) && return false
+    for i in 1:ncodeunits(b)
+        @inbounds codeunit(a, i) != codeunit(b, i) && return false
+    end
+    return true
 end
 
 # ── Write Handler ───────────────────────────────────────────────────────────
@@ -148,31 +153,36 @@ end
 # ── Request Dispatch (type-stable via RouteResult) ──────────────────────────
 
 @inline function _dispatch(server::Server, req::Request)::Response
+    path = req.path
+    path_end = ncodeunits(path)
+    for i in 1:path_end
+        @inbounds codeunit(path, i) == UInt8('?') && (path_end = i - 1; break)
+    end
+    clean = SubString(String(path), 1, path_end)
+
+    method = Methods.from_string(req.method)
+    result = route(server.router, method, clean)
+
+    if not_found(result)
+        return fail(404, "Not Found")
+    end
+
+    if method_not_allowed(result)
+        allow_str = Methods.allow_header(result.allowed)
+        return Response(405, ["Allow" => allow_str, "Content-Type" => "text/plain"],
+                        Vector{UInt8}("Method Not Allowed"))
+    end
+
+    ctx = Context(req, result.params)
+    return _invoke_handler(server, result.handler, ctx)
+end
+
+"""Isolated handler invocation — @noinline keeps try/catch off the hot path."""
+@noinline function _invoke_handler(server::Server, handler, ctx::Context)::Response
     try
-        path = req.path
-        path_end = ncodeunits(path)
-        for i in 1:path_end
-            @inbounds codeunit(path, i) == UInt8('?') && (path_end = i - 1; break)
-        end
-        clean = SubString(String(path), 1, path_end)
-
-        method = Methods.from_string(req.method)
-        result = route(server.router, method, clean)
-
-        if not_found(result)
-            return fail(404, "Not Found")
-        end
-
-        if method_not_allowed(result)
-            allow_str = Methods.allow_header(result.allowed)
-            return Response(405, ["Allow" => allow_str, "Content-Type" => "text/plain"], Vector{UInt8}("Method Not Allowed"))
-        end
-
-        # Invoke handler with explicit Context (no hidden state)
-        ctx = Context(req, result.params)
-        response = result.handler(ctx)
+        response = handler(ctx)
         return response isa Response ? response : text(string(response))
     catch err
-        return intercept(server.catcher, err isa Exception ? err : ErrorException(string(err)), req)
+        return intercept(server.catcher, err isa Exception ? err : ErrorException(string(err)), ctx.req)
     end
 end

@@ -1,5 +1,6 @@
 using Test
 using Ciro
+using Ciro.Backend: IOUringBackend
 using PicoHTTPParser
 
 @testset "Interfaces" begin
@@ -320,5 +321,59 @@ using PicoHTTPParser
         @test r.status == 201
         @test r.body == data
         @test any(p -> contains(p.second, "application/json"), r.headers)
+    end
+
+    @testset "Case-insensitive header matching" begin
+        raw = Vector{UInt8}("GET / HTTP/1.1\r\nhost: example.com\r\ncontent-type: text/plain\r\nX-Custom-Header: value\r\n\r\n")
+        req = PicoHTTPParser.parse_request(raw)
+
+        # Case-insensitive key lookup
+        @test header(req, "Host") == "example.com"
+        @test header(req, "host") == "example.com"
+        @test header(req, "HOST") == "example.com"
+        @test header(req, "Content-Type") == "text/plain"
+        @test header(req, "content-type") == "text/plain"
+        @test header(req, "X-Custom-Header") == "value"
+        @test header(req, "x-custom-header") == "value"
+
+        @test hasheader(req, "Host")
+        @test hasheader(req, "HOST")
+        @test hasheader(req, "host")
+        @test !hasheader(req, "X-Missing")
+    end
+
+    @testset "Cookie boundary checking (no false match)" begin
+        raw = Vector{UInt8}("GET / HTTP/1.1\r\nHost: x\r\nCookie: my_session=xyz; session=abc; data=123\r\n\r\n")
+        req = PicoHTTPParser.parse_request(raw)
+
+        # Should NOT false-match "session" inside "my_session"
+        @test cookie(req, "session") == "abc"
+        @test cookie(req, "my_session") == "xyz"
+        @test cookie(req, "data") == "123"
+        @test cookie(req, "missing", "nope") == "nope"
+
+        # Edge case: cookie at start
+        raw2 = Vector{UInt8}("GET / HTTP/1.1\r\nHost: x\r\nCookie: token=abc123\r\n\r\n")
+        req2 = PicoHTTPParser.parse_request(raw2)
+        @test cookie(req2, "token") == "abc123"
+
+        # Edge case: cookie name is a prefix of another
+        raw3 = Vector{UInt8}("GET / HTTP/1.1\r\nHost: x\r\nCookie: id=1; user_id=2; myid=3\r\n\r\n")
+        req3 = PicoHTTPParser.parse_request(raw3)
+        @test cookie(req3, "id") == "1"
+        @test cookie(req3, "user_id") == "2"
+        @test cookie(req3, "myid") == "3"
+    end
+
+    @testset "AbstractBackend trait" begin
+        @test IOUringBackend <: AbstractBackend
+        backend = IOUringBackend(; queue_depth=2048, nworkers=2)
+        @test backend.queue_depth == 2048
+        @test backend.nworkers == 2
+
+        # Default constructor
+        default_backend = IOUringBackend()
+        @test default_backend.queue_depth == 4096
+        @test default_backend.nworkers == Threads.nthreads()
     end
 end

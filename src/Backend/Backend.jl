@@ -13,9 +13,20 @@ Design principles:
 """
 module Backend
 
+import ..Interfaces: AbstractBackend, start_backend!, stop_backend!
+
 # ── Library path (module-level const required by ccall + juliac) ─────────────
 # In production this becomes Ciro_jll.libciro
 const _LIB = normpath(joinpath(@__DIR__, "..", "..", "lib", "ciro.so"))
+
+function __init__()
+    if !isfile(_LIB)
+        @warn """Ciro: native library not found at $_LIB
+        The io_uring backend requires compiling the C library:
+          cd lib && make
+        Without it, `start!()` will fail."""
+    end
+end
 
 # ── Includes ────────────────────────────────────────────────────────────────
 include("types.jl")
@@ -24,8 +35,38 @@ include("engine.jl")
 include("pool.jl")
 include("eventloop.jl")
 
+# ── IOUringBackend — concrete AbstractBackend ───────────────────────────────
+
+"""
+    IOUringBackend <: AbstractBackend
+
+Linux io_uring backend (kernel ≥ 5.19). Thread-per-core with SO_REUSEPORT.
+This is the default backend used by `Server`.
+"""
+struct IOUringBackend <: AbstractBackend
+    queue_depth :: Int
+    nworkers    :: Int
+end
+
+IOUringBackend(; queue_depth::Int=4096, nworkers::Int=Threads.nthreads()) =
+    IOUringBackend(queue_depth, nworkers)
+
+function start_backend!(backend::IOUringBackend, handler_factory::F, port::Integer;
+                                   running::Threads.Atomic{Bool}=Threads.Atomic{Bool}(true)) where {F}
+    isfile(_LIB) || error("Ciro: native library not found at $_LIB. Compile with: cd lib && make")
+    run_eventloop_threaded!(handler_factory, port;
+                            nthreads=backend.nworkers,
+                            queue_depth=backend.queue_depth,
+                            running)
+end
+
+function stop_backend!(::IOUringBackend)
+    nothing  # Stopping is handled via the `running` atomic flag
+end
+
 # ── Public API ──────────────────────────────────────────────────────────────
-export Engine, Connection, ConnectionPool, BufferPool,
+export IOUringBackend,
+       Engine, Connection, ConnectionPool, BufferPool,
        EventType, ACCEPT, READ, WRITE,
        CompletionEvent,
        # Engine lifecycle

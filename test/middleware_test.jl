@@ -1,5 +1,6 @@
 using Test
 using Ciro
+using Ciro.Middleware
 using PicoHTTPParser
 
 function make_request(method::String="GET", path::String="/")

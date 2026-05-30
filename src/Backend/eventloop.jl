@@ -47,7 +47,7 @@ end
 ```
 """
 function run_eventloop!(handler::H, engine::Engine;
-                        running=Ref(true),
+                        running::Threads.Atomic{Bool}=Threads.Atomic{Bool}(true),
                         batch_size::Int=256) where {H}
     while running[]
         event = wait_completion(engine; timeout_ms=5)
@@ -80,7 +80,7 @@ per-thread and receives `(engine, tid)` to allow thread-local state.
 
 # Example
 ```julia
-running = Ref(true)
+running = Threads.Atomic{Bool}(true)
 run_eventloop_threaded!(port=8080, running=running) do engine, tid
     pool = ConnectionPool()
     buffers = BufferPool()
@@ -97,7 +97,7 @@ end
 function run_eventloop_threaded!(handler_factory::F, port::Integer;
                                 nthreads::Int=Threads.nthreads(),
                                 queue_depth::Int=4096,
-                                running=Ref(true)) where {F}
+                                running::Threads.Atomic{Bool}=Threads.Atomic{Bool}(true)) where {F}
     @assert nthreads > 0 "Need at least 1 thread"
 
     tasks = Vector{Task}(undef, nthreads)
