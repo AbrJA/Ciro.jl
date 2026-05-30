@@ -13,7 +13,7 @@ Design principles:
 """
 module Backend
 
-import ..Interfaces: AbstractBackend, start_backend!, stop_backend!
+import ..Interface: AbstractBackend, start_backend!, stop_backend!
 
 # ── Library path (module-level const required by ccall + juliac) ─────────────
 # In production this becomes Ciro_jll.libciro

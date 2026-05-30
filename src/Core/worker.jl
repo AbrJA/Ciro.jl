@@ -93,6 +93,11 @@ function _handle_read(server, engine, conn::Connection, bytes_read::Cint,
 
     should_close = _wants_close(req)
 
+    # Add Connection: close header per RFC 9110 when closing
+    if should_close
+        push!(response.headers, "Connection" => "close")
+    end
+
     out_buf = acquire!(buf_pool)
     nbytes = serialize_response!(out_buf, response)
     fd = conn_fd(conn)
@@ -100,10 +105,8 @@ function _handle_read(server, engine, conn::Connection, bytes_read::Cint,
     set_pending!(pending, fd, out_buf)
     should_close && mark_close!(pending, fd)
 
-    GC.@preserve out_buf begin
-        set_conn_op!(conn, WRITE)
-        queue_write!(engine, conn, pointer(out_buf), nbytes)
-    end
+    set_conn_op!(conn, WRITE)
+    queue_write!(engine, conn, pointer(out_buf), nbytes)
 
     Threads.atomic_sub!(server._in_flight, 1)
     nothing
@@ -112,20 +115,24 @@ end
 @inline function _wants_close(req)::Bool
     req === nothing && return true
     for (k, v) in req.headers
-        if ncodeunits(k) == 10 && ncodeunits(v) >= 5
-            _header_eq(k, "Connection") || _header_eq(k, "connection") || continue
-            _header_eq(v, "close") || _header_eq(v, "Close") || continue
-            return true
-        end
+        ncodeunits(k) != 10 && continue
+        # Case-insensitive check for "Connection"
+        _hdr_key_eq_ci(k, "connection") || continue
+        # Case-insensitive check for "close"
+        ncodeunits(v) == 5 && _hdr_key_eq_ci(v, "close") && return true
     end
     return false
 end
 
-"""Zero-allocation case-sensitive string comparison for header keys/values."""
-@inline function _header_eq(a, b::String)::Bool
+"""Zero-allocation case-insensitive ASCII string comparison."""
+@inline function _hdr_key_eq_ci(a, b::String)::Bool
     ncodeunits(a) != ncodeunits(b) && return false
     for i in 1:ncodeunits(b)
-        @inbounds codeunit(a, i) != codeunit(b, i) && return false
+        ca = @inbounds codeunit(a, i)
+        cb = @inbounds codeunit(b, i)
+        ca_lower = (UInt8('A') <= ca <= UInt8('Z')) ? (ca | 0x20) : ca
+        cb_lower = (UInt8('A') <= cb <= UInt8('Z')) ? (cb | 0x20) : cb
+        ca_lower != cb_lower && return false
     end
     return true
 end
@@ -170,7 +177,7 @@ end
     if method_not_allowed(result)
         allow_str = Methods.allow_header(result.allowed)
         return Response(405, ["Allow" => allow_str, "Content-Type" => "text/plain"],
-                        Vector{UInt8}("Method Not Allowed"))
+                        "Method Not Allowed")
     end
 
     ctx = Context(req, result.params)

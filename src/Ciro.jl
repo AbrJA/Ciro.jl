@@ -25,10 +25,11 @@ include("Backend/Backend.jl")
 include("Core/Core.jl")
 include("Router/Router.jl")
 
-using .Interfaces
+using .Interface
 using .Core
 using .Router
 using .Backend: IOUringBackend
+using PicoHTTPParser
 
 # ── Public API ──────────────────────────────────────────────────────────────
 # Types
@@ -40,7 +41,6 @@ export text, html, json, redirect, fail
 # Request access
 export header, hasheader, body, rawbody, content_type
 export path, query, queryparams, param
-export cookies, cookie, setcookie
 
 # Routing
 export Trie, register!, route
@@ -55,6 +55,33 @@ export AbstractRouter, AbstractLogger, AbstractCatcher, AbstractBackend
 export IOUringBackend
 export NullLogger, DefaultCatcher
 export Severity, Debug, Info, Warn, Error, Fatal
-export log!, intercept, status, start_backend!, stop_backend!
+export log!, intercept, start_backend!, stop_backend!
+
+# ── Precompilation ──────────────────────────────────────────────────────────
+using PrecompileTools
+
+@setup_workload begin
+    @compile_workload begin
+        router = Trie()
+        register!(router, Methods.GET, "/", ctx -> text("ok"))
+        register!(router, Methods.GET, "/users/:id::Int", ctx -> json("{\"id\":1}"))
+        register!(router, Methods.POST, "/data", ctx -> text("created"; status=201))
+
+        # Simulate dispatch hot path
+        raw = Vector{UInt8}("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        req = PicoHTTPParser.parse_request(raw)
+        server = Server(; router, port=19999)
+        resp = Core._dispatch(server, req)
+
+        # Serialize response
+        buf = Vector{UInt8}(undef, 4096)
+        Core.serialize_response!(buf, resp)
+
+        # Route with params
+        raw2 = Vector{UInt8}("GET /users/42 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        req2 = PicoHTTPParser.parse_request(raw2)
+        Core._dispatch(server, req2)
+    end
+end
 
 end

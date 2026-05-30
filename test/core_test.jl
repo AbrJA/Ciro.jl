@@ -91,7 +91,7 @@ using PicoHTTPParser
         req = PicoHTTPParser.parse_request(raw)
         resp = Ciro.Core._dispatch(server, req)
         @test resp.status == 200
-        @test String(copy(resp.body)) == "200"
+        @test resp.body == "200"
 
         # 404 for unregistered
         raw2 = Vector{UInt8}("GET /missing HTTP/1.1\r\nHost: x\r\n\r\n")
@@ -104,14 +104,14 @@ using PicoHTTPParser
         req3 = PicoHTTPParser.parse_request(raw3)
         resp3 = Ciro.Core._dispatch(server, req3)
         @test resp3.status == 500
-        @test !contains(String(copy(resp3.body)), "boom")
+        @test !contains(resp3.body::String, "boom")
 
         # Non-Response returns get text() wrapped
         raw4 = Vector{UInt8}("GET /bad-return HTTP/1.1\r\nHost: x\r\n\r\n")
         req4 = PicoHTTPParser.parse_request(raw4)
         resp4 = Ciro.Core._dispatch(server, req4)
         @test resp4.status == 200
-        @test String(copy(resp4.body)) == "42"
+        @test resp4.body == "42"
 
         # 405 for wrong method on existing path
         raw5 = Vector{UInt8}("POST /ok HTTP/1.1\r\nHost: x\r\n\r\n")
@@ -131,7 +131,7 @@ using PicoHTTPParser
         req = PicoHTTPParser.parse_request(raw)
         resp = Ciro.Core._dispatch(server, req)
         @test resp.status == 200
-        @test String(copy(resp.body)) == "found"
+        @test resp.body == "found"
     end
 
     @testset "Connection close detection" begin
@@ -190,12 +190,12 @@ using PicoHTTPParser
         req = PicoHTTPParser.parse_request(raw)
         resp = Ciro.Core._dispatch(server, req)
         @test resp.status == 200
-        @test String(copy(resp.body)) == """{"id":42}"""
+        @test resp.body == """{"id":42}"""
     end
 
     @testset "Custom catcher" begin
         struct TestCatcher <: AbstractCatcher end
-        Ciro.Interfaces.intercept(::TestCatcher, err::Exception, _) =
+        Ciro.Interface.intercept(::TestCatcher, err::Exception, _) =
             json("""{"error":"$(typeof(err))"}"""; status=503)
 
         router = Trie()
@@ -207,6 +207,6 @@ using PicoHTTPParser
         req = PicoHTTPParser.parse_request(raw)
         resp = Ciro.Core._dispatch(server, req)
         @test resp.status == 503
-        @test contains(String(copy(resp.body)), "ErrorException")
+        @test contains(resp.body::String, "ErrorException")
     end
 end

@@ -1,8 +1,8 @@
 module Router
 
-using ..Interfaces
-using ..Interfaces: Request, Response, Methods, AbstractRouter, RouteResult,
-                    matched, not_found, method_not_allowed, text, fail
+using ..Interface
+using ..Interface: Request, Response, Methods, AbstractRouter, RouteResult,
+                   matched, not_found, method_not_allowed, text, fail
 
 export Trie, get!, post!, put!, delete!, patch!, head!, options!, group!
 
@@ -88,7 +88,7 @@ Trie() = Trie(TrieNode())
 # Route Registration
 # ══════════════════════════════════════════════════════════════════════════════
 
-function Interfaces.register!(trie::Trie, method::UInt8, pattern::String, handler)
+function Interface.register!(trie::Trie, method::UInt8, pattern::String, handler)
     segments = _split_path(pattern)
     node = trie.root
 
@@ -180,19 +180,19 @@ export group!
 # Route Dispatch — returns RouteResult (type-stable)
 # ══════════════════════════════════════════════════════════════════════════════
 
-function Interfaces.route(trie::Trie, method::UInt8, path::AbstractString)::RouteResult
-    segments = _split_path(String(path))
+function Interface.route(trie::Trie, method::UInt8, path::AbstractString)::RouteResult
+    path_str = String(path)
+    len = sizeof(path_str)
     captured = Pair{Symbol,String}[]
 
-    handler = _match(trie.root, segments, 1, method, captured)
+    handler = _match_path(trie.root, path_str, 1, len, method, captured)
 
     if handler !== nothing
-        params_copy = isempty(captured) ? Pair{Symbol,String}[] : copy(captured)
-        return RouteResult(handler, params_copy)
+        return RouteResult(handler, captured)
     end
 
     # No handler found — check if path exists with other methods (→ 405)
-    allowed_mask = _find_allowed(trie.root, segments, 1)
+    allowed_mask = _find_allowed_path(trie.root, path_str, 1, len)
     if allowed_mask != 0x00
         return RouteResult(allowed_mask)
     end
@@ -202,29 +202,42 @@ function Interfaces.route(trie::Trie, method::UInt8, path::AbstractString)::Rout
 end
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Internal: Trie Matching
+# Internal: Zero-alloc Trie Matching (inline segment iteration)
 # ══════════════════════════════════════════════════════════════════════════════
 
-function _match(node::TrieNode, segments::Vector{String}, idx::Int,
-                method::UInt8, captured::Vector{Pair{Symbol,String}})
-    if idx > length(segments)
+function _match_path(node::TrieNode, path::String, pos::Int, len::Int,
+                     method::UInt8, captured::Vector{Pair{Symbol,String}})
+    # Skip leading slashes
+    while pos <= len && @inbounds(codeunit(path, pos)) == UInt8('/')
+        pos += 1
+    end
+
+    # End of path — check handlers at this node
+    if pos > len
         return get(node.handlers, method, nothing)
     end
 
-    seg = segments[idx]
+    # Extract current segment boundaries (zero-alloc SubString)
+    seg_start = pos
+    while pos <= len && @inbounds(codeunit(path, pos)) != UInt8('/')
+        pos += 1
+    end
+    seg = SubString(path, seg_start, pos - 1)
 
-    # Priority 1: exact static match
-    if haskey(node.children, seg)
-        result = _match(node.children[seg], segments, idx + 1, method, captured)
+    # Priority 1: exact static match (Dict lookup with SubString works via hash/isequal)
+    child = get(node.children, seg, nothing)
+    if child !== nothing
+        result = _match_path(child, path, pos, len, method, captured)
         result !== nothing && return result
     end
 
     # Priority 2: typed parameter
     if node.param_child !== nothing
-        (spec, child) = node.param_child
-        if _validate_param(seg, spec)
-            push!(captured, spec.name => seg)
-            result = _match(child, segments, idx + 1, method, captured)
+        (spec, pchild) = node.param_child
+        seg_str = String(seg)
+        if _validate_param(seg_str, spec)
+            push!(captured, spec.name => seg_str)
+            result = _match_path(pchild, path, pos, len, method, captured)
             result !== nothing && return result
             pop!(captured)
         end
@@ -239,8 +252,13 @@ function _match(node::TrieNode, segments::Vector{String}, idx::Int,
 end
 
 """Build a bitmask of all methods registered for a path (for 405 Allow header)."""
-function _find_allowed(node::TrieNode, segments::Vector{String}, idx::Int)::UInt8
-    if idx > length(segments)
+function _find_allowed_path(node::TrieNode, path::String, pos::Int, len::Int)::UInt8
+    # Skip leading slashes
+    while pos <= len && @inbounds(codeunit(path, pos)) == UInt8('/')
+        pos += 1
+    end
+
+    if pos > len
         mask = UInt8(0)
         for m in keys(node.handlers)
             mask |= Methods.bitmask(m)
@@ -248,17 +266,22 @@ function _find_allowed(node::TrieNode, segments::Vector{String}, idx::Int)::UInt
         return mask
     end
 
-    seg = segments[idx]
+    seg_start = pos
+    while pos <= len && @inbounds(codeunit(path, pos)) != UInt8('/')
+        pos += 1
+    end
+    seg = SubString(path, seg_start, pos - 1)
 
-    if haskey(node.children, seg)
-        result = _find_allowed(node.children[seg], segments, idx + 1)
+    child = get(node.children, seg, nothing)
+    if child !== nothing
+        result = _find_allowed_path(child, path, pos, len)
         result != 0x00 && return result
     end
 
     if node.param_child !== nothing
-        (spec, child) = node.param_child
-        if _validate_param(seg, spec)
-            result = _find_allowed(child, segments, idx + 1)
+        (spec, pchild) = node.param_child
+        if _validate_param(String(seg), spec)
+            result = _find_allowed_path(pchild, path, pos, len)
             result != 0x00 && return result
         end
     end
@@ -267,7 +290,7 @@ function _find_allowed(node::TrieNode, segments::Vector{String}, idx::Int)::UInt
 end
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Path Splitting
+# Path Splitting (used only at registration time, not in hot path)
 # ══════════════════════════════════════════════════════════════════════════════
 
 function _split_path(path::String)::Vector{String}

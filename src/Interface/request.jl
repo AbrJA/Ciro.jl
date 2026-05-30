@@ -52,66 +52,6 @@ hasheader(ctx::Context, key::String)::Bool                       = hasheader(ctx
 
 export header, hasheader
 
-# ── Cookie Utilities ────────────────────────────────────────────────────────
-
-"""Parse all cookies from a request into a Dict."""
-function cookies(req::Request)::Dict{String,String}
-    result = Dict{String,String}()
-    cookie_hdr = header(req, "Cookie")
-    isempty(cookie_hdr) && return result
-    for pair in split(cookie_hdr, ';')
-        kv = strip(pair)
-        eq = findfirst('=', kv)
-        eq === nothing && continue
-        result[kv[1:eq-1]] = kv[eq+1:end]
-    end
-    return result
-end
-
-"""Get a single cookie value."""
-function cookie(req::Request, name::String, default::String="")::String
-    cookie_hdr = header(req, "Cookie")
-    isempty(cookie_hdr) && return default
-    # Search for name= with proper boundary checking
-    needle = name * "="
-    pos = 1
-    hlen = ncodeunits(cookie_hdr)
-    while pos <= hlen
-        idx = findnext(needle, cookie_hdr, pos)
-        idx === nothing && return default
-        start_pos = first(idx)
-        # Ensure match is at start or preceded by "; " (cookie boundary)
-        if start_pos == 1 || (start_pos >= 3 &&
-            codeunit(cookie_hdr, start_pos - 2) == UInt8(';') &&
-            codeunit(cookie_hdr, start_pos - 1) == UInt8(' ')) ||
-            (start_pos >= 2 && codeunit(cookie_hdr, start_pos - 1) == UInt8(';'))
-            val_start = last(idx) + 1
-            stop = findnext(';', cookie_hdr, val_start)
-            return stop === nothing ? cookie_hdr[val_start:end] : cookie_hdr[val_start:stop-1]
-        end
-        pos = last(idx) + 1
-    end
-    return default
-end
-
-"""Build a Set-Cookie header value."""
-function setcookie(name::String, value::String;
-                   path::String="/", max_age::Int=-1,
-                   httponly::Bool=true, secure::Bool=false,
-                   samesite::String="Lax")::Pair{String,String}
-    parts = ["$name=$value", "Path=$path", "SameSite=$samesite"]
-    max_age >= 0 && push!(parts, "Max-Age=$max_age")
-    httponly && push!(parts, "HttpOnly")
-    secure && push!(parts, "Secure")
-    return "Set-Cookie" => join(parts, "; ")
-end
-
-# Context overloads
-cookies(ctx::Context)::Dict{String,String}                      = cookies(ctx.req)
-cookie(ctx::Context, name::String, default::String="")::String  = cookie(ctx.req, name, default)
-
-export cookies, cookie, setcookie
-
 # ── Body Utilities ──────────────────────────────────────────────────────────
 
 """Get request body as String (lazy copy)."""

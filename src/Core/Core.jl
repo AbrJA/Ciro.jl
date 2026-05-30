@@ -9,8 +9,8 @@ HTTP server engine. Provides:
 """
 module Core
 
-using ..Interfaces
-using ..Interfaces: Response, Context, RouteResult, matched, not_found, method_not_allowed, status, hasheader, log!
+using ..Interface
+using ..Interface: Response, Context, RouteResult, matched, not_found, method_not_allowed, status, hasheader, log!
 using ..Backend
 using PicoHTTPParser
 using Base.Threads: @threads, nthreads

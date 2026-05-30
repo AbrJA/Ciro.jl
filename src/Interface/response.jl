@@ -5,25 +5,21 @@
 struct Response
     status  :: Int
     headers :: Vector{Pair{String,String}}
-    body    :: Vector{UInt8}
-end
-
-function Response(status::Int, body::String, headers::Vector{Pair{String,String}}=Pair{String,String}[])
-    Response(status, headers, Vector{UInt8}(body))
+    body    :: Union{String, Vector{UInt8}}
 end
 
 # ── Response Builders ───────────────────────────────────────────────────────
 
 function text(body::String; status::Int=200)
-    Response(status, ["Content-Type" => "text/plain; charset=utf-8"], Vector{UInt8}(body))
+    Response(status, ["Content-Type" => "text/plain; charset=utf-8"], body)
 end
 
 function html(body::String; status::Int=200)
-    Response(status, ["Content-Type" => "text/html; charset=utf-8"], Vector{UInt8}(body))
+    Response(status, ["Content-Type" => "text/html; charset=utf-8"], body)
 end
 
 function json(body::String; status::Int=200)
-    Response(status, ["Content-Type" => "application/json; charset=utf-8"], Vector{UInt8}(body))
+    Response(status, ["Content-Type" => "application/json; charset=utf-8"], body)
 end
 
 function json(body::Vector{UInt8}; status::Int=200)
@@ -31,12 +27,11 @@ function json(body::Vector{UInt8}; status::Int=200)
 end
 
 function redirect(url::String; status::Int=302)
-    Response(status, ["Location" => url], UInt8[])
+    Response(status, ["Location" => url], "")
 end
 
 function fail(status::Int, message::String="")
-    body = isempty(message) ? UInt8[] : Vector{UInt8}(message)
-    Response(status, ["Content-Type" => "text/plain"], body)
+    Response(status, ["Content-Type" => "text/plain"], message)
 end
 
 export Response, text, html, json, redirect, fail

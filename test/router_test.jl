@@ -2,6 +2,7 @@ using Test
 using Ciro
 using PicoHTTPParser
 
+
 @testset "Router" begin
 
     @testset "Static routes" begin
@@ -78,19 +79,19 @@ using PicoHTTPParser
         result = route(r, Methods.GET, "/items/special")
         @test matched(result)
         resp = result.handler(Context(req, result.params))
-        @test String(copy(resp.body)) == "static"
+        @test resp.body == "static"
 
         # Param for other values
         result2 = route(r, Methods.GET, "/items/123")
         @test matched(result2)
         resp2 = result2.handler(Context(req, result2.params))
-        @test String(copy(resp2.body)) == "param"
+        @test resp2.body == "param"
 
         # Wildcard for deeper paths
         result3 = route(r, Methods.GET, "/items/a/b")
         @test matched(result3)
         resp3 = result3.handler(Context(req, result3.params))
-        @test String(copy(resp3.body)) == "wildcard"
+        @test resp3.body == "wildcard"
     end
 
     @testset "Multiple methods same path" begin
@@ -104,16 +105,16 @@ using PicoHTTPParser
         req = PicoHTTPParser.parse_request(raw)
 
         r1 = route(r, Methods.GET, "/resource")
-        @test String(copy(r1.handler(Context(req, r1.params)).body)) == "get"
+        @test r1.handler(Context(req, r1.params)).body == "get"
 
         r2 = route(r, Methods.POST, "/resource")
-        @test String(copy(r2.handler(Context(req, r2.params)).body)) == "post"
+        @test r2.handler(Context(req, r2.params)).body == "post"
 
         r3 = route(r, Methods.PUT, "/resource")
-        @test String(copy(r3.handler(Context(req, r3.params)).body)) == "put"
+        @test r3.handler(Context(req, r3.params)).body == "put"
 
         r4 = route(r, Methods.DELETE, "/resource")
-        @test String(copy(r4.handler(Context(req, r4.params)).body)) == "delete"
+        @test r4.handler(Context(req, r4.params)).body == "delete"
     end
 
     @testset "Handler invocation with params" begin
@@ -126,7 +127,7 @@ using PicoHTTPParser
         result = route(r, Methods.GET, "/hello/Julia")
         resp = result.handler(Context(req, result.params))
         @test resp.status == 200
-        @test String(copy(resp.body)) == "Hello, Julia!"
+        @test resp.body == "Hello, Julia!"
     end
 
     @testset "Trailing slashes normalized" begin
@@ -150,7 +151,7 @@ using PicoHTTPParser
         @test matched(result)
         ctx = Context(req, result.params)
         resp = result.handler(ctx)
-        @test String(copy(resp.body)) == "user 42"
+        @test resp.body == "user 42"
         @test param(ctx, Int, :id) == 42
 
         # Invalid integer → no match on this param, falls through
@@ -164,7 +165,7 @@ using PicoHTTPParser
         result3 = route(r, Methods.GET, "/files/report.pdf")
         @test matched(result3)
         resp3 = result3.handler(Context(req, result3.params))
-        @test String(copy(resp3.body)) == "file report.pdf"
+        @test resp3.body == "file report.pdf"
     end
 
     @testset "Route groups" begin
@@ -180,15 +181,15 @@ using PicoHTTPParser
 
         result = route(r, Methods.GET, "/api/v1/users")
         @test matched(result)
-        @test String(copy(result.handler(Context(req, result.params)).body)) == "users list"
+        @test result.handler(Context(req, result.params)).body == "users list"
 
         result2 = route(r, Methods.POST, "/api/v1/users")
         @test matched(result2)
-        @test String(copy(result2.handler(Context(req, result2.params)).body)) == "user created"
+        @test result2.handler(Context(req, result2.params)).body == "user created"
 
         result3 = route(r, Methods.GET, "/api/v1/items/77")
         @test matched(result3)
-        @test String(copy(result3.handler(Context(req, result3.params)).body)) == "item 77"
+        @test result3.handler(Context(req, result3.params)).body == "item 77"
 
         # Outside group → 404
         @test not_found(route(r, Methods.GET, "/api/v1/other"))
