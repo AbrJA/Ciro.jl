@@ -16,7 +16,6 @@ start!(server)
 ```
 
 # Extension
-- Custom middleware: `using Ciro.Middleware`
 - Low-level io_uring: `using Ciro.Backend`
 """
 module Ciro
@@ -25,9 +24,6 @@ include("Interface/Interface.jl")
 include("Backend/Backend.jl")
 include("Core/Core.jl")
 include("Router/Router.jl")
-
-# Middleware lives in ext/ for future extraction to CiroMiddleware.jl
-include("../ext/CiroMiddleware/CiroMiddleware.jl")
 
 using .Interfaces
 using .Core
