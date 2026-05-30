@@ -1,138 +1,155 @@
 #!/usr/bin/env julia
-# Ciro.jl — Feature showcase server
-# Run with: julia --threads=auto --project=. server.jl
+# ══════════════════════════════════════════════════════════════════════════════
+# Ciro.jl — ML Model Serving Example
+# Run: julia --threads=auto --project=. server.jl
+# Test: curl http://localhost:8080/health
+#       curl -X POST http://localhost:8080/api/v1/predict -d '{"features":[1.0,2.0,3.0]}'
+# Deps: Pkg.add("JSON") — JSON is not bundled with Ciro (keeps core lightweight)
+# ══════════════════════════════════════════════════════════════════════════════
 using Ciro
+using JSON
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Custom middleware (functor pattern — zero virtual dispatch)
+# "Model" — simulates a loaded ML model (replace with your real model)
 # ══════════════════════════════════════════════════════════════════════════════
 
-struct WithAuth{H}
-    handler :: H
-    token   :: String
+struct MockModel
+    weights :: Vector{Float64}
+    bias    :: Float64
 end
 
-function (m::WithAuth)(req)
-    auth = header(req, "Authorization")
-    auth == "Bearer $(m.token)" || return fail(401, "Unauthorized")
-    return m.handler(req)
+"""Simulate inference: dot(weights, features) + bias"""
+function predict!(model::MockModel, features::Vector{Float64})::Float64
+    length(features) != length(model.weights) && error("dimension mismatch")
+    s = model.bias
+    @inbounds for i in eachindex(model.weights)
+        s += model.weights[i] * features[i]
+    end
+    return s
 end
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Custom error catcher
-# ══════════════════════════════════════════════════════════════════════════════
-
-struct AppCatcher <: AbstractCatcher end
-
-function intercept(::AppCatcher, err::Exception, req)
-    @error "Unhandled $(typeof(err))" exception=err
-    return json("""{"error":"internal_error","message":"Something went wrong"}"""; status=500)
-end
+# Load model once at startup (const for type stability)
+const MODEL = MockModel([0.5, -0.3, 0.8], 0.1)
+const MODEL_VERSION = "mock-linear-v1"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Handlers
 # ══════════════════════════════════════════════════════════════════════════════
 
-# — Static routes ─────────────────────────────────────────────────────────────
-
-function handle_root(req)
-    text("Hello from Ciro.jl!")
+function handle_health(ctx::Context)
+    json("""{"status":"healthy","model":"$MODEL_VERSION","threads":$(Threads.nthreads())}""")
 end
 
-function handle_json(req)
-    json("""{"framework":"Ciro.jl","status":"ok","version":"0.1.0"}""")
+function handle_predict(ctx::Context)
+    payload = body(ctx)
+    isempty(payload) && return fail(400, """{"error":"empty body"}""")
+
+    data = try
+        JSON.parse(payload)
+    catch e
+        return fail(400, """{"error":"invalid JSON: $(e.msg)"}""")
+    end
+
+    features_raw = get(data, "features", nothing)
+    features_raw === nothing && return fail(400, """{"error":"missing 'features' array"}""")
+    features_raw isa Vector || return fail(400, """{"error":"'features' must be an array"}""")
+
+    features = try
+        Float64[Float64(x) for x in features_raw]
+    catch
+        return fail(400, """{"error":"'features' must contain numbers"}""")
+    end
+
+    result = try
+        predict!(MODEL, features)
+    catch e
+        return fail(422, """{"error":"$(e.msg)"}""")
+    end
+
+    json("""{"prediction":$result,"model":"$MODEL_VERSION"}""")
 end
 
-function handle_html(req)
-    html("""
-    <!DOCTYPE html>
-    <html><head><title>Ciro.jl</title></head>
-    <body><h1>Ciro.jl</h1><p>High-performance Julia web framework.</p></body>
-    </html>
-    """)
+function handle_batch_predict(ctx::Context)
+    payload = body(ctx)
+    isempty(payload) && return fail(400, """{"error":"empty body"}""")
+
+    data = try
+        JSON.parse(payload)
+    catch e
+        return fail(400, """{"error":"invalid JSON: $(e.msg)"}""")
+    end
+
+    batch = get(data, "batch", nothing)
+    batch === nothing && return fail(400, """{"error":"missing 'batch' array"}""")
+    batch isa Vector || return fail(400, """{"error":"'batch' must be an array of feature vectors"}""")
+
+    predictions = Float64[]
+    sizehint!(predictions, length(batch))
+
+    for (i, item) in enumerate(batch)
+        item isa Vector || return fail(400, """{"error":"batch[$i] must be an array"}""")
+        features = try
+            Float64[Float64(x) for x in item]
+        catch
+            return fail(400, """{"error":"batch[$i] contains non-numeric values"}""")
+        end
+        push!(predictions, predict!(MODEL, features))
+    end
+
+    preds_str = join(predictions, ",")
+    json("""{"predictions":[$preds_str],"count":$(length(predictions)),"model":"$MODEL_VERSION"}""")
 end
 
-function handle_redirect(req)
-    redirect("/")
+function handle_model_info(ctx::Context)
+    json("""{
+  "name":"$MODEL_VERSION",
+  "input_dim":$(length(MODEL.weights)),
+  "type":"linear",
+  "weights":$(JSON.json(MODEL.weights)),
+  "bias":$(MODEL.bias)
+}""")
 end
 
-# — Route parameters (typed) ──────────────────────────────────────────────────
-
-function handle_user(req)
-    id = param(Int, :id)
-    id === nothing && return fail(400, "id must be an integer")
-    json("""{"user_id":$id,"name":"User $id"}""")
-end
-
-function handle_post_comment(req)
-    post_id = param(Int, :post_id)
-    comment_id = param(Int, :comment_id)
-    json("""{"post":$post_id,"comment":$comment_id}""")
-end
-
-# — Wildcard routes ───────────────────────────────────────────────────────────
-
-function handle_files(req)
-    text("Serving: $(path(req))")
-end
-
-# — Request body ──────────────────────────────────────────────────────────────
-
-function handle_echo(req)
-    ct = content_type(req)
-    payload = body(req)
+function handle_echo(ctx::Context)
+    ct = content_type(ctx)
+    payload = body(ctx)
     isempty(payload) && return fail(400, "Empty body")
-    text("Echo [$ct]: $payload")
+    json("""{"content_type":"$ct","body_length":$(length(payload)),"echo":$(JSON.json(payload))}""")
 end
 
-function handle_upload(req)
-    raw = rawbody(req)
-    text("Received $(length(raw)) bytes")
+function handle_root(ctx::Context)
+    text("""Ciro.jl ML Server — v0.1.0
+Endpoints:
+  GET  /health                → Server health check
+  GET  /api/v1/model          → Model metadata
+  POST /api/v1/predict        → Single prediction
+  POST /api/v1/batch          → Batch predictions
+  POST /api/v1/echo           → Echo request body
+""")
 end
 
-# — Query parameters ──────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Custom Error Catcher — returns JSON errors (never leaks internals)
+# ══════════════════════════════════════════════════════════════════════════════
 
-function handle_search(req)
-    qp = queryparams(req)
-    q = get(qp, "q", "")
-    page = get(qp, "page", "1")
-    isempty(q) && return fail(400, "Missing query param: q")
-    json("""{"query":"$q","page":$page,"results":[]}""")
+struct JsonCatcher <: AbstractCatcher end
+
+function Ciro.Interfaces.intercept(::JsonCatcher, err::Exception, _)
+    @error "Unhandled exception" exception=err
+    json("""{"error":"internal_server_error"}"""; status=500)
 end
 
-# — Cookies ───────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Middleware Stack
+# ══════════════════════════════════════════════════════════════════════════════
 
-function handle_set_cookie(req)
-    resp = text("Cookie set!")
-    push!(resp.headers, setcookie("session", "abc123"; max_age=3600, httponly=true))
-    return resp
-end
-
-function handle_read_cookie(req)
-    sess = cookie(req, "session", "none")
-    all_cookies = cookies(req)
-    json("""{"session":"$sess","total_cookies":$(length(all_cookies))}""")
-end
-
-# — Headers ───────────────────────────────────────────────────────────────────
-
-function handle_headers(req)
-    ua = header(req, "User-Agent", "unknown")
-    accept = header(req, "Accept", "*/*")
-    json("""{"user_agent":"$ua","accept":"$accept"}""")
-end
-
-# — Protected (custom middleware) ─────────────────────────────────────────────
-
-function handle_secret(req)
-    json("""{"message":"Access granted","user":"authenticated"}""")
-end
-
-# — Error triggering ──────────────────────────────────────────────────────────
-
-function handle_panic(req)
-    error("deliberate error — caught by AppCatcher")
-end
+const STACK = handler -> WithCORS(
+    WithRequestId(
+        WithTiming(
+            WithLogger(handler)
+        )
+    )
+)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Router
@@ -140,48 +157,15 @@ end
 
 router = Trie()
 
-# Static routes
-get!(router, "/",        handle_root)
-get!(router, "/json",    handle_json)
-get!(router, "/html",    handle_html)
-get!(router, "/redir",   handle_redirect)
-get!(router, "/headers", handle_headers)
+get!(router, "/", STACK(handle_root))
+get!(router, "/health", STACK(handle_health))
 
-# Route groups — /api/v1 namespace
 group!(router, "/api/v1") do g
-    get!(g, "/search",                           handle_search)
-    post!(g, "/echo",                            handle_echo)
-    post!(g, "/upload",                          handle_upload)
-
-    # Typed integer params  (:id::Int rejects non-integers at the router level)
-    get!(g, "/users/:id::Int",                   handle_user)
-    get!(g, "/posts/:post_id::Int/comments/:comment_id::Int", handle_post_comment)
-
-    # Cookies
-    get!(g, "/set-cookie",                       handle_set_cookie)
-    get!(g, "/read-cookie",                      handle_read_cookie)
-
-    # Protected with custom middleware
-    get!(g, "/secret",  WithAuth(handle_secret, "supersecret"))
-
-    # Error handling demonstration
-    get!(g, "/panic",   handle_panic)
+    get!(g, "/model", STACK(handle_model_info))
+    post!(g, "/predict", STACK(handle_predict))
+    post!(g, "/batch", STACK(handle_batch_predict))
+    post!(g, "/echo", STACK(handle_echo))
 end
-
-# Wildcard — must be registered on the trie directly (not inside a group)
-get!(router, "/files/*", handle_files)
-
-# HEAD is auto-generated from GET (RFC 9110 §9.3.2) — no explicit registration needed
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Middleware stack (compose outermost → innermost)
-# ══════════════════════════════════════════════════════════════════════════════
-#
-# Request flows:  WithRateLimit → WithSecurityHeaders → WithCORS → WithRequestId
-#                  → WithTiming → WithLogger → router dispatch
-#
-# Each layer is a generic struct — the compiler monomorphizes the entire chain
-# into a single inlined function with no virtual dispatch.
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Server
@@ -189,48 +173,28 @@ get!(router, "/files/*", handle_files)
 
 server = Server(;
     router,
-    catcher  = AppCatcher(),
-    port     = 3001,
-    host     = "0.0.0.0",
-    max_body_size = 4 * 1_048_576,  # 4 MiB
+    catcher = JsonCatcher(),
+    port    = 8080,
+    host    = "0.0.0.0",
+    max_body_size = 10 * 1_048_576,  # 10 MiB (batch payloads can be large)
     shutdown_timeout = 10.0,
 )
 
 println("""
-Ciro.jl feature showcase — http://localhost:3001
-
-  Static routes:
-    GET  /                         → Hello plaintext
-    GET  /json                     → JSON response
-    GET  /html                     → HTML response
-    GET  /redir                    → Redirect to /
-    GET  /headers                  → Echo request headers
-
-  Route groups (/api/v1):
-    GET  /api/v1/search?q=foo&page=2     → Query params
-    POST /api/v1/echo                    → Echo body (Content-Type preserved)
-    POST /api/v1/upload                  → Raw bytes upload
-    GET  /api/v1/users/42               → Typed param :id::Int
-    GET  /api/v1/users/abc              → 404 (Int validation fails)
-    GET  /api/v1/posts/1/comments/5     → Multi typed params
-    GET  /api/v1/set-cookie             → Set session cookie
-    GET  /api/v1/read-cookie            → Read session cookie
-    GET  /api/v1/secret                 → 401 without Bearer token
-    GET  /api/v1/panic                  → 500 via AppCatcher (JSON error)
-
-  Wildcard:
-    GET  /files/any/path/here           → Wildcard catch-all
-
-  HEAD auto-generation:
-    HEAD /                              → 200, no body (from GET handler)
-
-  Middleware applied globally (outermost → innermost):
-    WithRateLimit     — 100 req/min per IP (token bucket)
-    WithSecurityHeaders — HSTS, CSP, X-Frame-Options, nosniff
-    WithCORS          — Access-Control-Allow-Origin: *
-    WithRequestId     — X-Request-Id
-    WithTiming        — X-Response-Time
-    WithLogger        — stdout access log
+╔══════════════════════════════════════════════════════════════╗
+║  Ciro.jl ML Server                                          ║
+║  http://localhost:8080                                       ║
+║  Threads: $(lpad(Threads.nthreads(), 2))  |  Model: $MODEL_VERSION              ║
+╠══════════════════════════════════════════════════════════════╣
+║  Test with:                                                  ║
+║  curl localhost:8080/health                                  ║
+║  curl -X POST localhost:8080/api/v1/predict \\                ║
+║       -H 'Content-Type: application/json' \\                  ║
+║       -d '{"features":[1.0,2.0,3.0]}'                        ║
+║  curl -X POST localhost:8080/api/v1/batch \\                  ║
+║       -H 'Content-Type: application/json' \\                  ║
+║       -d '{"batch":[[1,2,3],[4,5,6],[7,8,9]]}'               ║
+╚══════════════════════════════════════════════════════════════╝
 """)
 
 start!(server)

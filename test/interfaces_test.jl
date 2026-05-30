@@ -96,8 +96,8 @@ using PicoHTTPParser
 
     @testset "NullLogger" begin
         logger = NullLogger()
-        Ciro.Interfaces.write(logger, Info, "test")
-        Ciro.Interfaces.write(logger, Error, "error")
+        log!(logger, Info, "test")
+        log!(logger, Error, "error")
     end
 
     @testset "DefaultCatcher" begin
@@ -107,5 +107,218 @@ using PicoHTTPParser
         body_str = String(copy(resp.body))
         @test !contains(body_str, "secret internal info")
         @test body_str == "Internal Server Error"
+    end
+
+    @testset "Context construction" begin
+        raw = Vector{UInt8}("GET /hello?x=1 HTTP/1.1\r\nHost: localhost\r\nX-Foo: bar\r\n\r\n")
+        req = PicoHTTPParser.parse_request(raw)
+
+        # No-param constructor
+        ctx = Context(req)
+        @test isempty(ctx.params)
+        @test ctx.req === req
+
+        # With params
+        params = [:id => "42", :name => "Julia"]
+        ctx2 = Context(req, params)
+        @test length(ctx2.params) == 2
+    end
+
+    @testset "Context param access" begin
+        raw = Vector{UInt8}("GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+        req = PicoHTTPParser.parse_request(raw)
+        ctx = Context(req, [:id => "99", :score => "3.14", :tag => "hello"])
+
+        # String param
+        @test param(ctx, :id) == "99"
+        @test param(ctx, :missing) == ""
+        @test param(ctx, :missing, "default") == "default"
+
+        # Typed param — Int
+        @test param(ctx, Int, :id) == 99
+        @test param(ctx, Int, :score) === nothing  # not a valid Int
+        @test param(ctx, Int, :missing) === nothing
+
+        # Typed param — Float64
+        @test param(ctx, Float64, :score) == 3.14
+    end
+
+    @testset "Context request utility forwarding" begin
+        raw = Vector{UInt8}("GET /path?a=1&b=2 HTTP/1.1\r\nHost: x\r\nX-Key: val\r\nCookie: session=abc\r\n\r\n")
+        req = PicoHTTPParser.parse_request(raw)
+        ctx = Context(req)
+
+        @test header(ctx, "X-Key") == "val"
+        @test header(ctx, "Missing", "def") == "def"
+        @test hasheader(ctx, "Host")
+        @test !hasheader(ctx, "Ghost")
+        @test path(ctx) == "/path"
+        @test query(ctx) == "a=1&b=2"
+        qp = queryparams(ctx)
+        @test qp["a"] == "1"
+        @test qp["b"] == "2"
+        @test cookie(ctx, "session") == "abc"
+        @test cookie(ctx, "missing", "x") == "x"
+    end
+
+    @testset "Body utilities" begin
+        raw = Vector{UInt8}("POST /data HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{\"key\":\"val\"}")
+        req = PicoHTTPParser.parse_request(raw)
+        ctx = Context(req)
+
+        @test body(ctx) == "{\"key\":\"val\"}"
+        @test body(req) == "{\"key\":\"val\"}"
+        @test rawbody(ctx) == Vector{UInt8}("{\"key\":\"val\"}")
+        @test rawbody(req) == Vector{UInt8}("{\"key\":\"val\"}")
+        @test content_type(ctx) == "application/json"
+        @test content_type(req) == "application/json"
+    end
+
+    @testset "Cookie utilities - multiple cookies" begin
+        raw = Vector{UInt8}("GET / HTTP/1.1\r\nHost: x\r\nCookie: a=1; b=2; session=xyz\r\n\r\n")
+        req = PicoHTTPParser.parse_request(raw)
+        ctx = Context(req)
+
+        @test cookie(ctx, "a") == "1"
+        @test cookie(ctx, "b") == "2"
+        @test cookie(ctx, "session") == "xyz"
+        @test cookie(ctx, "missing", "nope") == "nope"
+
+        all = cookies(ctx)
+        @test length(all) == 3
+        @test all["a"] == "1"
+        @test all["session"] == "xyz"
+    end
+
+    @testset "Cookie utilities - no cookies" begin
+        raw = Vector{UInt8}("GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+        req = PicoHTTPParser.parse_request(raw)
+        @test cookies(req) == Dict{String,String}()
+        @test cookie(req, "anything", "fallback") == "fallback"
+    end
+
+    @testset "setcookie" begin
+        sc = setcookie("token", "abc123"; path="/api", max_age=3600, httponly=true, secure=true, samesite="Strict")
+        @test sc.first == "Set-Cookie"
+        @test contains(sc.second, "token=abc123")
+        @test contains(sc.second, "Path=/api")
+        @test contains(sc.second, "Max-Age=3600")
+        @test contains(sc.second, "HttpOnly")
+        @test contains(sc.second, "Secure")
+        @test contains(sc.second, "SameSite=Strict")
+
+        # Default options
+        sc2 = setcookie("s", "v")
+        @test contains(sc2.second, "Path=/")
+        @test contains(sc2.second, "SameSite=Lax")
+        @test contains(sc2.second, "HttpOnly")
+        @test !contains(sc2.second, "Secure")
+        @test !contains(sc2.second, "Max-Age")
+    end
+
+    @testset "Query params - edge cases" begin
+        # Key without value
+        raw = Vector{UInt8}("GET /p?flag&k=v HTTP/1.1\r\nHost: x\r\n\r\n")
+        req = PicoHTTPParser.parse_request(raw)
+        qp = queryparams(req)
+        @test qp["flag"] == ""
+        @test qp["k"] == "v"
+
+        # Empty query
+        raw2 = Vector{UInt8}("GET /p? HTTP/1.1\r\nHost: x\r\n\r\n")
+        req2 = PicoHTTPParser.parse_request(raw2)
+        @test queryparams(req2) == Dict{String,String}()
+    end
+
+    @testset "Methods - bitmask operations" begin
+        @test Methods.bitmask(Methods.GET) == 0x01
+        @test Methods.bitmask(Methods.POST) == 0x02
+        @test Methods.bitmask(Methods.PUT) == 0x04
+        @test Methods.bitmask(Methods.DELETE) == 0x08
+        @test Methods.bitmask(Methods.UNKNOWN) == 0x00
+
+        # allow_header
+        mask = Methods.bitmask(Methods.GET) | Methods.bitmask(Methods.POST)
+        hdr = Methods.allow_header(mask)
+        @test contains(hdr, "GET")
+        @test contains(hdr, "POST")
+        @test !contains(hdr, "DELETE")
+    end
+
+    @testset "Methods - to_string edge cases" begin
+        @test Methods.to_string(UInt8(99)) == "UNKNOWN"
+        @test Methods.to_string(Methods.PUT) == "PUT"
+        @test Methods.to_string(Methods.DELETE) == "DELETE"
+        @test Methods.to_string(Methods.PATCH) == "PATCH"
+        @test Methods.to_string(Methods.HEAD) == "HEAD"
+        @test Methods.to_string(Methods.OPTIONS) == "OPTIONS"
+    end
+
+    @testset "Status lines - all codes" begin
+        @test status(302) == "HTTP/1.1 302 Found\r\n"
+        @test status(301) == "HTTP/1.1 301 Moved Permanently\r\n"
+        @test status(304) == "HTTP/1.1 304 Not Modified\r\n"
+        @test status(400) == "HTTP/1.1 400 Bad Request\r\n"
+        @test status(401) == "HTTP/1.1 401 Unauthorized\r\n"
+        @test status(403) == "HTTP/1.1 403 Forbidden\r\n"
+        @test status(405) == "HTTP/1.1 405 Method Not Allowed\r\n"
+        @test status(408) == "HTTP/1.1 408 Request Timeout\r\n"
+        @test status(413) == "HTTP/1.1 413 Content Too Large\r\n"
+        @test status(422) == "HTTP/1.1 422 Unprocessable Entity\r\n"
+        @test status(429) == "HTTP/1.1 429 Too Many Requests\r\n"
+        @test status(502) == "HTTP/1.1 502 Bad Gateway\r\n"
+        @test status(503) == "HTTP/1.1 503 Service Unavailable\r\n"
+        # Unknown status code
+        @test contains(status(999), "HTTP/1.1 999")
+        @test contains(status(0), "HTTP/1.1 0")
+    end
+
+    @testset "RouteResult constructors" begin
+        # Empty (404)
+        r = RouteResult()
+        @test r.handler === nothing
+        @test isempty(r.params)
+        @test r.allowed == 0x00
+        @test not_found(r)
+        @test !matched(r)
+        @test !method_not_allowed(r)
+
+        # Method not allowed (405)
+        r2 = RouteResult(UInt8(0x03))
+        @test r2.handler === nothing
+        @test r2.allowed == 0x03
+        @test method_not_allowed(r2)
+        @test !matched(r2)
+        @test !not_found(r2)
+
+        # Matched
+        handler = ctx -> text("ok")
+        r3 = RouteResult(handler, Pair{Symbol,String}[])
+        @test matched(r3)
+        @test !not_found(r3)
+        @test !method_not_allowed(r3)
+    end
+
+    @testset "Severity enum" begin
+        @test Int(Debug) == 1
+        @test Int(Info) == 2
+        @test Int(Warn) == 3
+        @test Int(Error) == 4
+        @test Int(Fatal) == 5
+    end
+
+    @testset "Response with binary body" begin
+        body_bytes = UInt8[0x89, 0x50, 0x4E, 0x47]  # PNG header
+        r = Response(200, ["Content-Type" => "image/png"], body_bytes)
+        @test r.status == 200
+        @test r.body == body_bytes
+    end
+
+    @testset "json with byte vector body" begin
+        data = Vector{UInt8}("{\"a\":1}")
+        r = json(data; status=201)
+        @test r.status == 201
+        @test r.body == data
+        @test any(p -> contains(p.second, "application/json"), r.headers)
     end
 end

@@ -133,4 +133,80 @@ using PicoHTTPParser
         @test resp.status == 200
         @test String(copy(resp.body)) == "found"
     end
+
+    @testset "Connection close detection" begin
+        # Connection: close header should trigger close
+        raw_close = Vector{UInt8}("GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        req_close = PicoHTTPParser.parse_request(raw_close)
+        @test Ciro.Core._wants_close(req_close) == true
+
+        # No Connection header → keep alive
+        raw_keep = Vector{UInt8}("GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+        req_keep = PicoHTTPParser.parse_request(raw_keep)
+        @test Ciro.Core._wants_close(req_keep) == false
+
+        # nothing request → close
+        @test Ciro.Core._wants_close(nothing) == true
+    end
+
+    @testset "Serialization - large response" begin
+        buf = Vector{UInt8}(undef, 64)
+        big_body = repeat("A", 200_000)
+        resp = text(big_body)
+        n = Ciro.Core.serialize_response!(buf, resp)
+        @test n > 200_000
+        @test length(buf) >= n
+        output = String(copy(buf[1:n]))
+        @test endswith(output, big_body)
+    end
+
+    @testset "Serialization - empty headers" begin
+        buf = Vector{UInt8}(undef, 4096)
+        resp = Response(204, Pair{String,String}[], UInt8[])
+        n = Ciro.Core.serialize_response!(buf, resp)
+        output = String(copy(buf[1:n]))
+        @test startswith(output, "HTTP/1.1 204")
+        @test contains(output, "Content-Length: 0")
+    end
+
+    @testset "Serialization - many headers" begin
+        buf = Vector{UInt8}(undef, 4096)
+        headers = ["H$i" => "value$i" for i in 1:20]
+        resp = Response(200, headers, Vector{UInt8}("body"))
+        n = Ciro.Core.serialize_response!(buf, resp)
+        output = String(copy(buf[1:n]))
+        @test contains(output, "H1: value1")
+        @test contains(output, "H20: value20")
+        @test endswith(output, "body")
+    end
+
+    @testset "Dispatch with route params" begin
+        router = Trie()
+        get!(router, "/users/:id::Int", ctx -> json("""{"id":$(param(ctx, Int, :id))}"""))
+
+        server = Server(; router, port=19995)
+
+        raw = Vector{UInt8}("GET /users/42 HTTP/1.1\r\nHost: x\r\n\r\n")
+        req = PicoHTTPParser.parse_request(raw)
+        resp = Ciro.Core._dispatch(server, req)
+        @test resp.status == 200
+        @test String(copy(resp.body)) == """{"id":42}"""
+    end
+
+    @testset "Custom catcher" begin
+        struct TestCatcher <: AbstractCatcher end
+        Ciro.Interfaces.intercept(::TestCatcher, err::Exception, _) =
+            json("""{"error":"$(typeof(err))"}"""; status=503)
+
+        router = Trie()
+        get!(router, "/crash", ctx -> error("oops"))
+
+        server = Server(; router, catcher=TestCatcher(), port=19994)
+
+        raw = Vector{UInt8}("GET /crash HTTP/1.1\r\nHost: x\r\n\r\n")
+        req = PicoHTTPParser.parse_request(raw)
+        resp = Ciro.Core._dispatch(server, req)
+        @test resp.status == 503
+        @test contains(String(copy(resp.body)), "ErrorException")
+    end
 end

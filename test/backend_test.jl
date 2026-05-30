@@ -44,6 +44,36 @@ const LIB_AVAILABLE = isfile(Ciro.Backend._LIB)
         release!(pool, buf3)
     end
 
+    @testset "BufferPool - overflow" begin
+        pool = BufferPool(; max_size=1, buffer_capacity=512)
+
+        buf1 = acquire!(pool)
+        buf2 = acquire!(pool)
+        release!(pool, buf1)
+        release!(pool, buf2)  # pool full, buf2 is not stored
+
+        # Only one buffer in pool
+        buf3 = acquire!(pool)
+        @test buf3 === buf1
+        buf4 = acquire!(pool)
+        @test buf4 !== buf1  # fresh allocation
+    end
+
+    @testset "BufferPool - capacity enforcement" begin
+        pool = BufferPool(; max_size=2, buffer_capacity=2048)
+
+        buf = acquire!(pool)
+        @test length(buf) == 2048
+
+        # Shrink buffer, then release and reacquire
+        resize!(buf, 100)
+        release!(pool, buf)
+
+        buf2 = acquire!(pool)
+        @test buf2 === buf
+        @test length(buf2) == 2048  # restored to capacity
+    end
+
     @testset "PendingWrites" begin
         pw = PendingWrites(; max_fd=128)
 
@@ -114,6 +144,20 @@ const LIB_AVAILABLE = isfile(Ciro.Backend._LIB)
 
             free_connection!(c3)
             free_connection!(c4)
+        end
+
+        @testset "ConnectionPool - overflow" begin
+            pool = ConnectionPool(; max_size=1)
+
+            c1 = acquire!(pool)
+            c2 = acquire!(pool)
+
+            release!(pool, c1)  # stored (pool has room)
+            release!(pool, c2)  # freed (pool full)
+
+            c3 = acquire!(pool)
+            @test c3.ptr == c1.ptr
+            free_connection!(c3)
         end
     else
         @info "Skipping ccall-based Backend tests (lib/ciro.so not found)"

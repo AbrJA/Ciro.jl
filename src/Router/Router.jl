@@ -4,8 +4,7 @@ using ..Interfaces
 using ..Interfaces: Request, Response, Methods, AbstractRouter, RouteResult,
                     matched, not_found, method_not_allowed, text, fail
 
-export Trie, get!, post!, put!, delete!, patch!, head!, options!,
-       params, param, group!
+export Trie, get!, post!, put!, delete!, patch!, head!, options!, group!
 
 import Base: get!, put!, delete!
 
@@ -99,7 +98,7 @@ function Interfaces.register!(trie::Trie, method::UInt8, pattern::String, handle
             if node.param_child === nothing
                 node.param_child = (spec, TrieNode())
             end
-            node = node.param_child[2]
+            node = (node.param_child::Tuple{ParamSpec, TrieNode})[2]
         elseif seg == "*"
             node.wildcard = handler
             return trie
@@ -115,8 +114,8 @@ function Interfaces.register!(trie::Trie, method::UInt8, pattern::String, handle
 
     # Auto-generate HEAD from GET (RFC 9110 §9.3.2)
     if method == Methods.GET && !haskey(node.handlers, Methods.HEAD)
-        node.handlers[Methods.HEAD] = function(req)
-            resp = handler(req)
+        node.handlers[Methods.HEAD] = function(ctx)
+            resp = handler(ctx)
             Response(resp.status, resp.headers, UInt8[])
         end
     end
@@ -188,16 +187,8 @@ function Interfaces.route(trie::Trie, method::UInt8, path::AbstractString)::Rout
     handler = _match(trie.root, segments, 1, method, captured)
 
     if handler !== nothing
-        if isempty(captured)
-            return RouteResult(handler, Pair{Symbol,String}[])
-        else
-            params_copy = copy(captured)
-            wrapped = function(req)
-                task_local_storage(:_ciro_params, params_copy)
-                return handler(req)
-            end
-            return RouteResult(wrapped, params_copy)
-        end
+        params_copy = isempty(captured) ? Pair{Symbol,String}[] : copy(captured)
+        return RouteResult(handler, params_copy)
     end
 
     # No handler found — check if path exists with other methods (→ 405)
@@ -209,35 +200,6 @@ function Interfaces.route(trie::Trie, method::UInt8, path::AbstractString)::Rout
     # No path match at all → 404
     return RouteResult()
 end
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Parameter Access
-# ══════════════════════════════════════════════════════════════════════════════
-
-function params()::Vector{Pair{Symbol,String}}
-    get(task_local_storage(), :_ciro_params, Pair{Symbol,String}[])
-end
-
-function param(name::Symbol, default::String="")::String
-    ps = params()
-    for (k, v) in ps
-        k === name && return v
-    end
-    return default
-end
-
-"""Get a typed parameter. Returns `nothing` if parsing fails."""
-function param(::Type{T}, name::Symbol)::Union{T, Nothing} where T
-    v = param(name)
-    isempty(v) && return nothing
-    try
-        return parse(T, v)
-    catch
-        return nothing
-    end
-end
-
-export params, param
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Internal: Trie Matching

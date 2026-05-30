@@ -10,10 +10,40 @@ module Interfaces
 
 using PicoHTTPParser
 using StringViews
-using Base64
 
 const Request = PicoHTTPParser.Request
 export Request
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Context — the single argument passed to every handler
+# ══════════════════════════════════════════════════════════════════════════════
+
+"""
+    Context
+
+Encapsulates a single HTTP request and the route parameters captured during
+dispatch. Every handler receives exactly one `Context` argument.
+
+```julia
+function my_handler(ctx::Context)
+    id   = param(ctx, Int, :id)           # typed route param
+    ua   = header(ctx, "User-Agent")      # request header
+    data = body(ctx)                       # body as String
+    qp   = queryparams(ctx)               # Dict{String,String}
+    sess = cookie(ctx, "session")         # cookie value
+    ctx.req                               # raw PicoHTTPParser.Request
+end
+```
+"""
+struct Context
+    req    :: Request
+    params :: Vector{Pair{Symbol,String}}
+end
+
+"""Construct a `Context` with no route parameters (for middleware and tests)."""
+Context(req::Request) = Context(req, Pair{Symbol,String}[])
+
+export Context
 
 # ══════════════════════════════════════════════════════════════════════════════
 # HTTP Method Constants (bitmask-friendly: each method has a unique bit)
@@ -138,6 +168,10 @@ end
     return false
 end
 
+# Context overloads — delegate to ctx.req
+@inline header(ctx::Context, key::String, default::String="")::String  = header(ctx.req, key, default)
+@inline hasheader(ctx::Context, key::String)::Bool                       = hasheader(ctx.req, key)
+
 export header, hasheader
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -183,6 +217,10 @@ function setcookie(name::String, value::String;
     return "Set-Cookie" => join(parts, "; ")
 end
 
+# Context overloads
+@inline cookies(ctx::Context)::Dict{String,String}                      = cookies(ctx.req)
+@inline cookie(ctx::Context, name::String, default::String="")::String  = cookie(ctx.req, name, default)
+
 export cookies, cookie, setcookie
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -203,6 +241,11 @@ end
 @inline function content_type(req::Request)::String
     header(req, "Content-Type")
 end
+
+# Context overloads
+@inline body(ctx::Context)::String         = body(ctx.req)
+@inline rawbody(ctx::Context)::Vector{UInt8} = rawbody(ctx.req)
+@inline content_type(ctx::Context)::String  = content_type(ctx.req)
 
 export body, rawbody, content_type
 
@@ -307,9 +350,9 @@ abstract type AbstractLogger end
 
 @enum Severity Debug=1 Info Warn Error Fatal
 
-function write end
+function log! end
 
-export AbstractLogger, Severity, Debug, Info, Warn, Error, Fatal, write
+export AbstractLogger, Severity, Debug, Info, Warn, Error, Fatal, log!
 
 """
     AbstractCatcher
@@ -329,7 +372,7 @@ export AbstractCatcher, intercept
 
 """Silent logger — all calls optimize away."""
 struct NullLogger <: AbstractLogger end
-@inline write(::NullLogger, ::Severity, ::String) = nothing
+@inline log!(::NullLogger, ::Severity, ::String) = nothing
 
 """Default error handler — never exposes internals (OWASP safe)."""
 struct DefaultCatcher <: AbstractCatcher end
@@ -376,6 +419,34 @@ function queryparams(req::Request)::Dict{String,String}
     return result
 end
 
+# Context overloads
+@inline path(ctx::Context)                          = path(ctx.req)
+@inline query(ctx::Context)::String                 = query(ctx.req)
+@inline queryparams(ctx::Context)::Dict{String,String} = queryparams(ctx.req)
+
 export path, query, queryparams
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Route Parameter Access — Context-based (explicit, no hidden state)
+# ══════════════════════════════════════════════════════════════════════════════
+
+"""Get a route parameter by name as `String`. Returns `default` if not present."""
+@inline function param(ctx::Context, name::Symbol, default::String="")::String
+    for (k, v) in ctx.params
+        k === name && return v
+    end
+    return default
+end
+
+"""Get a route parameter parsed to `T`. Returns `nothing` if missing or unparseable."""
+@inline function param(ctx::Context, ::Type{T}, name::Symbol)::Union{T,Nothing} where T
+    for (k, v) in ctx.params
+        k === name || continue
+        return tryparse(T, v)
+    end
+    return nothing
+end
+
+export param
 
 end # module Interfaces

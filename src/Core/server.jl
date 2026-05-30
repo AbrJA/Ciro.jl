@@ -42,23 +42,23 @@ drains in-flight requests up to `shutdown_timeout` seconds.
 """
 function start!(server::Server; queue_depth::Int=4096, nworkers::Int=nthreads())
     server._running[] = true
-    write(server.logger, Info, "Ciro starting on $(server.host):$(server.port)")
+    log!(server.logger, Info, "Ciro starting on $(server.host):$(server.port)")
     try
         _start_workers(server, queue_depth, nworkers)
     catch e
         e isa InterruptException || rethrow(e)
     finally
-        write(server.logger, Info, "Ciro shutting down (draining in-flight requests)...")
+        log!(server.logger, Info, "Ciro shutting down (draining in-flight requests)...")
         server._running[] = false
         _drain(server)
-        write(server.logger, Info, "Ciro stopped")
+        log!(server.logger, Info, "Ciro stopped")
     end
 end
 
 """Stop the server gracefully."""
 function stop!(server::Server)
     server._running[] = false
-    write(server.logger, Info, "Ciro stop requested")
+    log!(server.logger, Info, "Ciro stop requested")
 end
 
 """Wait for in-flight requests to complete (up to timeout)."""
@@ -68,6 +68,6 @@ function _drain(server::Server)
         sleep(0.01)
     end
     remaining = server._in_flight[]
-    remaining > 0 && write(server.logger, Warn,
+    remaining > 0 && log!(server.logger, Warn,
         "Shutdown timeout: $remaining request(s) still in-flight")
 end

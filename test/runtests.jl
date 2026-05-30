@@ -7,4 +7,5 @@ using Ciro
     include("middleware_test.jl")
     include("core_test.jl")
     include("backend_test.jl")
+    include("quality_test.jl")
 end

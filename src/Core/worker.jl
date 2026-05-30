@@ -3,10 +3,10 @@
 # ══════════════════════════════════════════════════════════════════════════════
 
 function _start_workers(server::Server, queue_depth::Int, nworkers::Int)
-    write(server.logger, Info, "io_uring backend with $nworkers worker(s)")
+    log!(server.logger, Info, "io_uring backend with $nworkers worker(s)")
 
     run_eventloop_threaded!(server.port; nthreads=nworkers, queue_depth, running=server._running) do engine, tid
-        write(server.logger, Info, "[Thread $tid] io_uring engine ready")
+        log!(server.logger, Info, "[Thread $tid] io_uring engine ready")
 
         conn_pool = ConnectionPool()
         buf_pool  = BufferPool()
@@ -168,8 +168,9 @@ end
             return Response(405, ["Allow" => allow_str, "Content-Type" => "text/plain"], Vector{UInt8}("Method Not Allowed"))
         end
 
-        # Invoke handler
-        response = result.handler(req)
+        # Invoke handler with explicit Context (no hidden state)
+        ctx = Context(req, result.params)
+        response = result.handler(ctx)
         return response isa Response ? response : text(string(response))
     catch err
         return intercept(server.catcher, err isa Exception ? err : ErrorException(string(err)), req)

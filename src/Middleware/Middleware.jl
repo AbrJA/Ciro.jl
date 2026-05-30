@@ -10,14 +10,14 @@ struct MyAuth{H}
     handler :: H
     token   :: String
 end
-(m::MyAuth)(req) = header(req, "Authorization") == "Bearer \$(m.token)" ?
-    m.handler(req) : fail(401, "Unauthorized")
+
+(m::MyAuth)(ctx::Context) = header(ctx, "Authorization") == "Bearer \$(m.token)" ? m.handler(ctx) : fail(401, "Unauthorized")
 ```
 """
 module Middleware
 
 using ..Interfaces
-using ..Interfaces: Request, Response, Methods, text, fail, header, hasheader
+using ..Interfaces: Request, Response, Context, Methods, text, fail, header, hasheader
 
 export WithLogger, WithCORS, WithTiming, WithRequestId,
        WithSecurityHeaders, WithRateLimit,
@@ -31,14 +31,14 @@ struct WithLogger{H}
     handler :: H
 end
 
-function (m::WithLogger)(req::Request)::Response
+function (m::WithLogger)(ctx::Context)::Response
     start = time_ns()
-    response = m.handler(req)
+    response = m.handler(ctx)
     elapsed_us = (time_ns() - start) / 1_000
 
     ts = Libc.strftime("[%Y-%m-%d %H:%M:%S]", Libc.TmStruct(time()))
-    method_str = String(req.method)
-    path_str = String(req.path)
+    method_str = String(ctx.req.method)
+    path_str = String(ctx.req.path)
 
     if elapsed_us < 1000.0
         println(ts, ' ', method_str, ' ', path_str, " -> ", response.status,
@@ -69,8 +69,8 @@ function WithCORS(handler; origins="*",
     WithCORS(handler, origins, methods, headers, string(max_age))
 end
 
-function (m::WithCORS)(req::Request)::Response
-    if Methods.from_string(req.method) == Methods.OPTIONS
+function (m::WithCORS)(ctx::Context)::Response
+    if Methods.from_string(ctx.req.method) == Methods.OPTIONS
         return Response(204, [
             "Access-Control-Allow-Origin"  => m.origins,
             "Access-Control-Allow-Methods" => m.methods,
@@ -79,7 +79,7 @@ function (m::WithCORS)(req::Request)::Response
         ], UInt8[])
     end
 
-    response = m.handler(req)
+    response = m.handler(ctx)
     push!(response.headers, "Access-Control-Allow-Origin" => m.origins)
     return response
 end
@@ -100,9 +100,9 @@ struct WithTiming{H}
     handler :: H
 end
 
-function (m::WithTiming)(req::Request)::Response
+function (m::WithTiming)(ctx::Context)::Response
     start = time_ns()
-    response = m.handler(req)
+    response = m.handler(ctx)
     elapsed_ms = (time_ns() - start) / 1_000_000
     push!(response.headers, "X-Response-Time" => string(round(elapsed_ms; digits=3), "ms"))
     return response
@@ -116,8 +116,8 @@ struct WithRequestId{H}
     handler :: H
 end
 
-function (m::WithRequestId)(req::Request)::Response
-    response = m.handler(req)
+function (m::WithRequestId)(ctx::Context)::Response
+    response = m.handler(ctx)
     id = string(Threads.threadid(), '-', time_ns())
     push!(response.headers, "X-Request-Id" => id)
     return response
@@ -153,8 +153,8 @@ function WithSecurityHeaders(handler;
     WithSecurityHeaders(handler, hsts, csp, frame, referrer)
 end
 
-function (m::WithSecurityHeaders)(req::Request)::Response
-    response = m.handler(req)
+function (m::WithSecurityHeaders)(ctx::Context)::Response
+    response = m.handler(ctx)
     push!(response.headers, "X-Content-Type-Options" => "nosniff")
     push!(response.headers, "X-Frame-Options" => m.frame)
     push!(response.headers, "Referrer-Policy" => m.referrer)
@@ -193,8 +193,8 @@ function WithRateLimit(handler; max_requests::Int=100, window_seconds::Int=60)
     )
 end
 
-function (m::WithRateLimit)(req::Request)::Response
-    ip = _client_ip(req)
+function (m::WithRateLimit)(ctx::Context)::Response
+    ip = _client_ip(ctx)
     now = time_ns()
 
     allowed = lock(m.lock) do
@@ -223,18 +223,18 @@ function (m::WithRateLimit)(req::Request)::Response
         ], Vector{UInt8}("Too Many Requests"))
     end
 
-    return m.handler(req)
+    return m.handler(ctx)
 end
 
-@inline function _client_ip(req::Request)::String
+function _client_ip(ctx::Context)::String
     # Prefer X-Forwarded-For, then X-Real-IP, then fallback
-    forwarded = header(req, "X-Forwarded-For")
+    forwarded = header(ctx, "X-Forwarded-For")
     if !isempty(forwarded)
         # Take first IP in the chain
         comma = findfirst(',', forwarded)
         return comma === nothing ? strip(forwarded) : strip(forwarded[1:comma-1])
     end
-    real_ip = header(req, "X-Real-IP")
+    real_ip = header(ctx, "X-Real-IP")
     !isempty(real_ip) && return strip(real_ip)
     return "unknown"
 end
