@@ -17,13 +17,13 @@ module Methods
 
     @inline function from_string(m::AbstractString)::UInt8
         len = ncodeunits(m)
-        len == 3 && @inbounds(codeunit(m, 1)) == UInt8('G') && return GET
+        len == 3 && @inbounds(codeunit(m, 1)) == UInt8('G') && @inbounds(codeunit(m, 2)) == UInt8('E') && return GET
         len == 3 && @inbounds(codeunit(m, 1)) == UInt8('P') && @inbounds(codeunit(m, 2)) == UInt8('U') && return PUT
         len == 4 && @inbounds(codeunit(m, 1)) == UInt8('P') && @inbounds(codeunit(m, 2)) == UInt8('O') && return POST
-        len == 4 && @inbounds(codeunit(m, 1)) == UInt8('H') && return HEAD
-        len == 5 && @inbounds(codeunit(m, 1)) == UInt8('P') && return PATCH
-        len == 6 && @inbounds(codeunit(m, 1)) == UInt8('D') && return DELETE
-        len == 7 && @inbounds(codeunit(m, 1)) == UInt8('O') && return OPTIONS
+        len == 4 && @inbounds(codeunit(m, 1)) == UInt8('H') && @inbounds(codeunit(m, 2)) == UInt8('E') && return HEAD
+        len == 5 && @inbounds(codeunit(m, 1)) == UInt8('P') && @inbounds(codeunit(m, 2)) == UInt8('A') && return PATCH
+        len == 6 && @inbounds(codeunit(m, 1)) == UInt8('D') && @inbounds(codeunit(m, 2)) == UInt8('E') && return DELETE
+        len == 7 && @inbounds(codeunit(m, 1)) == UInt8('O') && @inbounds(codeunit(m, 2)) == UInt8('P') && return OPTIONS
         return UNKNOWN
     end
 

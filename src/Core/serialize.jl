@@ -2,31 +2,27 @@
 # Zero-copy response serialization
 # ══════════════════════════════════════════════════════════════════════════════
 
-using Dates: unix2datetime, dayofweek, year, month, day, hour, minute, second
+using Dates: DateFormat, format, unix2datetime
 
 # ── Cached Date Header (refreshed every second, RFC 5322 format) ────────────
+# Thread-safety: _DATE_SEC is an Atomic so the stale-check is race-free.
+# _DATE_LOCK serialises the string update; after the lock the new string is
+# visible to all threads because `lock` issues a memory barrier.
 
-const _DAY_ABBR = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
-const _MON_ABBR = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
-const _DATE_STR = Ref{String}("")
-const _DATE_SEC = Ref{Int}(0)
+const _HTTP_DATE_FMT = DateFormat("e, dd u yyyy HH:MM:SS")  # stdlib Dates
+const _DATE_LOCK     = ReentrantLock()
+const _DATE_STR      = Ref{String}("")
+const _DATE_SEC      = Threads.Atomic{Int}(0)
 
-"""Get the current HTTP Date header value (cached, refreshed per-second)."""
+"""Get the current HTTP Date header value (cached per-second, thread-safe)."""
 @inline function _http_date()::String
     sec = round(Int, time())
-    if sec != _DATE_SEC[]
-        _DATE_SEC[] = sec
-        dt = unix2datetime(sec)
-        dow = dayofweek(dt)  # 1=Monday
-        _DATE_STR[] = string(
-            _DAY_ABBR[dow], ", ",
-            lpad(day(dt), 2, '0'), " ",
-            _MON_ABBR[month(dt)], " ",
-            year(dt), " ",
-            lpad(hour(dt), 2, '0'), ":",
-            lpad(minute(dt), 2, '0'), ":",
-            lpad(second(dt), 2, '0'), " GMT")
+    _DATE_SEC[] == sec && return _DATE_STR[]      # fast path — no lock
+    lock(_DATE_LOCK) do
+        if _DATE_SEC[] != sec                     # double-checked
+            _DATE_STR[] = format(unix2datetime(sec), _HTTP_DATE_FMT) * " GMT"
+            _DATE_SEC[] = sec                     # write AFTER string is ready
+        end
     end
     return _DATE_STR[]
 end
@@ -41,9 +37,9 @@ function serialize_response!(buf::Vector{UInt8}, response::Response)::Int
     sl = Interface.status(response.status)
     sl_len = sizeof(sl)
 
-    # Body length (sizeof for String, length for Vector{UInt8})
+    # Body length
     body_data = response.body
-    body_len = body_data isa String ? sizeof(body_data) : length(body_data)
+    body_len = length(body_data)
 
     # Calculate total size needed
     headers_len = 0
@@ -95,7 +91,7 @@ function serialize_response!(buf::Vector{UInt8}, response::Response)::Int
 
     cursor = _write_lit!(buf, cursor, "\r\n")
 
-    # Body (handles both String and Vector{UInt8})
+    # Body
     if body_len > 0
         GC.@preserve body_data begin
             unsafe_copyto!(pointer(buf, cursor), pointer(body_data), body_len)

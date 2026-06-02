@@ -54,9 +54,9 @@ export header, hasheader
 
 # ── Body Utilities ──────────────────────────────────────────────────────────
 
-"""Get request body as String (lazy copy)."""
+"""Get request body as String (single allocation — String() copies once)."""
 function body(req::Request)::String
-    String(copy(req.body))
+    String(req.body)
 end
 
 """Get raw request body bytes."""

@@ -10,8 +10,8 @@ Julia is the language of scientific computing and ML. Ciro lets you serve models
 
 - **io_uring backend** — Linux kernel async I/O with zero-copy writes
 - **Thread-per-core** — one io_uring ring per Julia thread, no cross-thread locking
-- **Zero-cost middleware** — functor chain fully monomorphized by the compiler
-- **Type-stable routing** — O(path depth) trie dispatch, typed params, route groups
+- **Type-stable hot path** — monomorphized server, zero Union dispatch in serialization
+- **Trie router** — O(path depth) dispatch, typed params, route groups
 - **Pool-based allocation** — ConnectionPool + BufferPool eliminate malloc in steady state
 - **Modular architecture** — each module is independently replaceable/extensible
 
@@ -32,7 +32,7 @@ Pkg.add(url="https://github.com/AbrJA/Ciro.jl")
 Build the C backend:
 
 ```bash
-gcc -shared -fPIC -O3 -march=native -o lib/ciro.so lib/ciro.c -luring
+cd lib && make
 ```
 
 ## Quick Start — ML Model Server
@@ -40,7 +40,7 @@ gcc -shared -fPIC -O3 -march=native -o lib/ciro.so lib/ciro.c -luring
 ```julia
 using Ciro
 
-# Your model (loaded once, served many times)
+# Your model (loaded once at startup, served many times)
 const MODEL = load_my_model("weights.bson")
 
 function predict(ctx::Context)
@@ -51,15 +51,13 @@ function predict(ctx::Context)
 end
 
 function health(ctx::Context)
-    json("""{"status":"healthy","model":"loaded"}""")
+    json("""{"status":"healthy"}""")
 end
 
-# Build router
 router = Trie()
 get!(router, "/health", health)
 post!(router, "/predict", predict)
 
-# Start with all threads
 server = Server(; router, port=8080)
 start!(server)
 ```
@@ -75,7 +73,6 @@ julia --threads=auto --project=. serve.jl
 ```julia
 router = Trie()
 
-# HTTP methods
 get!(router,     "/path", handler)
 post!(router,    "/path", handler)
 put!(router,     "/path", handler)
@@ -166,36 +163,11 @@ hasheader(ctx, "Authorization")      # Bool
 body(ctx)                            # String
 rawbody(ctx)                         # Vector{UInt8}
 content_type(ctx)                    # shortcut for Content-Type header
-
-# Cookies
-cookie(ctx, "session")               # String, "" if missing
-cookies(ctx)                         # Dict{String,String}
 ```
 
-### Middleware
+### Middleware (Functor Pattern)
 
-Middleware lives in `ext/CiroMiddleware/` and is loaded explicitly:
-
-```julia
-using Ciro.Middleware
-```
-
-Middleware is a callable struct wrapping an inner handler. Julia monomorphizes the full chain — **zero virtual dispatch overhead**:
-
-```julia
-# Built-in
-WithLogger(handler)                              # stdout access log
-WithCORS(handler; origins="*", max_age=86400)    # CORS headers
-WithTiming(handler)                              # X-Response-Time
-WithRequestId(handler)                           # X-Request-Id
-WithSecurityHeaders(handler)                     # OWASP security headers
-WithRateLimit(handler; max_requests=100, window_seconds=60)
-
-# Compose (outermost runs first)
-stack = WithRateLimit(WithCORS(WithTiming(handler)); max_requests=1000)
-```
-
-**Custom middleware (the same pattern used by all built-in):**
+Ciro uses Julia's type system for zero-cost middleware. A middleware is a callable struct wrapping an inner handler — the compiler monomorphizes the entire chain:
 
 ```julia
 struct WithAuth{H}
@@ -208,7 +180,7 @@ function (m::WithAuth)(ctx::Context)::Response
     return m.handler(ctx)
 end
 
-# Use it
+# Per-route application (no global stack needed)
 get!(router, "/admin", WithAuth(admin_handler, ENV["SECRET"]))
 ```
 
@@ -217,7 +189,7 @@ get!(router, "/admin", WithAuth(admin_handler, ENV["SECRET"]))
 ```julia
 struct StderrLogger <: AbstractLogger end
 
-Ciro.Interfaces.log!(::StderrLogger, level::Severity, msg::String) =
+Ciro.Interface.log!(::StderrLogger, level::Severity, msg::String) =
     println(stderr, "[$level] $msg")
 
 server = Server(; router, logger=StderrLogger())
@@ -228,7 +200,7 @@ server = Server(; router, logger=StderrLogger())
 ```julia
 struct JsonCatcher <: AbstractCatcher end
 
-function Ciro.Interfaces.intercept(::JsonCatcher, err::Exception, req)
+function Ciro.Interface.intercept(::JsonCatcher, err::Exception, req)
     @error "Unhandled" exception=err
     return json("""{"error":"internal_server_error"}"""; status=500)
 end
@@ -261,9 +233,6 @@ stop!(server)    # signal shutdown from another task
 │  Server{Trie, NullLogger, DefaultCatcher}                       │
 │  (fully monomorphized — no virtual dispatch at runtime)         │
 ├─────────────────────────────────────────────────────────────────┤
-│  Middleware Chain: WithRateLimit{WithCORS{WithTiming{Handler}}}  │
-│  → compiler inlines the entire composition into one function    │
-├─────────────────────────────────────────────────────────────────┤
 │  Trie Router                                                    │
 │  • Priority: static > typed param > wildcard                    │
 │  • Returns RouteResult (type-stable, no Union dispatch)         │
@@ -285,25 +254,26 @@ Each module is a self-contained unit with clear interfaces:
 
 | Module | Purpose | Extend by |
 |--------|---------|-----------|
-| `Backend` | io_uring async I/O | Implement `AbstractBackend` for alternative backends (epoll, kqueue) |
-| `Interfaces` | Types + abstract contracts | Add new abstract types |
+| `Backend` | io_uring async I/O | Implement `AbstractBackend` for epoll/kqueue |
+| `Interface` | Types + abstract contracts | Add new abstract types |
 | `Router` | Trie-based dispatch | Implement `AbstractRouter` |
-| `Middleware` | Request/response transforms (in `ext/`) | Any `struct{H}` with `(m::T)(ctx)::Response` |
 | `Core` | HTTP server engine | Wrap or replace `start!` |
+
+Middleware is not a module — it's a design pattern (callable structs). Community packages can ship their own middleware without depending on Ciro internals.
 
 ## Running Tests
 
 ```bash
 # Build C library (required for Backend tests)
-gcc -shared -fPIC -O3 -march=native -o lib/ciro.so lib/ciro.c -luring
+cd lib && make
 
-# Run full test suite (405 tests + Aqua.jl + JET.jl quality checks)
+# Run full test suite (497 tests + Aqua.jl + JET.jl quality checks)
 julia --project=. -e 'using Pkg; Pkg.test()'
 ```
 
 ## Benchmarks
 
-Compare against **khttp** (production Rust HTTP server):
+Compare against production Rust HTTP servers:
 
 ```bash
 cd benchmarks/khttp && cargo build --release

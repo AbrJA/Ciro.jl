@@ -9,7 +9,7 @@
 #include <errno.h>
 #include <signal.h>
 
-#define BUFFER_SIZE 8192
+#define BUFFER_SIZE 65536
 
 typedef enum { ACCEPT, READ, WRITE } op_type;
 
@@ -26,6 +26,13 @@ struct engine_state {
     struct io_uring ring;
     int server_fd;
 };
+
+static inline struct io_uring_sqe* get_sqe_submit_retry(struct io_uring* ring) {
+    struct io_uring_sqe* sqe = io_uring_get_sqe(ring);
+    if (sqe) return sqe;
+    if (io_uring_submit(ring) < 0) return NULL;
+    return io_uring_get_sqe(ring);
+}
 
 // Allocation helper for Julia
 conn_t* create_connection() {
@@ -90,6 +97,8 @@ int setup_server_socket(int port) {
         return -1;
     }
 
+    signal(SIGPIPE, SIG_IGN);
+
     return server_fd;
 }
 
@@ -134,7 +143,8 @@ int get_server_fd(struct engine_state* state) {
 
 // Queue an accept request
 void queue_accept(struct engine_state* state, conn_t* conn) {
-    struct io_uring_sqe *sqe = io_uring_get_sqe(&state->ring);
+    struct io_uring_sqe *sqe = get_sqe_submit_retry(&state->ring);
+    if (!sqe) return;
     conn->type = ACCEPT;
     conn->addr_len = sizeof(conn->addr);
 
@@ -150,36 +160,22 @@ void configure_client_socket(int fd) {
 
 // Queue a read request
 void queue_read(struct engine_state* state, conn_t* conn) {
-    struct io_uring_sqe *sqe = io_uring_get_sqe(&state->ring);
-    if (!sqe) {
-        // Handle full SQ: submit and retry? Or just return error?
-        // For now, let's just submit and try once more
-        io_uring_submit(&state->ring);
-        sqe = io_uring_get_sqe(&state->ring);
-        if (!sqe) return; // Dropped :(
-    }
+    struct io_uring_sqe *sqe = get_sqe_submit_retry(&state->ring);
+    if (!sqe) return;
     conn->type = READ;
-    // Read into standard buffer
-    io_uring_prep_read(sqe, conn->fd, conn->buffer, BUFFER_SIZE - 1, 0);
+    io_uring_prep_read(sqe, conn->fd, conn->buffer, BUFFER_SIZE, 0);
     io_uring_sqe_set_data(sqe, conn);
-    // Don't auto submit
-    // io_uring_submit(&state->ring);
 }
 
 // Queue a write request - ZERO COPY
 // Caller (Julia) MUST ensure data stays alive until completion!
 void queue_write(struct engine_state* state, conn_t* conn, const char* data, int len) {
-    struct io_uring_sqe *sqe = io_uring_get_sqe(&state->ring);
-    if (!sqe) {
-        io_uring_submit(&state->ring);
-        sqe = io_uring_get_sqe(&state->ring);
-        if (!sqe) return;
-    }
+    struct io_uring_sqe *sqe = get_sqe_submit_retry(&state->ring);
+    if (!sqe) return;
     conn->type = WRITE;
 
     io_uring_prep_write(sqe, conn->fd, data, len, 0);
     io_uring_sqe_set_data(sqe, conn);
-    // io_uring_submit(&state->ring);
 }
 
 // 2. Add bulk submission support
@@ -227,30 +223,23 @@ int drain_completions(struct engine_state* state, conn_t** conns, int* results, 
     return count;
 }
 
-// Combined: accept fd → set fd on conn → queue read. Saves multiple ccall round-trips.
+// Combined: accept fd → set fd on conn → set TCP_NODELAY → queue read.
 void accept_and_queue_read(struct engine_state* state, conn_t* conn, int client_fd) {
+    set_tcp_nodelay(client_fd);   // must happen before first read
     conn->fd = client_fd;
     conn->type = READ;
 
-    struct io_uring_sqe *sqe = io_uring_get_sqe(&state->ring);
-    if (!sqe) {
-        io_uring_submit(&state->ring);
-        sqe = io_uring_get_sqe(&state->ring);
-        if (!sqe) return;
-    }
-    io_uring_prep_read(sqe, client_fd, conn->buffer, BUFFER_SIZE - 1, 0);
+    struct io_uring_sqe *sqe = get_sqe_submit_retry(&state->ring);
+    if (!sqe) return;
+    io_uring_prep_read(sqe, client_fd, conn->buffer, BUFFER_SIZE, 0);
     io_uring_sqe_set_data(sqe, conn);
 }
 
 // Combined: queue write + mark for close after (via io_uring linked ops)
 void queue_write_and_close(struct engine_state* state, conn_t* conn, const char* data, int len) {
     // First: queue the write
-    struct io_uring_sqe *sqe = io_uring_get_sqe(&state->ring);
-    if (!sqe) {
-        io_uring_submit(&state->ring);
-        sqe = io_uring_get_sqe(&state->ring);
-        if (!sqe) return;
-    }
+    struct io_uring_sqe *sqe = get_sqe_submit_retry(&state->ring);
+    if (!sqe) return;
     conn->type = WRITE;
     io_uring_prep_write(sqe, conn->fd, data, len, 0);
     io_uring_sqe_set_data(sqe, conn);
@@ -258,21 +247,15 @@ void queue_write_and_close(struct engine_state* state, conn_t* conn, const char*
     sqe->flags |= IOSQE_IO_LINK;
 
     // Second: queue close (linked, fires after write completes)
-    sqe = io_uring_get_sqe(&state->ring);
-    if (!sqe) {
-        io_uring_submit(&state->ring);
-        sqe = io_uring_get_sqe(&state->ring);
-        if (!sqe) return;
-    }
+    sqe = get_sqe_submit_retry(&state->ring);
+    if (!sqe) return;
     io_uring_prep_close(sqe, conn->fd);
     io_uring_sqe_set_data(sqe, conn);
-    // Mark conn so Julia knows this was a close completion
-    conn->flags |= 1;  // CLOSE flag
 }
 
 // 4. Use io_uring multishot accept (kernel 5.19+)
 void queue_multishot_accept(struct engine_state* state, conn_t* conn) {
-    struct io_uring_sqe *sqe = io_uring_get_sqe(&state->ring);
+    struct io_uring_sqe *sqe = get_sqe_submit_retry(&state->ring);
     if (!sqe) return;
 
     conn->type = ACCEPT;
@@ -298,13 +281,9 @@ conn_t* poll_completion(struct engine_state* state, int* res) {
 // Queue read after write completion (keep-alive path)
 void queue_read_reuse(struct engine_state* state, conn_t* conn) {
     conn->type = READ;
-    struct io_uring_sqe *sqe = io_uring_get_sqe(&state->ring);
-    if (!sqe) {
-        io_uring_submit(&state->ring);
-        sqe = io_uring_get_sqe(&state->ring);
-        if (!sqe) return;
-    }
-    io_uring_prep_read(sqe, conn->fd, conn->buffer, BUFFER_SIZE - 1, 0);
+    struct io_uring_sqe *sqe = get_sqe_submit_retry(&state->ring);
+    if (!sqe) return;
+    io_uring_prep_read(sqe, conn->fd, conn->buffer, BUFFER_SIZE, 0);
     io_uring_sqe_set_data(sqe, conn);
 }
 

@@ -81,7 +81,8 @@ export IOUringBackend,
        configure_socket!, close_fd!, conn_fd, conn_buffer, set_conn_fd!, set_conn_op!,
        # Pools
        acquire!, release!,
-       PendingWrites, set_pending!, pop_pending!, mark_close!, should_close!,
+    PendingWrites, set_pending!, pop_pending!, advance_pending!, pending_slice,
+    mark_close!, should_close!,
        # Event loop
        run_eventloop!, run_eventloop_threaded!
 

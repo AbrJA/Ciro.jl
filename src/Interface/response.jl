@@ -2,11 +2,20 @@
 # Response Type & Builders
 # ══════════════════════════════════════════════════════════════════════════════
 
+"""
+    Response
+
+HTTP response with status code, headers, and body bytes.
+Body is stored as `Vector{UInt8}` for type stability on the serialization path.
+"""
 struct Response
     status  :: Int
     headers :: Vector{Pair{String,String}}
-    body    :: Union{String, Vector{UInt8}}
+    body    :: Vector{UInt8}
 end
+
+Response(status::Int, headers::Vector{Pair{String,String}}, body::String) =
+    Response(status, headers, Vector{UInt8}(body))
 
 # ── Response Builders ───────────────────────────────────────────────────────
 

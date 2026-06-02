@@ -1,16 +1,21 @@
 #!/usr/bin/env julia
 # ══════════════════════════════════════════════════════════════════════════════
 # Ciro.jl — ML Model Serving Example
-# Run: julia --threads=auto --project=. server.jl
+#
+# Run:  julia --project=. -t4 server.jl
+#       julia --project=. -t4 -e 'include("server.jl")'
 # Test: curl http://localhost:8080/health
-#       curl -X POST http://localhost:8080/api/v1/predict -d '{"features":[1.0,2.0,3.0]}'
-# Deps: Pkg.add("JSON") — JSON is not bundled with Ciro (keeps core lightweight)
+#       curl -X POST http://localhost:8080/api/v1/predict \
+#            -H 'Content-Type: application/json' \
+#            -d '{"features":[1.0,2.0,3.0]}'
+#
+# Dependencies: Pkg.add("JSON") — JSON is NOT bundled with Ciro (keeps core light)
 # ══════════════════════════════════════════════════════════════════════════════
 using Ciro
 using JSON
 
 # ══════════════════════════════════════════════════════════════════════════════
-# "Model" — simulates a loaded ML model (replace with your real model)
+# Model — simulates a loaded ML model (replace with your real model)
 # ══════════════════════════════════════════════════════════════════════════════
 
 struct MockModel
@@ -33,8 +38,30 @@ const MODEL = MockModel([0.5, -0.3, 0.8], 0.1)
 const MODEL_VERSION = "mock-linear-v1"
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Custom Error Catcher — JSON errors, never leaks internals (OWASP safe)
+# ══════════════════════════════════════════════════════════════════════════════
+
+struct JsonCatcher <: AbstractCatcher end
+
+function Ciro.intercept(::JsonCatcher, err::Exception, _)
+    @error "Unhandled exception" exception=err
+    json("""{"error":"internal_server_error"}"""; status=500)
+end
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Handlers
 # ══════════════════════════════════════════════════════════════════════════════
+
+function handle_root(ctx::Context)
+    text("""Ciro.jl ML Server — v0.1.0
+Endpoints:
+  GET  /health          → Server health check
+  GET  /api/v1/model    → Model metadata
+  POST /api/v1/predict  → Single prediction
+  POST /api/v1/batch    → Batch predictions
+  POST /api/v1/echo     → Echo request body
+""")
+end
 
 function handle_health(ctx::Context)
     json("""{"status":"healthy","model":"$MODEL_VERSION","threads":$(Threads.nthreads())}""")
@@ -47,7 +74,7 @@ function handle_predict(ctx::Context)
     data = try
         JSON.parse(payload)
     catch e
-        return fail(400, """{"error":"invalid JSON: $(e.msg)"}""")
+        return fail(400, """{"error":"invalid JSON"}""")
     end
 
     features_raw = get(data, "features", nothing)
@@ -63,25 +90,25 @@ function handle_predict(ctx::Context)
     result = try
         predict!(MODEL, features)
     catch e
-        return fail(422, """{"error":"$(e.msg)"}""")
+        return fail(422, """{"error":"prediction failed"}""")
     end
 
     json("""{"prediction":$result,"model":"$MODEL_VERSION"}""")
 end
 
-function handle_batch_predict(ctx::Context)
+function handle_batch(ctx::Context)
     payload = body(ctx)
     isempty(payload) && return fail(400, """{"error":"empty body"}""")
 
     data = try
         JSON.parse(payload)
-    catch e
-        return fail(400, """{"error":"invalid JSON: $(e.msg)"}""")
+    catch
+        return fail(400, """{"error":"invalid JSON"}""")
     end
 
     batch = get(data, "batch", nothing)
     batch === nothing && return fail(400, """{"error":"missing 'batch' array"}""")
-    batch isa Vector || return fail(400, """{"error":"'batch' must be an array of feature vectors"}""")
+    batch isa Vector || return fail(400, """{"error":"'batch' must be an array"}""")
 
     predictions = Float64[]
     sizehint!(predictions, length(batch))
@@ -100,7 +127,7 @@ function handle_batch_predict(ctx::Context)
     json("""{"predictions":[$preds_str],"count":$(length(predictions)),"model":"$MODEL_VERSION"}""")
 end
 
-function handle_model_info(ctx::Context)
+function handle_model(ctx::Context)
     json("""{
   "name":"$MODEL_VERSION",
   "input_dim":$(length(MODEL.weights)),
@@ -114,79 +141,40 @@ function handle_echo(ctx::Context)
     ct = content_type(ctx)
     payload = body(ctx)
     isempty(payload) && return fail(400, "Empty body")
-    json("""{"content_type":"$ct","body_length":$(length(payload)),"echo":$(JSON.json(payload))}""")
+    json("""{"content_type":"$ct","length":$(sizeof(payload)),"echo":$(JSON.json(payload))}""")
 end
-
-function handle_root(ctx::Context)
-    text("""Ciro.jl ML Server — v0.1.0
-Endpoints:
-  GET  /health                → Server health check
-  GET  /api/v1/model          → Model metadata
-  POST /api/v1/predict        → Single prediction
-  POST /api/v1/batch          → Batch predictions
-  POST /api/v1/echo           → Echo request body
-""")
-end
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Custom Error Catcher — returns JSON errors (never leaks internals)
-# ══════════════════════════════════════════════════════════════════════════════
-
-struct JsonCatcher <: AbstractCatcher end
-
-function Ciro.Interfaces.intercept(::JsonCatcher, err::Exception, _)
-    @error "Unhandled exception" exception=err
-    json("""{"error":"internal_server_error"}"""; status=500)
-end
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Middleware Stack
-# ══════════════════════════════════════════════════════════════════════════════
-
-const STACK = handler -> WithCORS(
-    WithRequestId(
-        WithTiming(
-            WithLogger(handler)
-        )
-    )
-)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Router
 # ══════════════════════════════════════════════════════════════════════════════
 
-router = Trie()
+function build_router()
+    router = Trie()
 
-get!(router, "/", STACK(handle_root))
-get!(router, "/health", STACK(handle_health))
+    get!(router, "/",       handle_root)
+    get!(router, "/health", handle_health)
 
-group!(router, "/api/v1") do g
-    get!(g, "/model", STACK(handle_model_info))
-    post!(g, "/predict", STACK(handle_predict))
-    post!(g, "/batch", STACK(handle_batch_predict))
-    post!(g, "/echo", STACK(handle_echo))
+    group!(router, "/api/v1") do g
+        get!(g,  "/model",   handle_model)
+        post!(g, "/predict", handle_predict)
+        post!(g, "/batch",   handle_batch)
+        post!(g, "/echo",    handle_echo)
+    end
+
+    return router
 end
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Server
+# Banner
 # ══════════════════════════════════════════════════════════════════════════════
 
-server = Server(;
-    router,
-    catcher = JsonCatcher(),
-    port    = 8080,
-    host    = "0.0.0.0",
-    max_body_size = 10 * 1_048_576,  # 10 MiB (batch payloads can be large)
-    shutdown_timeout = 10.0,
-)
-
-println("""
+function print_banner()
+    println("""
 ╔══════════════════════════════════════════════════════════════╗
 ║  Ciro.jl ML Server                                          ║
 ║  http://localhost:8080                                       ║
 ║  Threads: $(lpad(Threads.nthreads(), 2))  |  Model: $MODEL_VERSION              ║
 ╠══════════════════════════════════════════════════════════════╣
-║  Test with:                                                  ║
 ║  curl localhost:8080/health                                  ║
 ║  curl -X POST localhost:8080/api/v1/predict \\                ║
 ║       -H 'Content-Type: application/json' \\                  ║
@@ -196,5 +184,24 @@ println("""
 ║       -d '{"batch":[[1,2,3],[4,5,6],[7,8,9]]}'               ║
 ╚══════════════════════════════════════════════════════════════╝
 """)
+end
 
-start!(server)
+# ══════════════════════════════════════════════════════════════════════════════
+# Script entrypoint
+# ══════════════════════════════════════════════════════════════════════════════
+
+function (@main)(args)
+    !isempty(args) && @warn "Ignoring CLI args for this example" args
+
+    server = Server(;
+        router = build_router(),
+        catcher = JsonCatcher(),
+        port    = 3001,
+        host    = "0.0.0.0",
+        max_body_size    = 10 * 1_048_576,  # 10 MiB — large batch payloads
+        shutdown_timeout = 10.0,
+    )
+
+    print_banner()
+    start!(server)
+end

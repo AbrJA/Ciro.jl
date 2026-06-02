@@ -26,7 +26,7 @@ const _status = Ciro.Interface.status
     @testset "Response builders" begin
         r = text("hello")
         @test r.status == 200
-        @test r.body == "hello"
+        @test String(r.body) == "hello"
         @test any(p -> p.first == "Content-Type" && contains(p.second, "text/plain"), r.headers)
 
         r = text("error"; status=500)
@@ -39,7 +39,7 @@ const _status = Ciro.Interface.status
         r = json("""{"ok":true}""")
         @test r.status == 200
         @test any(p -> contains(p.second, "application/json"), r.headers)
-        @test r.body == """{"ok":true}"""
+        @test String(r.body) == """{"ok":true}"""
 
         r = json("""{"ok":true}"""; status=201)
         @test r.status == 201
@@ -53,7 +53,7 @@ const _status = Ciro.Interface.status
 
         r = fail(404, "Not Found")
         @test r.status == 404
-        @test r.body == "Not Found"
+        @test String(r.body) == "Not Found"
 
         r = fail(500)
         @test r.status == 500
@@ -107,8 +107,8 @@ const _status = Ciro.Interface.status
         catcher = DefaultCatcher()
         resp = intercept(catcher, ErrorException("secret internal info"), nothing)
         @test resp.status == 500
-        @test !contains(resp.body, "secret internal info")
-        @test resp.body == "Internal Server Error"
+        @test !contains(String(copy(resp.body)), "secret internal info")
+        @test String(copy(resp.body)) == "Internal Server Error"
     end
 
     @testset "Context construction" begin
@@ -295,5 +295,213 @@ const _status = Ciro.Interface.status
         default_backend = IOUringBackend()
         @test default_backend.queue_depth == 4096
         @test default_backend.nworkers == Threads.nthreads()
+    end
+
+    @testset "body() single allocation (no redundant copy)" begin
+        # body() should return String without double-copying
+        raw = Vector{UInt8}("POST /x HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello")
+        req = PicoHTTPParser.parse_request(raw)
+        b1 = body(req)
+        b2 = body(req)
+        @test b1 == b2 == "hello"
+        @test b1 isa String
+        # rawbody returns a copy as Vector{UInt8}
+        rb = rawbody(req)
+        @test rb == Vector{UInt8}("hello")
+        @test rb isa Vector{UInt8}
+    end
+
+    @testset "Methods - all methods covered" begin
+        @test Methods.from_string("OPTIONS") == Methods.OPTIONS
+        @test Methods.from_string("PATCH")   == Methods.PATCH
+        # Round-trip: to_string ∘ from_string = identity for known methods
+        for (s, m) in [("GET", Methods.GET), ("POST", Methods.POST),
+                       ("PUT", Methods.PUT), ("DELETE", Methods.DELETE),
+                       ("PATCH", Methods.PATCH), ("HEAD", Methods.HEAD),
+                       ("OPTIONS", Methods.OPTIONS)]
+            @test Methods.from_string(s) == m
+            @test Methods.to_string(m) == s
+        end
+    end
+
+    @testset "Methods - allow_header all methods" begin
+        full_mask = reduce(|, Methods.bitmask(m) for m in UInt8(1):UInt8(7))
+        hdr = Methods.allow_header(full_mask)
+        @test contains(hdr, "GET")
+        @test contains(hdr, "POST")
+        @test contains(hdr, "PUT")
+        @test contains(hdr, "DELETE")
+        @test contains(hdr, "PATCH")
+        @test contains(hdr, "HEAD")
+        @test contains(hdr, "OPTIONS")
+        # Empty mask → empty string
+        @test Methods.allow_header(0x00) == ""
+    end
+
+    @testset "Severity enum ordering" begin
+        @test Int(Debug) < Int(Info) < Int(Warn) < Int(Error) < Int(Fatal)
+    end
+
+    @testset "Logger severity all levels" begin
+        logger = NullLogger()
+        for level in [Debug, Info, Warn, Error, Fatal]
+            log!(logger, level, "test")
+        end
+    end
+
+    @testset "DefaultCatcher - all exception types" begin
+        catcher = DefaultCatcher()
+        # Must return 500 regardless of exception type
+        @test intercept(catcher, ArgumentError("arg"), nothing).status == 500
+        @test intercept(catcher, BoundsError(), nothing).status == 500
+        @test intercept(catcher, DivideError(), nothing).status == 500
+        # Body must NOT contain exception message (OWASP)
+        resp = intercept(catcher, ErrorException("secret token: xyz123"), nothing)
+        @test !contains(String(copy(resp.body)), "xyz123")
+    end
+
+    @testset "queryparams - various edge cases" begin
+        # Key without value (flag param)
+        raw = Vector{UInt8}("GET /p?verbose HTTP/1.1\r\nHost: x\r\n\r\n")
+        req = PicoHTTPParser.parse_request(raw)
+        qp = queryparams(req)
+        @test qp["verbose"] == ""
+
+        # Multiple params including duplicated key (last wins with Dict)
+        raw2 = Vector{UInt8}("GET /p?a=1&b=2&c=3 HTTP/1.1\r\nHost: x\r\n\r\n")
+        req2 = PicoHTTPParser.parse_request(raw2)
+        qp2 = queryparams(req2)
+        @test qp2["a"] == "1"
+        @test qp2["b"] == "2"
+        @test qp2["c"] == "3"
+
+        # URL-encoded values passed through as-is (no decoding in core)
+        raw3 = Vector{UInt8}("GET /p?q=hello%20world HTTP/1.1\r\nHost: x\r\n\r\n")
+        req3 = PicoHTTPParser.parse_request(raw3)
+        qp3 = queryparams(req3)
+        @test haskey(qp3, "q")
+    end
+
+    @testset "RouteResult predicates" begin
+        # not_found
+        r404 = RouteResult()
+        @test not_found(r404)
+        @test !matched(r404)
+        @test !method_not_allowed(r404)
+
+        # method_not_allowed
+        r405 = RouteResult(0x03)  # GET + POST allowed
+        @test method_not_allowed(r405)
+        @test !matched(r405)
+        @test !not_found(r405)
+
+        # matched
+        rOk = RouteResult(ctx -> text("ok"), Pair{Symbol,String}[])
+        @test matched(rOk)
+        @test !not_found(rOk)
+        @test !method_not_allowed(rOk)
+    end
+
+    @testset "Response body type stability" begin
+        # All builders produce Vector{UInt8} body
+        @test text("hello").body isa Vector{UInt8}
+        @test html("<p>x</p>").body isa Vector{UInt8}
+        @test json("{}").body isa Vector{UInt8}
+        @test json(UInt8[0x7b, 0x7d]).body isa Vector{UInt8}
+        @test redirect("/x").body isa Vector{UInt8}
+        @test fail(500).body isa Vector{UInt8}
+        @test fail(400, "bad").body isa Vector{UInt8}
+    end
+
+    @testset "Response constructor from String" begin
+        r = Response(200, ["X" => "Y"], "hello")
+        @test r.body == Vector{UInt8}("hello")
+        @test r.status == 200
+
+        # Empty string body
+        r2 = Response(204, Pair{String,String}[], "")
+        @test isempty(r2.body)
+    end
+
+    @testset "Methods - from_string disambiguation" begin
+        # Ensure similar-length methods don't collide
+        @test Methods.from_string("GET") != Methods.from_string("PUT")
+        @test Methods.from_string("POST") != Methods.from_string("HEAD")
+        @test Methods.from_string("PATCH") != Methods.from_string("DELETE")
+
+        # Single char strings
+        @test Methods.from_string("G") == Methods.UNKNOWN
+        @test Methods.from_string("P") == Methods.UNKNOWN
+        @test Methods.from_string("GETS") == Methods.UNKNOWN
+        @test Methods.from_string("POSTS") == Methods.UNKNOWN
+    end
+
+    @testset "Methods - allow_header formatting" begin
+        # Single method
+        @test Methods.allow_header(Methods.bitmask(Methods.GET)) == "GET"
+        # Multiple methods preserved in order
+        mask = Methods.bitmask(Methods.GET) | Methods.bitmask(Methods.POST) | Methods.bitmask(Methods.DELETE)
+        hdr = Methods.allow_header(mask)
+        @test contains(hdr, "GET")
+        @test contains(hdr, "POST")
+        @test contains(hdr, "DELETE")
+        # Empty mask
+        @test Methods.allow_header(0x00) == ""
+    end
+
+    @testset "Status line coverage" begin
+        @test _status(301) == "HTTP/1.1 301 Moved Permanently\r\n"
+        @test _status(302) == "HTTP/1.1 302 Found\r\n"
+        @test _status(304) == "HTTP/1.1 304 Not Modified\r\n"
+        @test _status(400) == "HTTP/1.1 400 Bad Request\r\n"
+        @test _status(401) == "HTTP/1.1 401 Unauthorized\r\n"
+        @test _status(403) == "HTTP/1.1 403 Forbidden\r\n"
+        @test _status(405) == "HTTP/1.1 405 Method Not Allowed\r\n"
+        @test _status(408) == "HTTP/1.1 408 Request Timeout\r\n"
+        @test _status(413) == "HTTP/1.1 413 Content Too Large\r\n"
+        @test _status(422) == "HTTP/1.1 422 Unprocessable Entity\r\n"
+        @test _status(429) == "HTTP/1.1 429 Too Many Requests\r\n"
+        @test _status(502) == "HTTP/1.1 502 Bad Gateway\r\n"
+        @test _status(503) == "HTTP/1.1 503 Service Unavailable\r\n"
+        # Out of range
+        @test contains(_status(0), "HTTP/1.1 0")
+        @test contains(_status(999), "HTTP/1.1 999")
+    end
+
+    @testset "Header case insensitivity" begin
+        raw = Vector{UInt8}("GET / HTTP/1.1\r\ncontent-type: text/html\r\nX-CUSTOM: val\r\n\r\n")
+        req = PicoHTTPParser.parse_request(raw)
+        # Case-insensitive match
+        @test header(req, "Content-Type") == "text/html"
+        @test header(req, "CONTENT-TYPE") == "text/html"
+        @test header(req, "x-custom") == "val"
+        @test header(req, "X-Custom") == "val"
+        @test hasheader(req, "Content-Type")
+        @test hasheader(req, "x-custom")
+    end
+
+    @testset "Param with various types" begin
+        raw = Vector{UInt8}("GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+        req = PicoHTTPParser.parse_request(raw)
+        ctx = Context(req, [:val => "3.14", :neg => "-42", :empty => ""])
+
+        # Float64 parsing
+        @test param(ctx, Float64, :val) == 3.14
+        @test param(ctx, Float64, :neg) == -42.0
+        @test param(ctx, Float64, :empty) === nothing
+
+        # Int parsing of negative
+        @test param(ctx, Int, :neg) == -42
+        @test param(ctx, Int, :empty) === nothing
+    end
+
+    @testset "IOUringBackend construction" begin
+        backend = IOUringBackend()
+        @test backend.queue_depth == 4096
+        @test backend.nworkers == Threads.nthreads()
+
+        backend2 = IOUringBackend(; queue_depth=2048, nworkers=2)
+        @test backend2.queue_depth == 2048
+        @test backend2.nworkers == 2
     end
 end

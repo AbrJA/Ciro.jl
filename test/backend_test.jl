@@ -97,6 +97,28 @@ const LIB_AVAILABLE = isfile(Ciro.Backend._LIB)
         big_buf = Vector{UInt8}(undef, 32)
         set_pending!(pw, 200, big_buf)
         @test pop_pending!(pw, 200) === big_buf
+
+        # Partial write tracking
+        data = collect(UInt8, codeunits("abcdef"))
+        set_pending!(pw, 30, data, 6)
+        total, sent, done = advance_pending!(pw, 30, 2)
+        @test total == 6
+        @test sent == 2
+        @test done == false
+
+        ptr, rem = pending_slice(pw, 30)
+        @test ptr != C_NULL
+        @test rem == 4
+
+        total, sent, done = advance_pending!(pw, 30, 4)
+        @test total == 6
+        @test sent == 6
+        @test done == true
+        @test pop_pending!(pw, 30) === data
+
+        ptr2, rem2 = pending_slice(pw, 999)
+        @test ptr2 == C_NULL
+        @test rem2 == 0
     end
 
     if LIB_AVAILABLE

@@ -79,23 +79,35 @@ Also tracks which connections should be closed after write.
 """
 struct PendingWrites
     buffers     :: Vector{Union{Nothing, Vector{UInt8}}}
+    lengths     :: Vector{Int}
+    sent        :: Vector{Int}
     close_after :: BitVector
 end
 
 PendingWrites(; max_fd::Int=65536) =
-    PendingWrites(Vector{Union{Nothing, Vector{UInt8}}}(nothing, max_fd), falses(max_fd))
+    PendingWrites(Vector{Union{Nothing, Vector{UInt8}}}(nothing, max_fd),
+                  zeros(Int, max_fd),
+                  zeros(Int, max_fd),
+                  falses(max_fd))
 
 """Store a buffer for an in-flight write on `fd`."""
-@inline function set_pending!(pw::PendingWrites, fd::Integer, buf::Vector{UInt8})
+@inline function set_pending!(pw::PendingWrites, fd::Integer, buf::Vector{UInt8}, len::Integer)
     idx = Int(fd) + 1
     if idx > length(pw.buffers)
         new_len = max(idx, length(pw.buffers) * 2)
         resize!(pw.buffers, new_len)
+        resize!(pw.lengths, new_len)
+        resize!(pw.sent, new_len)
         resize!(pw.close_after, new_len)
     end
     @inbounds pw.buffers[idx] = buf
+    @inbounds pw.lengths[idx] = Int(len)
+    @inbounds pw.sent[idx] = 0
     nothing
 end
+
+@inline set_pending!(pw::PendingWrites, fd::Integer, buf::Vector{UInt8}) =
+    set_pending!(pw, fd, buf, length(buf))
 
 """Retrieve and clear the pending buffer for `fd`."""
 @inline function pop_pending!(pw::PendingWrites, fd::Integer)::Union{Nothing, Vector{UInt8}}
@@ -103,7 +115,33 @@ end
     idx > length(pw.buffers) && return nothing
     @inbounds buf = pw.buffers[idx]
     @inbounds pw.buffers[idx] = nothing
+    @inbounds pw.lengths[idx] = 0
+    @inbounds pw.sent[idx] = 0
     return buf
+end
+
+"""Advance pending write progress and return (total_len, sent, done)."""
+@inline function advance_pending!(pw::PendingWrites, fd::Integer, bytes_written::Integer)
+    idx = Int(fd) + 1
+    idx > length(pw.buffers) && return (0, 0, true)
+    @inbounds total = pw.lengths[idx]
+    @inbounds sent = pw.sent[idx] + Int(bytes_written)
+    done = sent >= total
+    @inbounds pw.sent[idx] = done ? total : sent
+    return (total, sent, done)
+end
+
+"""Get pointer+length for remaining pending bytes, or (C_NULL, 0)."""
+@inline function pending_slice(pw::PendingWrites, fd::Integer)::Tuple{Ptr{UInt8}, Int}
+    idx = Int(fd) + 1
+    idx > length(pw.buffers) && return (C_NULL, 0)
+    @inbounds buf = pw.buffers[idx]
+    buf === nothing && return (C_NULL, 0)
+    @inbounds total = pw.lengths[idx]
+    @inbounds sent = pw.sent[idx]
+    remaining = total - sent
+    remaining <= 0 && return (C_NULL, 0)
+    return (pointer(buf, sent + 1), remaining)
 end
 
 """Mark that a connection should be closed after its pending write completes."""

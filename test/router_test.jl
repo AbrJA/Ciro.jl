@@ -79,19 +79,19 @@ using PicoHTTPParser
         result = route(r, Methods.GET, "/items/special")
         @test matched(result)
         resp = result.handler(Context(req, result.params))
-        @test resp.body == "static"
+        @test String(copy(resp.body)) == "static"
 
         # Param for other values
         result2 = route(r, Methods.GET, "/items/123")
         @test matched(result2)
         resp2 = result2.handler(Context(req, result2.params))
-        @test resp2.body == "param"
+        @test String(copy(resp2.body)) == "param"
 
         # Wildcard for deeper paths
         result3 = route(r, Methods.GET, "/items/a/b")
         @test matched(result3)
         resp3 = result3.handler(Context(req, result3.params))
-        @test resp3.body == "wildcard"
+        @test String(copy(resp3.body)) == "wildcard"
     end
 
     @testset "Multiple methods same path" begin
@@ -105,16 +105,16 @@ using PicoHTTPParser
         req = PicoHTTPParser.parse_request(raw)
 
         r1 = route(r, Methods.GET, "/resource")
-        @test r1.handler(Context(req, r1.params)).body == "get"
+        @test String(r1.handler(Context(req, r1.params)).body) == "get"
 
         r2 = route(r, Methods.POST, "/resource")
-        @test r2.handler(Context(req, r2.params)).body == "post"
+        @test String(r2.handler(Context(req, r2.params)).body) == "post"
 
         r3 = route(r, Methods.PUT, "/resource")
-        @test r3.handler(Context(req, r3.params)).body == "put"
+        @test String(r3.handler(Context(req, r3.params)).body) == "put"
 
         r4 = route(r, Methods.DELETE, "/resource")
-        @test r4.handler(Context(req, r4.params)).body == "delete"
+        @test String(r4.handler(Context(req, r4.params)).body) == "delete"
     end
 
     @testset "Handler invocation with params" begin
@@ -127,7 +127,7 @@ using PicoHTTPParser
         result = route(r, Methods.GET, "/hello/Julia")
         resp = result.handler(Context(req, result.params))
         @test resp.status == 200
-        @test resp.body == "Hello, Julia!"
+        @test String(copy(resp.body)) == "Hello, Julia!"
     end
 
     @testset "Trailing slashes normalized" begin
@@ -151,7 +151,7 @@ using PicoHTTPParser
         @test matched(result)
         ctx = Context(req, result.params)
         resp = result.handler(ctx)
-        @test resp.body == "user 42"
+        @test String(copy(resp.body)) == "user 42"
         @test param(ctx, Int, :id) == 42
 
         # Invalid integer → no match on this param, falls through
@@ -165,7 +165,7 @@ using PicoHTTPParser
         result3 = route(r, Methods.GET, "/files/report.pdf")
         @test matched(result3)
         resp3 = result3.handler(Context(req, result3.params))
-        @test resp3.body == "file report.pdf"
+        @test String(copy(resp3.body)) == "file report.pdf"
     end
 
     @testset "Route groups" begin
@@ -181,15 +181,15 @@ using PicoHTTPParser
 
         result = route(r, Methods.GET, "/api/v1/users")
         @test matched(result)
-        @test result.handler(Context(req, result.params)).body == "users list"
+        @test String(result.handler(Context(req, result.params)).body) == "users list"
 
         result2 = route(r, Methods.POST, "/api/v1/users")
         @test matched(result2)
-        @test result2.handler(Context(req, result2.params)).body == "user created"
+        @test String(result2.handler(Context(req, result2.params)).body) == "user created"
 
         result3 = route(r, Methods.GET, "/api/v1/items/77")
         @test matched(result3)
-        @test result3.handler(Context(req, result3.params)).body == "item 77"
+        @test String(result3.handler(Context(req, result3.params)).body) == "item 77"
 
         # Outside group → 404
         @test not_found(route(r, Methods.GET, "/api/v1/other"))
@@ -332,5 +332,88 @@ using PicoHTTPParser
             get!(g, "/data", ctx -> text("data"))
         end
         @test matched(route(r, Methods.GET, "/v1/data"))
+    end
+
+    @testset "Multiple params same level" begin
+        r = Trie()
+        get!(r, "/a/:x/b/:y/c/:z", ctx -> text("$(param(ctx, :x))-$(param(ctx, :y))-$(param(ctx, :z))"))
+
+        result = route(r, Methods.GET, "/a/1/b/2/c/3")
+        @test matched(result)
+        raw = Vector{UInt8}("GET /a/1/b/2/c/3 HTTP/1.1\r\nHost: x\r\n\r\n")
+        req = PicoHTTPParser.parse_request(raw)
+        ctx = Context(req, result.params)
+        @test param(ctx, :x) == "1"
+        @test param(ctx, :y) == "2"
+        @test param(ctx, :z) == "3"
+    end
+
+    @testset "Register and match root" begin
+        r = Trie()
+        get!(r, "/", ctx -> text("root"))
+        post!(r, "/", ctx -> text("post root"))
+
+        @test matched(route(r, Methods.GET, "/"))
+        @test matched(route(r, Methods.POST, "/"))
+        @test method_not_allowed(route(r, Methods.DELETE, "/"))
+    end
+
+    @testset "Long paths" begin
+        r = Trie()
+        get!(r, "/a/b/c/d/e/f/g/h", ctx -> text("deep"))
+
+        @test matched(route(r, Methods.GET, "/a/b/c/d/e/f/g/h"))
+        @test not_found(route(r, Methods.GET, "/a/b/c/d/e/f/g"))
+        @test not_found(route(r, Methods.GET, "/a/b/c/d/e/f/g/h/i"))
+    end
+
+    @testset "Param with special chars" begin
+        r = Trie()
+        get!(r, "/files/:name", ctx -> text(param(ctx, :name)))
+
+        # Params can contain dots, dashes, underscores
+        result = route(r, Methods.GET, "/files/my-file_v2.tar.gz")
+        @test matched(result)
+        raw = Vector{UInt8}("GET /files/my-file_v2.tar.gz HTTP/1.1\r\nHost: x\r\n\r\n")
+        req = PicoHTTPParser.parse_request(raw)
+        ctx = Context(req, result.params)
+        @test param(ctx, :name) == "my-file_v2.tar.gz"
+    end
+
+    @testset "405 bitmask includes all methods" begin
+        r = Trie()
+        get!(r, "/m", ctx -> text("g"))
+        post!(r, "/m", ctx -> text("p"))
+        put!(r, "/m", ctx -> text("u"))
+
+        result = route(r, Methods.DELETE, "/m")
+        @test method_not_allowed(result)
+        # Bitmask should have GET, POST, PUT + auto-HEAD
+        mask = result.allowed
+        @test (mask & Methods.bitmask(Methods.GET)) != 0
+        @test (mask & Methods.bitmask(Methods.POST)) != 0
+        @test (mask & Methods.bitmask(Methods.PUT)) != 0
+        @test (mask & Methods.bitmask(Methods.HEAD)) != 0
+    end
+
+    @testset "Group proxy - all methods" begin
+        r = Trie()
+        group!(r, "/g") do g
+            get!(g, "/x", ctx -> text("g"))
+            post!(g, "/x", ctx -> text("p"))
+            put!(g, "/x", ctx -> text("u"))
+            delete!(g, "/x", ctx -> text("d"))
+            patch!(g, "/x", ctx -> text("pa"))
+            head!(g, "/x", ctx -> text("h"))
+            options!(g, "/x", ctx -> text("o"))
+        end
+
+        @test matched(route(r, Methods.GET, "/g/x"))
+        @test matched(route(r, Methods.POST, "/g/x"))
+        @test matched(route(r, Methods.PUT, "/g/x"))
+        @test matched(route(r, Methods.DELETE, "/g/x"))
+        @test matched(route(r, Methods.PATCH, "/g/x"))
+        @test matched(route(r, Methods.HEAD, "/g/x"))
+        @test matched(route(r, Methods.OPTIONS, "/g/x"))
     end
 end

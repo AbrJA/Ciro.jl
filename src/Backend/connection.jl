@@ -2,7 +2,7 @@
 # Connection — thin wrapper over conn_t* with ccall accessors
 # ══════════════════════════════════════════════════════════════════════════════
 
-const BUFFER_SIZE = 8192  # Must match C BUFFER_SIZE
+const BUFFER_SIZE = Int(ccall((:get_conn_buffer_size, _LIB), Cint, ()))
 
 """Create a new connection (heap-allocated conn_t)."""
 @inline function create_connection()::Connection

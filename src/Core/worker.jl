@@ -36,9 +36,7 @@ end
         res < 0 && return
         client_fd = res
         new_conn = acquire!(conn_pool)
-        set_conn_fd!(new_conn, client_fd)
-        set_conn_op!(new_conn, READ)
-        queue_read!(engine, new_conn)
+        accept_and_queue_read!(engine, new_conn, client_fd)
         return
     end
 
@@ -54,7 +52,7 @@ end
     if op == READ
         _handle_read(server, engine, conn, res, conn_pool, buf_pool, pending)
     elseif op == WRITE
-        _handle_write(engine, conn, conn_pool, buf_pool, pending)
+        _handle_write(engine, conn, res, conn_pool, buf_pool, pending)
     end
     nothing
 end
@@ -95,14 +93,14 @@ function _handle_read(server, engine, conn::Connection, bytes_read::Cint,
 
     # Add Connection: close header per RFC 9110 when closing
     if should_close
-        push!(response.headers, "Connection" => "close")
+        _set_connection_close!(response.headers)
     end
 
     out_buf = acquire!(buf_pool)
     nbytes = serialize_response!(out_buf, response)
     fd = conn_fd(conn)
 
-    set_pending!(pending, fd, out_buf)
+    set_pending!(pending, fd, out_buf, nbytes)
     should_close && mark_close!(pending, fd)
 
     set_conn_op!(conn, WRITE)
@@ -114,14 +112,32 @@ end
 
 @inline function _wants_close(req)::Bool
     req === nothing && return true
+
+    # PicoHTTPParser minor_version: 0 => HTTP/1.0, 1 => HTTP/1.1
+    http11_or_newer = req.minor_version >= 1
+
+    conn_val = nothing
     for (k, v) in req.headers
         ncodeunits(k) != 10 && continue
-        # Case-insensitive check for "Connection"
         _hdr_key_eq_ci(k, "connection") || continue
-        # Case-insensitive check for "close"
-        ncodeunits(v) == 5 && _hdr_key_eq_ci(v, "close") && return true
+        conn_val = v
+        break
     end
+
+    conn_val === nothing && return !http11_or_newer
+    _contains_token_ci(conn_val, "close") && return true
+    !http11_or_newer && !_contains_token_ci(conn_val, "keep-alive") && return true
     return false
+end
+
+@inline function _set_connection_close!(headers::Vector{Pair{String,String}})
+    for i in eachindex(headers)
+        k = headers[i].first
+        _hdr_key_eq_ci(k, "connection") || continue
+        headers[i] = "Connection" => "close"
+        return
+    end
+    push!(headers, "Connection" => "close")
 end
 
 """Zero-allocation case-insensitive ASCII string comparison."""
@@ -137,12 +153,62 @@ end
     return true
 end
 
+"""ASCII token match for comma-separated header values (no allocations)."""
+@inline function _contains_token_ci(v, token::String)::Bool
+    n = ncodeunits(v)
+    tlen = ncodeunits(token)
+    i = 1
+    while i <= n
+        while i <= n
+            c = @inbounds codeunit(v, i)
+            ((c == UInt8(',')) | (c == UInt8(' ')) | (c == UInt8('\t'))) || break
+            i += 1
+        end
+        start = i
+        while i <= n
+            c = @inbounds codeunit(v, i)
+            ((c == UInt8(',')) | (c == UInt8(' ')) | (c == UInt8('\t'))) && break
+            i += 1
+        end
+        seglen = i - start
+        if seglen == tlen
+            matched = true
+            @inbounds for j in 1:tlen
+                ca = codeunit(v, start + j - 1)
+                cb = codeunit(token, j)
+                ca_lower = (UInt8('A') <= ca <= UInt8('Z')) ? (ca | 0x20) : ca
+                cb_lower = (UInt8('A') <= cb <= UInt8('Z')) ? (cb | 0x20) : cb
+                if ca_lower != cb_lower
+                    matched = false
+                    break
+                end
+            end
+            matched && return true
+        end
+    end
+    return false
+end
+
 # ── Write Handler ───────────────────────────────────────────────────────────
 
-function _handle_write(engine, conn::Connection,
+function _handle_write(engine, conn::Connection, bytes_written::Cint,
                        conn_pool::ConnectionPool, buf_pool::BufferPool,
                        pending::PendingWrites)
     fd = conn_fd(conn)
+
+    total, sent, done = advance_pending!(pending, fd, bytes_written)
+    if !done
+        ptr, remaining = pending_slice(pending, fd)
+        if ptr == C_NULL || remaining <= 0 || sent < 0 || total <= 0
+            buf = pop_pending!(pending, fd)
+            buf !== nothing && release!(buf_pool, buf)
+            close_fd!(fd)
+            release!(conn_pool, conn)
+            return
+        end
+        queue_write!(engine, conn, ptr, remaining)
+        return
+    end
 
     buf = pop_pending!(pending, fd)
     buf !== nothing && release!(buf_pool, buf)

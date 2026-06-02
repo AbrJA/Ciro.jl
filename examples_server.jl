@@ -1,12 +1,15 @@
 #!/usr/bin/env julia
 # Ciro.jl — Feature showcase server
-# Run with: julia --threads=auto --project=. server.jl
+# Demonstrates every routing and request feature available in the core.
+# Middleware and cookies are in separate packages — not used here.
+#
+# Run with: julia --threads=auto --project=. examples_server.jl
+# Test with: curl http://localhost:3001/
 using Ciro
-import Ciro: intercept   # explicit import required to extend the generic function
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Custom middleware (functor pattern — zero virtual dispatch)
-# ══════════════════════════════════════════════════════════════════════════════
+# ── Custom middleware (functor pattern — zero virtual dispatch) ───────────────
+# Middleware lives outside core. Here we show the pattern directly so you can
+# see how to write one without importing an extension package.
 
 struct WithAuth{H}
     handler :: H
@@ -19,13 +22,12 @@ function (m::WithAuth)(ctx::Context)
     return m.handler(ctx)
 end
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Custom error catcher
-# ══════════════════════════════════════════════════════════════════════════════
+# ── Custom error catcher ─────────────────────────────────────────────────────
 
 struct AppCatcher <: AbstractCatcher end
 
-function intercept(::AppCatcher, err::Exception, req)
+# Extend Ciro.Interface.intercept — the module is named Interface (singular).
+function Ciro.Interface.intercept(::AppCatcher, err::Exception, _)
     @error "Unhandled $(typeof(err))" exception=err
     return json("""{"error":"internal_error","message":"Something went wrong"}"""; status=500)
 end
@@ -33,8 +35,6 @@ end
 # ══════════════════════════════════════════════════════════════════════════════
 # Handlers
 # ══════════════════════════════════════════════════════════════════════════════
-
-# — Static routes ─────────────────────────────────────────────────────────────
 
 function handle_root(ctx::Context)
     text("Hello from Ciro.jl!")
@@ -45,12 +45,10 @@ function handle_json(ctx::Context)
 end
 
 function handle_html(ctx::Context)
-    html("""
-    <!DOCTYPE html>
-    <html><head><title>Ciro.jl</title></head>
-    <body><h1>Ciro.jl</h1><p>High-performance Julia web framework.</p></body>
-    </html>
-    """)
+    html("""<!DOCTYPE html>
+<html><head><title>Ciro.jl</title></head>
+<body><h1>Ciro.jl</h1><p>High-performance Julia web framework.</p></body>
+</html>""")
 end
 
 function handle_redirect(ctx::Context)
@@ -71,13 +69,13 @@ function handle_post_comment(ctx::Context)
     json("""{"post":$post_id,"comment":$comment_id}""")
 end
 
-# — Wildcard routes ───────────────────────────────────────────────────────────
+# — Wildcard ──────────────────────────────────────────────────────────────────
 
 function handle_files(ctx::Context)
     text("Serving: $(path(ctx))")
 end
 
-# — Request body ──────────────────────────────────────────────────────────────
+# — Body ──────────────────────────────────────────────────────────────────────
 
 function handle_echo(ctx::Context)
     ct      = content_type(ctx)
@@ -101,20 +99,6 @@ function handle_search(ctx::Context)
     json("""{"query":"$q","page":$page,"results":[]}""")
 end
 
-# — Cookies ───────────────────────────────────────────────────────────────────
-
-function handle_set_cookie(ctx::Context)
-    resp = text("Cookie set!")
-    push!(resp.headers, setcookie("session", "abc123"; max_age=3600, httponly=true))
-    return resp
-end
-
-function handle_read_cookie(ctx::Context)
-    sess        = cookie(ctx, "session", "none")
-    all_cookies = cookies(ctx)
-    json("""{"session":"$sess","total_cookies":$(length(all_cookies))}""")
-end
-
 # — Headers ───────────────────────────────────────────────────────────────────
 
 function handle_headers(ctx::Context)
@@ -129,33 +113,11 @@ function handle_secret(ctx::Context)
     json("""{"message":"Access granted","user":"authenticated"}""")
 end
 
-# — Error triggering ────────────────────────────────────────────────────────────────────
+# — Error handling ────────────────────────────────────────────────────────────
 
 function handle_panic(ctx::Context)
     error("deliberate error — caught by AppCatcher")
 end
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Middleware stack (compose outermost → innermost)
-# ══════════════════════════════════════════════════════════════════════════════
-#
-# Request flows:  WithRateLimit → WithSecurityHeaders → WithCORS → WithRequestId
-#                  → WithTiming → WithLogger → handler
-#
-# Applied at registration time: Julia monomorphizes the entire chain per route
-# into a single inlined call with no virtual dispatch.
-
-const _stack = handler -> WithRateLimit(
-    WithSecurityHeaders(
-        WithCORS(
-            WithRequestId(
-                WithTiming(
-                    WithLogger(handler)
-                )
-            )
-        )
-    )
-)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Router
@@ -164,38 +126,32 @@ const _stack = handler -> WithRateLimit(
 router = Trie()
 
 # Static routes
-get!(router, "/",        _stack(handle_root))
-get!(router, "/json",    _stack(handle_json))
-get!(router, "/html",    _stack(handle_html))
-get!(router, "/redir",   _stack(handle_redirect))
-get!(router, "/headers", _stack(handle_headers))
+get!(router, "/",        handle_root)
+get!(router, "/json",    handle_json)
+get!(router, "/html",    handle_html)
+get!(router, "/redir",   handle_redirect)
+get!(router, "/headers", handle_headers)
 
-# Route groups — /api/v1 namespace
+# Route groups
 group!(router, "/api/v1") do g
-    get!(g, "/search",  _stack(handle_search))
-    post!(g, "/echo",   _stack(handle_echo))
-    post!(g, "/upload", _stack(handle_upload))
+    get!(g, "/search",  handle_search)
+    post!(g, "/echo",   handle_echo)
+    post!(g, "/upload", handle_upload)
 
-    # Untyped param → handler validates → 400 on bad input
-    get!(g, "/users/:id", _stack(handle_user))
-    # Typed params → router rejects non-integers → 404 (route constraint)
-    get!(g, "/posts/:post_id::Int/comments/:comment_id::Int", _stack(handle_post_comment))
+    # Untyped param — handler validates, returns 400 on bad input
+    get!(g, "/users/:id", handle_user)
 
-    # Cookies
-    get!(g, "/set-cookie",  _stack(handle_set_cookie))
-    get!(g, "/read-cookie", _stack(handle_read_cookie))
+    # Typed params — router rejects mismatches at dispatch (404, never calls handler)
+    get!(g, "/posts/:post_id::Int/comments/:comment_id::Int", handle_post_comment)
 
-    # Protected with custom middleware (WithAuth sits inside the global stack)
-    get!(g, "/secret", _stack(WithAuth(handle_secret, "supersecret")))
+    # Protected with per-handler middleware (no global stack needed)
+    get!(g, "/secret", WithAuth(handle_secret, "supersecret"))
 
-    # Error handling demonstration
-    get!(g, "/panic",  _stack(handle_panic))
+    get!(g, "/panic", handle_panic)
 end
 
-# Wildcard — must be registered on the trie directly (not inside a group)
-get!(router, "/files/*", _stack(handle_files))
-
-# HEAD is auto-generated from GET (RFC 9110 §9.3.2) — no explicit registration needed
+# Wildcard — registered at top level, not inside a group
+get!(router, "/files/*", handle_files)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Server
@@ -206,45 +162,30 @@ server = Server(;
     catcher  = AppCatcher(),
     port     = 3001,
     host     = "0.0.0.0",
-    max_body_size = 4 * 1_048_576,  # 4 MiB
+    max_body_size    = 4 * 1_048_576,  # 4 MiB
     shutdown_timeout = 10.0,
 )
 
 println("""
 Ciro.jl feature showcase — http://localhost:3001
 
-  Static routes:
-    GET  /                         → Hello plaintext
-    GET  /json                     → JSON response
-    GET  /html                     → HTML response
-    GET  /redir                    → Redirect to /
-    GET  /headers                  → Echo request headers
+  GET  /                              → Hello plaintext
+  GET  /json                          → JSON response
+  GET  /html                          → HTML response
+  GET  /redir                         → Redirect to /
+  GET  /headers                       → Echo request headers
 
-  Route groups (/api/v1):
-    GET  /api/v1/search?q=foo&page=2     → Query params
-    POST /api/v1/echo                    → Echo body (Content-Type preserved)
-    POST /api/v1/upload                  → Raw bytes upload
-    GET  /api/v1/users/42               → Typed param, parsed in handler
-    GET  /api/v1/users/abc              → 400 (handler rejects non-integer)
-    GET  /api/v1/posts/1/comments/5     → Multi typed params (:Int constraint, 404 on mismatch)
-    GET  /api/v1/set-cookie             → Set session cookie
-    GET  /api/v1/read-cookie            → Read session cookie
-    GET  /api/v1/secret                 → 401 without Bearer token
-    GET  /api/v1/panic                  → 500 via AppCatcher (JSON error)
+  GET  /api/v1/search?q=foo&page=2    → Query params
+  POST /api/v1/echo                   → Echo body
+  POST /api/v1/upload                 → Raw bytes upload
+  GET  /api/v1/users/42               → Typed param, parsed in handler
+  GET  /api/v1/users/abc              → 400 (handler rejects non-integer)
+  GET  /api/v1/posts/1/comments/5     → Multi typed params (Int constraint)
+  GET  /api/v1/secret                 → 401 without: Authorization: Bearer supersecret
+  GET  /api/v1/panic                  → 500 via AppCatcher (JSON error)
 
-  Wildcard:
-    GET  /files/any/path/here           → Wildcard catch-all
-
-  HEAD auto-generation:
-    HEAD /                              → 200, no body (from GET handler)
-
-  Middleware applied globally (outermost → innermost):
-    WithRateLimit     — 100 req/min per IP (token bucket)
-    WithSecurityHeaders — HSTS, CSP, X-Frame-Options, nosniff
-    WithCORS          — Access-Control-Allow-Origin: *
-    WithRequestId     — X-Request-Id
-    WithTiming        — X-Response-Time
-    WithLogger        — stdout access log
+  GET  /files/any/path/here           → Wildcard catch-all
+  HEAD /                              → 200, no body (auto-generated from GET)
 """)
 
 start!(server)
