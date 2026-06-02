@@ -1,4 +1,30 @@
-# Ciro.jl — Pre-Release Technical Audit
+# Ciro.jl — Technical Quality & Refinement Report
+
+**Date:** 2026-05-30
+**Baseline:** 317 tests pass · Aqua.jl clean · JET.jl 0 errors
+**Scope:** Full architecture review for a *minimal, blazing-fast, highly modular* HTTP framework
+**Goal:** Identify what to keep, remove, fix, and what is missing; then implement all fixes autonomously
+
+---
+
+## Quick Summary of Changes Applied (v0.1.1)
+
+| Area | Change |
+|------|--------|
+| **New** `src/Middleware/Middleware.jl` | Complete middleware layer — `WithLogger`, `WithCORS`, `WithTiming`, `WithRequestId`, `WithSecurityHeaders`, `WithRateLimit` |
+| **New** Cookie support | `cookie/cookies/setcookie` in `Interface/request.jl` |
+| **New** `lib/Makefile` | Reproducible build of `ciro.so`; BinaryBuilder-ready `install` target |
+| **Fix** `_http_date()` | Thread-safe via `Threads.Atomic{Int}` + dedicated lock |
+| **Fix** `body(req)` | Removed redundant `copy()` — single allocation |
+| **Fix** `server.jl` | Wrong module name (`Ciro.Interfaces` → `Ciro.Interface`); uses real middleware |
+| **Fix** `examples_server.jl` | Removed non-existent cookie calls; uses real middleware |
+| **Fix** C library | `BUFFER_SIZE` 8 KiB → 64 KiB; `accept_and_queue_read` now sets `TCP_NODELAY` |
+| **Tests** | Suite expanded from 317 → 390+ tests (middleware, cookies, edge cases) |
+| **README** | Updated module names, added Middleware section, corrected all examples |
+
+---
+
+# Pre-Release Technical Audit
 
 **Date:** 2026-05-29
 **Scope:** Full architecture review for a *minimal, blazing-fast, highly modular* HTTP framework
