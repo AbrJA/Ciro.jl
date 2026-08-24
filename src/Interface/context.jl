@@ -1,9 +1,9 @@
 # ══════════════════════════════════════════════════════════════════════════════
-# Context — the single argument passed to every handler
+# RequestContext — the single argument passed to every handler
 # ══════════════════════════════════════════════════════════════════════════════
 
 """
-    Context
+    RequestContext
 
 Encapsulates a single HTTP request and the route parameters captured during
 dispatch. Every handler receives exactly one `Context` argument.
@@ -19,12 +19,19 @@ function my_handler(ctx::Context)
 end
 ```
 """
-struct Context
-    req    :: Request
-    params :: Vector{Pair{Symbol,String}}
+struct RequestContext{R,P}
+    request :: R
+    params  :: P
 end
 
-"""Construct a `Context` with no route parameters (for middleware and tests)."""
-Context(req::Request) = Context(req, Pair{Symbol,String}[])
+"""Construct a `RequestContext` with no route parameters."""
+RequestContext(request::Request) = RequestContext(request, ())
+RequestContext(request::PicoHTTPParser.Request, params) =
+    RequestContext(Request(request), params)
+RequestContext(request::PicoHTTPParser.Request) = RequestContext(Request(request))
 
-export Context
+# Kept as a source-level alias while the internal modules are migrated. New
+# code should use RequestContext.
+const Context = RequestContext
+
+export RequestContext, Context

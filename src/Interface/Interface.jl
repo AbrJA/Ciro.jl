@@ -10,7 +10,7 @@ module Interface
 
 using PicoHTTPParser
 
-const Request = PicoHTTPParser.Request
+include("request_type.jl")
 export Request
 
 include("context.jl")

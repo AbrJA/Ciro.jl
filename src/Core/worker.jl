@@ -110,7 +110,7 @@ function _handle_read(server, engine, conn::Connection, bytes_read::Cint,
     nothing
 end
 
-@inline function _wants_close(req)::Bool
+@inline function _wants_close(req::Request)::Bool
     req === nothing && return true
 
     # PicoHTTPParser minor_version: 0 => HTTP/1.0, 1 => HTTP/1.1
@@ -129,6 +129,9 @@ end
     !http11_or_newer && !_contains_token_ci(conn_val, "keep-alive") && return true
     return false
 end
+
+@inline _wants_close(req::PicoHTTPParser.Request)::Bool = _wants_close(Request(req))
+@inline _wants_close(::Nothing)::Bool = true
 
 @inline function _set_connection_close!(headers::Vector{Pair{String,String}})
     for i in eachindex(headers)
@@ -226,15 +229,8 @@ end
 # ── Request Dispatch (type-stable via RouteResult) ──────────────────────────
 
 @inline function _dispatch(server::Server, req::Request)::Response
-    path = req.path
-    path_end = ncodeunits(path)
-    for i in 1:path_end
-        @inbounds codeunit(path, i) == UInt8('?') && (path_end = i - 1; break)
-    end
-    clean = SubString(String(path), 1, path_end)
-
     method = Methods.from_string(req.method)
-    result = route(server.router, method, clean)
+    result = route(server.router, method, req.path)
 
     if not_found(result)
         return fail(404, "Not Found")
@@ -246,16 +242,20 @@ end
                         "Method Not Allowed")
     end
 
-    ctx = Context(req, result.params)
+    ctx = RequestContext(req, result.params)
     return _invoke_handler(server, result.handler, ctx)
 end
 
+# Internal migration adapter for parser-level tests and backend code.
+@inline _dispatch(server::Server, req::PicoHTTPParser.Request)::Response =
+    _dispatch(server, Request(req))
+
 """Isolated handler invocation — @noinline keeps try/catch off the hot path."""
-@noinline function _invoke_handler(server::Server, handler, ctx::Context)::Response
+@noinline function _invoke_handler(server::Server, handler, ctx::RequestContext)::Response
     try
         response = handler(ctx)
         return response isa Response ? response : text(string(response))
     catch err
-        return intercept(server.catcher, err isa Exception ? err : ErrorException(string(err)), ctx.req)
+        return intercept(server.catcher, err isa Exception ? err : ErrorException(string(err)), ctx.request)
     end
 end

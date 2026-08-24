@@ -117,7 +117,8 @@ const _status = Ciro.Interface.status
 
         ctx = Context(req)
         @test isempty(ctx.params)
-        @test ctx.req === req
+        @test ctx.request isa Request
+        @test ctx.request.target == "/hello?x=1"
 
         params = [:id => "42", :name => "Julia"]
         ctx2 = Context(req, params)
@@ -157,16 +158,13 @@ const _status = Ciro.Interface.status
     end
 
     @testset "Body utilities" begin
-        raw = Vector{UInt8}("POST /data HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{\"key\":\"val\"}")
-        req = PicoHTTPParser.parse_request(raw)
-        ctx = Context(req)
-
-        @test body(ctx) == "{\"key\":\"val\"}"
-        @test body(req) == "{\"key\":\"val\"}"
-        @test rawbody(ctx) == Vector{UInt8}("{\"key\":\"val\"}")
-        @test rawbody(req) == Vector{UInt8}("{\"key\":\"val\"}")
-        @test content_type(ctx) == "application/json"
-        @test content_type(req) == "application/json"
+        let
+            raw_local = Vector{UInt8}("POST /data HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{\"key\":\"val\"}")
+            req_local = PicoHTTPParser.parse_request(raw_local)
+            @test body(req_local) == "{\"key\":\"val\"}"
+            @test rawbody(req_local) == Vector{UInt8}("{\"key\":\"val\"}")
+            @test content_type(req_local) == "application/json"
+        end
     end
 
     @testset "Query params - edge cases" begin

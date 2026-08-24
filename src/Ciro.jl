@@ -33,7 +33,7 @@ using PicoHTTPParser
 
 # ── Public API ──────────────────────────────────────────────────────────────
 # Types
-export Context, Request, Response, RouteResult, Methods
+export RequestContext, Context, Request, Response, RouteResult, Methods
 
 # Response builders
 export text, html, json, redirect, fail

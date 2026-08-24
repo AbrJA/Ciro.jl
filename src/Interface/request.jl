@@ -32,6 +32,9 @@ end
     return default
 end
 
+@inline header(req::PicoHTTPParser.Request, key::String, default::String="")::String =
+    header(Request(req), key, default)
+
 @inline function hasheader(resp::Response, key::String)::Bool
     for (k, _) in resp.headers
         k == key && return true
@@ -46,9 +49,12 @@ end
     return false
 end
 
-# Context overloads — delegate to ctx.req
-header(ctx::Context, key::String, default::String="")::String  = header(ctx.req, key, default)
-hasheader(ctx::Context, key::String)::Bool                       = hasheader(ctx.req, key)
+@inline hasheader(req::PicoHTTPParser.Request, key::String)::Bool =
+    hasheader(Request(req), key)
+
+# Context overloads — delegate to ctx.request
+header(ctx::RequestContext, key::String, default::String="")::String  = header(ctx.request, key, default)
+hasheader(ctx::RequestContext, key::String)::Bool                       = hasheader(ctx.request, key)
 
 export header, hasheader
 
@@ -59,20 +65,26 @@ function body(req::Request)::String
     String(req.body)
 end
 
+body(req::PicoHTTPParser.Request)::String = body(Request(req))
+
 """Get raw request body bytes."""
 function rawbody(req::Request)::Vector{UInt8}
     Vector{UInt8}(req.body)
 end
+
+rawbody(req::PicoHTTPParser.Request)::Vector{UInt8} = rawbody(Request(req))
 
 """Get Content-Type of request."""
 function content_type(req::Request)::String
     header(req, "Content-Type")
 end
 
+content_type(req::PicoHTTPParser.Request)::String = content_type(Request(req))
+
 # Context overloads
-body(ctx::Context)::String         = body(ctx.req)
-rawbody(ctx::Context)::Vector{UInt8} = rawbody(ctx.req)
-content_type(ctx::Context)::String  = content_type(ctx.req)
+body(ctx::RequestContext)::String         = body(ctx.request)
+rawbody(ctx::RequestContext)::Vector{UInt8} = rawbody(ctx.request)
+content_type(ctx::RequestContext)::String  = content_type(ctx.request)
 
 export body, rawbody, content_type
 
@@ -88,15 +100,14 @@ export body, rawbody, content_type
     return SubString(String(p), 1, len)
 end
 
+@inline path(req::PicoHTTPParser.Request)::SubString = path(Request(req))
+
 """Get the query string (after ?) from a request."""
 @inline function query(req::Request)::String
-    p = req.path
-    len = ncodeunits(p)
-    for i in 1:len
-        @inbounds codeunit(p, i) == UInt8('?') && return String(p)[i+1:end]
-    end
-    return ""
+    req.query
 end
+
+@inline query(req::PicoHTTPParser.Request)::String = query(Request(req))
 
 """Parse query string into key-value pairs."""
 function queryparams(req::Request)::Dict{String,String}
@@ -111,17 +122,19 @@ function queryparams(req::Request)::Dict{String,String}
     return result
 end
 
+queryparams(req::PicoHTTPParser.Request)::Dict{String,String} = queryparams(Request(req))
+
 # Context overloads
-@inline path(ctx::Context)                             = path(ctx.req)
-@inline query(ctx::Context)::String                    = query(ctx.req)
-queryparams(ctx::Context)::Dict{String,String}         = queryparams(ctx.req)
+@inline path(ctx::RequestContext)                             = path(ctx.request)
+@inline query(ctx::RequestContext)::String                    = query(ctx.request)
+queryparams(ctx::RequestContext)::Dict{String,String}         = queryparams(ctx.request)
 
 export path, query, queryparams
 
 # ── Route Parameter Access ──────────────────────────────────────────────────
 
 """Get a route parameter by name as `String`. Returns `default` if not present."""
-@inline function param(ctx::Context, name::Symbol, default::String="")::String
+@inline function param(ctx::RequestContext, name::Symbol, default::String="")::String
     for (k, v) in ctx.params
         k === name && return v
     end
@@ -129,7 +142,7 @@ export path, query, queryparams
 end
 
 """Get a route parameter parsed to `T`. Returns `nothing` if missing or unparseable."""
-@inline function param(ctx::Context, ::Type{T}, name::Symbol)::Union{T,Nothing} where T
+@inline function param(ctx::RequestContext, ::Type{T}, name::Symbol)::Union{T,Nothing} where T
     for (k, v) in ctx.params
         k === name || continue
         return tryparse(T, v)
