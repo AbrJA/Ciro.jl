@@ -2,9 +2,9 @@ module Router
 
 using ..Interface
 using ..Interface: Request, Response, Methods, AbstractRouter, RouteResult,
-                   matched, not_found, method_not_allowed, text, fail
+                   Endpoint, matched, not_found, method_not_allowed, text, fail
 
-export Trie, get!, post!, put!, delete!, patch!, head!, options!, group!
+export Trie, get!, post!, put!, delete!, patch!, head!, options!, group!, freeze!
 
 import Base: get!, put!, delete!
 
@@ -68,27 +68,30 @@ end
 mutable struct TrieNode
     children    :: Dict{String, TrieNode}
     param_child :: Union{Nothing, Tuple{ParamSpec, TrieNode}}
-    wildcard    :: Union{Nothing, Any}
+    wildcard    :: Dict{UInt8, Any}
     handlers    :: Dict{UInt8, Any}  # method -> handler
 end
 
-TrieNode() = TrieNode(Dict{String,TrieNode}(), nothing, nothing, Dict{UInt8,Any}())
+TrieNode() = TrieNode(Dict{String,TrieNode}(), nothing, Dict{UInt8,Any}(), Dict{UInt8,Any}())
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Router Struct
 # ══════════════════════════════════════════════════════════════════════════════
 
-struct Trie <: AbstractRouter
+mutable struct Trie <: AbstractRouter
     root :: TrieNode
+    frozen :: Bool
 end
 
-Trie() = Trie(TrieNode())
+Trie() = Trie(TrieNode(), false)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Route Registration
 # ══════════════════════════════════════════════════════════════════════════════
 
 function Interface.register!(trie::Trie, method::UInt8, pattern::String, handler)
+    trie.frozen && throw(ArgumentError("cannot register routes on a frozen router"))
+    endpoint = handler isa Endpoint ? handler : Endpoint(handler)
     segments = _split_path(pattern)
     node = trie.root
 
@@ -100,7 +103,7 @@ function Interface.register!(trie::Trie, method::UInt8, pattern::String, handler
             end
             node = (node.param_child::Tuple{ParamSpec, TrieNode})[2]
         elseif seg == "*"
-            node.wildcard = handler
+            node.wildcard[method] = endpoint
             return trie
         else
             if !haskey(node.children, seg)
@@ -110,16 +113,21 @@ function Interface.register!(trie::Trie, method::UInt8, pattern::String, handler
         end
     end
 
-    node.handlers[method] = handler
+    node.handlers[method] = endpoint
 
     # Auto-generate HEAD from GET (RFC 9110 §9.3.2)
     if method == Methods.GET && !haskey(node.handlers, Methods.HEAD)
-        node.handlers[Methods.HEAD] = function(ctx)
-            resp = handler(ctx)
+        node.handlers[Methods.HEAD] = Endpoint(function(ctx)
+            resp = endpoint(ctx)
             Response(resp.status, resp.headers, UInt8[])
-        end
+        end; metadata=endpoint.metadata)
     end
 
+    return trie
+end
+
+function Interface.freeze!(trie::Trie)
+    trie.frozen = true
     return trie
 end
 
@@ -244,8 +252,9 @@ function _match_path(node::TrieNode, path::String, pos::Int, len::Int,
     end
 
     # Priority 3: wildcard
-    if node.wildcard !== nothing
-        return node.wildcard
+    wildcard_handler = get(node.wildcard, method, nothing)
+    if wildcard_handler !== nothing
+        return wildcard_handler
     end
 
     return nothing
@@ -286,7 +295,11 @@ function _find_allowed_path(node::TrieNode, path::String, pos::Int, len::Int)::U
         end
     end
 
-    return 0x00
+    mask = UInt8(0)
+    for wildcard_method in keys(node.wildcard)
+        mask |= Methods.bitmask(wildcard_method)
+    end
+    return mask
 end
 
 # ══════════════════════════════════════════════════════════════════════════════

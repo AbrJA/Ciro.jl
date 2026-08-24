@@ -251,9 +251,9 @@ end
     _dispatch(server, Request(req))
 
 """Isolated handler invocation — @noinline keeps try/catch off the hot path."""
-@noinline function _invoke_handler(server::Server, handler, ctx::RequestContext)::Response
+@noinline function _invoke_handler(server::Server, endpoint, ctx::RequestContext)::Response
     try
-        response = handler(ctx)
+        response = execute!(server.executor, endpoint, ctx)
         return response isa Response ? response : text(string(response))
     catch err
         return intercept(server.catcher, err isa Exception ? err : ErrorException(string(err)), ctx.request)

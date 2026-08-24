@@ -66,6 +66,44 @@ using PicoHTTPParser
         @test not_found(route(r, Methods.GET, "/other"))
     end
 
+    @testset "Wildcard routes respect methods" begin
+        r = Trie()
+        get!(r, "/assets/*", _ -> text("get"))
+        post!(r, "/assets/*", _ -> text("post"))
+
+        get_result = route(r, Methods.GET, "/assets/app.js")
+        post_result = route(r, Methods.POST, "/assets/app.js")
+        delete_result = route(r, Methods.DELETE, "/assets/app.js")
+
+        @test matched(get_result)
+        @test get_result.handler(Ciro.RequestContext(Ciro.Request("GET", "/assets/app.js"))).body == UInt8[0x67, 0x65, 0x74]
+        @test matched(post_result)
+        @test post_result.handler(Ciro.RequestContext(Ciro.Request("POST", "/assets/app.js"))).body == UInt8[0x70, 0x6f, 0x73, 0x74]
+        @test method_not_allowed(delete_result)
+        @test delete_result.allowed & Methods.bitmask(Methods.GET) != 0
+        @test delete_result.allowed & Methods.bitmask(Methods.POST) != 0
+    end
+
+    @testset "Frozen router" begin
+        r = Trie()
+        get!(r, "/ready", _ -> text("ready"))
+        @test freeze!(r) === r
+        @test_throws ArgumentError get!(r, "/late", _ -> text("late"))
+        @test matched(route(r, Methods.GET, "/ready"))
+    end
+
+    @testset "Endpoint metadata" begin
+        r = Trie()
+        endpoint = Endpoint(_ -> text("ok"); metadata=:model)
+        get!(r, "/predict", endpoint)
+        result = route(r, Methods.GET, "/predict")
+
+        @test matched(result)
+        @test result.handler isa Endpoint
+        @test result.handler.metadata === :model
+        @test result.handler(Context(Ciro.Request("GET", "/predict"))).status == 200
+    end
+
     @testset "Priority: static > param > wildcard" begin
         r = Trie()
         get!(r, "/items/special", req -> text("static"))

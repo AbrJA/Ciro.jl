@@ -14,6 +14,7 @@ include("request_type.jl")
 export Request
 
 include("context.jl")
+include("endpoint.jl")
 include("methods.jl")
 include("response.jl")
 include("types.jl")

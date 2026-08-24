@@ -69,6 +69,7 @@ using PicoHTTPParser
         @test server.max_body_size == 1_048_576
         @test server.logger isa NullLogger
         @test server.catcher isa DefaultCatcher
+        @test server.executor isa SyncExecutor
         @test server._running[] == false
 
         # Custom parameters
@@ -76,6 +77,22 @@ using PicoHTTPParser
         @test server2.port == 3000
         @test server2.host == "127.0.0.1"
         @test server2.max_body_size == 5_000_000
+    end
+
+    @testset "Custom executor" begin
+        struct TestExecutor <: AbstractExecutor end
+        Ciro.Interface.execute!(::TestExecutor, endpoint, ctx::RequestContext) =
+            text("executed:$(endpoint.metadata)")
+
+        router = Trie()
+        get!(router, "/run", Endpoint(_ -> text("handler"); metadata=:custom))
+        server = Server(; router, executor=TestExecutor())
+        raw = Vector{UInt8}("GET /run HTTP/1.1\r\nHost: x\r\n\r\n")
+        req = PicoHTTPParser.parse_request(raw)
+        response = Ciro.Core._dispatch(server, req)
+
+        @test response.status == 200
+        @test String(response.body) == "executed:custom"
     end
 
     @testset "Dispatch logic" begin

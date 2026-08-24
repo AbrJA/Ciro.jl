@@ -6,10 +6,12 @@ struct Server{
     R <: AbstractRouter,
     L <: AbstractLogger,
     C <: AbstractCatcher,
+    E <: AbstractExecutor,
 }
     router          :: R
     logger          :: L
     catcher         :: C
+    executor        :: E
     host            :: String
     port            :: Int
     backlog         :: Int
@@ -23,13 +25,14 @@ function Server(;
     router::AbstractRouter,
     logger::AbstractLogger      = NullLogger(),
     catcher::AbstractCatcher    = DefaultCatcher(),
+    executor::AbstractExecutor  = SyncExecutor(),
     host::String                = "0.0.0.0",
     port::Int                   = 8080,
     backlog::Int                = 8192,
     max_body_size::Int          = 1_048_576,
     shutdown_timeout::Float64   = 5.0,
 )
-    Server(router, logger, catcher, host, port, backlog, max_body_size,
+    Server(router, logger, catcher, executor, host, port, backlog, max_body_size,
            shutdown_timeout, Threads.Atomic{Bool}(false), Threads.Atomic{Int}(0))
 end
 
@@ -41,6 +44,7 @@ On interrupt, performs graceful shutdown: stops accepting new connections and
 drains in-flight requests up to `shutdown_timeout` seconds.
 """
 function start!(server::Server; queue_depth::Int=4096, nworkers::Int=nthreads())
+    freeze!(server.router)
     server._running[] = true
     log!(server.logger, Info, "Ciro starting on $(server.host):$(server.port)")
     try

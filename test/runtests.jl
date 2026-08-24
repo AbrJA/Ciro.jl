@@ -5,6 +5,7 @@ using Ciro
     include("interfaces_test.jl")
     include("request_contract_test.jl")
     include("router_test.jl")
+    include("runtime_test.jl")
     include("core_test.jl")
     include("backend_test.jl")
     include("quality_test.jl")

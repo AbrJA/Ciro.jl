@@ -11,11 +11,15 @@ struct Request
     minor_version  :: UInt8
 end
 
+function _split_target(target::String)
+    q = findfirst('?', target)
+    q === nothing && return (target, "")
+    return (target[1:prevind(target, q)], target[nextind(target, q):end])
+end
+
 function Request(raw::PicoHTTPParser.Request)
     target = String(raw.path)
-    query_start = findfirst(==(UInt8('?')), codeunits(target))
-    path = query_start === nothing ? target : target[1:query_start-1]
-    query = query_start === nothing ? "" : target[query_start+1:end]
+    path, query = _split_target(target)
     headers = Pair{String,String}[String(k) => String(v) for (k, v) in raw.headers]
     body = Vector{UInt8}(raw.body)
     return Request(String(raw.method), target, path, query, headers, body,
@@ -26,10 +30,10 @@ function Request(method::AbstractString, target::AbstractString;
                  headers::AbstractVector{<:Pair}=Pair{String,String}[],
                  body::AbstractVector{UInt8}=UInt8[],
                  minor_version::Integer=1)
-    target_string = String(target)
-    query_start = findfirst(==(UInt8('?')), codeunits(target_string))
-    path = query_start === nothing ? target_string : target_string[1:query_start-1]
-    query = query_start === nothing ? "" : target_string[query_start+1:end]
+    target_string::String = String(target)
+    isempty(method) && throw(ArgumentError("request method cannot be empty"))
+    startswith(target_string, '/') || throw(ArgumentError("request target must start with '/'"))
+    path, query = _split_target(target_string)
     return Request(String(method), target_string, path, query,
                    Pair{String,String}[String(k) => String(v) for (k, v) in headers],
                    Vector{UInt8}(body), UInt8(minor_version))

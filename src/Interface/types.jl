@@ -15,7 +15,11 @@ abstract type AbstractRouter end
 function route end
 function register! end
 
-export AbstractRouter, route, register!
+"""Freeze a component before serving; mutable implementations may override it."""
+function freeze! end
+freeze!(::AbstractRouter) = nothing
+
+export AbstractRouter, route, register!, freeze!
 
 """
     AbstractLogger
@@ -99,6 +103,21 @@ end
 @inline method_not_allowed(r::RouteResult)::Bool = r.handler === nothing && r.allowed != 0x00
 
 export RouteResult, matched, not_found, method_not_allowed
+
+# ── Handler execution ───────────────────────────────────────────────────────
+
+"""Execution policy for route endpoints."""
+abstract type AbstractExecutor end
+
+"""Run handlers synchronously on the current worker."""
+struct SyncExecutor <: AbstractExecutor end
+
+function execute! end
+
+@inline execute!(::SyncExecutor, endpoint, context::RequestContext) =
+    endpoint(context)
+
+export AbstractExecutor, SyncExecutor, execute!
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Default Implementations

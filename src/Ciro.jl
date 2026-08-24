@@ -24,16 +24,18 @@ include("Interface/Interface.jl")
 include("Backend/Backend.jl")
 include("Core/Core.jl")
 include("Router/Router.jl")
+include("Runtime/Runtime.jl")
 
 using .Interface
 using .Core
 using .Router
+using .Runtime
 using .Backend: IOUringBackend
 using PicoHTTPParser
 
 # ── Public API ──────────────────────────────────────────────────────────────
 # Types
-export RequestContext, Context, Request, Response, RouteResult, Methods
+export RequestContext, Context, Request, Response, Endpoint, RouteResult, Methods
 
 # Response builders
 export text, html, json, redirect, fail
@@ -43,7 +45,7 @@ export header, hasheader, body, rawbody, content_type
 export path, query, queryparams, param
 
 # Routing
-export Trie, register!, route
+export Trie, register!, route, freeze!
 export matched, not_found, method_not_allowed
 export get!, post!, put!, delete!, patch!, head!, options!, group!
 
@@ -52,10 +54,16 @@ export Server, start!, stop!
 
 # Extension points (abstract types + functions)
 export AbstractRouter, AbstractLogger, AbstractCatcher, AbstractBackend
+export AbstractExecutor, SyncExecutor, execute!
 export IOUringBackend
 export NullLogger, DefaultCatcher
 export Severity, Debug, Info, Warn, Error, Fatal
 export log!, intercept, start_backend!, stop_backend!
+
+# Runtime (transport-independent)
+export Application, AbstractTransport, TransportToken, FakeTransport
+export dispatch, handle, run_once!, serve!, submit!, response_for
+export send_response!, close!, transport_state
 
 # ── Precompilation ──────────────────────────────────────────────────────────
 using PrecompileTools
