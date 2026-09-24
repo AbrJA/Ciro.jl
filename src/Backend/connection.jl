@@ -2,7 +2,22 @@
 # Connection — thin wrapper over conn_t* with ccall accessors
 # ══════════════════════════════════════════════════════════════════════════════
 
-const BUFFER_SIZE = Int(ccall((:get_conn_buffer_size, _LIB), Cint, ()))
+const _BUFFER_SIZE = Ref{Int}(0)
+
+"""
+    buffer_size() -> Int
+
+Native connection read-buffer size. Queried lazily on first use so that loading
+the package does not require the native library to be present.
+"""
+function buffer_size()::Int
+    if _BUFFER_SIZE[] == 0
+        _LIB_AVAILABLE[] ||
+            error("Ciro: native library not found at $_LIB. Compile with: cd lib && make")
+        _BUFFER_SIZE[] = Int(ccall((:get_conn_buffer_size, _LIB), Cint, ()))
+    end
+    return _BUFFER_SIZE[]
+end
 
 """Create a new connection (heap-allocated conn_t)."""
 @inline function create_connection()::Connection
@@ -27,7 +42,7 @@ end
     ccall((:get_conn_fd, _LIB), Cint, (Ptr{Cvoid},), conn.ptr)
 end
 
-"""Get pointer to the connection's internal buffer (BUFFER_SIZE bytes)."""
+"""Get pointer to the connection's internal buffer (`buffer_size()` bytes)."""
 @inline function conn_buffer(conn::Connection)::Ptr{UInt8}
     ccall((:get_conn_buffer, _LIB), Ptr{UInt8}, (Ptr{Cvoid},), conn.ptr)
 end

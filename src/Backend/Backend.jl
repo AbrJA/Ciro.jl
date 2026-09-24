@@ -19,13 +19,24 @@ import ..Interface: AbstractBackend, start_backend!, stop_backend!
 # In production this becomes Ciro_jll.libciro
 const _LIB = normpath(joinpath(@__DIR__, "..", "..", "lib", "ciro.so"))
 
+"""
+    _LIB_AVAILABLE
+
+Whether the native io_uring library was found at load time. Never call a native
+symbol without checking this first: `using Ciro` and the transport-independent
+pipeline must work without the backend present.
+"""
+const _LIB_AVAILABLE = Ref(false)
+
 function __init__()
-    if !isfile(_LIB)
+    _LIB_AVAILABLE[] = isfile(_LIB)
+    if !_LIB_AVAILABLE[] && Sys.islinux()
         @warn """Ciro: native library not found at $_LIB
         The io_uring backend requires compiling the C library:
           cd lib && make
         Without it, `start!()` will fail."""
     end
+    return
 end
 
 # ── Includes ────────────────────────────────────────────────────────────────
@@ -53,7 +64,8 @@ IOUringBackend(; queue_depth::Int=4096, nworkers::Int=Threads.nthreads()) =
 
 function start_backend!(backend::IOUringBackend, handler_factory::F, port::Integer;
                                    running::Threads.Atomic{Bool}=Threads.Atomic{Bool}(true)) where {F}
-    isfile(_LIB) || error("Ciro: native library not found at $_LIB. Compile with: cd lib && make")
+    _LIB_AVAILABLE[] ||
+        error("Ciro: native library not found at $_LIB. Compile with: cd lib && make")
     run_eventloop_threaded!(handler_factory, port;
                             nthreads=backend.nworkers,
                             queue_depth=backend.queue_depth,

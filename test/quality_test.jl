@@ -8,18 +8,18 @@ const HAS_JET = try using JET; true catch; false end
 
     if HAS_AQUA
         @testset "Aqua.jl" begin
-            Aqua.test_all(Ciro;
-                ambiguities=false,
-                piracies=false,
-                deps_compat=(check_extras=false,),
-            )
+            Aqua.test_all(Ciro)
         end
     end
 
     if HAS_JET
         @testset "JET.jl" begin
-            rep = JET.report_package(Ciro; target_modules=(Ciro,))
-            @test length(JET.get_reports(rep)) == 0
+            rep = JET.report_package(Ciro;
+                target_modules=(Ciro, Ciro.Interface, Ciro.Backend,
+                                Ciro.Core, Ciro.Router, Ciro.Runtime))
+            reports = JET.get_reports(rep)
+            foreach(println, reports)
+            @test isempty(reports)
         end
     end
 end

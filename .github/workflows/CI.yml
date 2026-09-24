@@ -8,22 +8,20 @@ jobs:
   test:
     name: Julia ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.arch }} - ${{ github.event_name }}
     runs-on: ${{ matrix.os }}
+    env:
+      # The io_uring event loop blocks its thread in ccall; wire tests need a
+      # second thread for the test driver.
+      JULIA_NUM_THREADS: 4
     strategy:
       fail-fast: false
       matrix:
         version:
           - '1' # automatically expands to the latest stable 1.x release of Julia
           - 'lts'
-          - 'pre'
         os:
           - ubuntu-latest
-          - windows-latest
         arch:
           - x64
-        include:
-          - os: macOS-latest
-            arch: aarch64
-            version: 1
     steps:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2
@@ -31,6 +29,11 @@ jobs:
           version: ${{ matrix.version }}
           arch: ${{ matrix.arch }}
       - uses: julia-actions/cache@v2
+      - name: Build native io_uring backend
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y liburing-dev
+          make -C lib
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
       - uses: julia-actions/julia-processcoverage@v1
@@ -38,13 +41,5 @@ jobs:
         with:
           files: lcov.info
           token: ${{ secrets.CODECOV_TOKEN }}
-  docs:
-    name: Documentation
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: julia-actions/julia-buildpkg@latest
-      - uses: julia-actions/julia-docdeploy@latest
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DOCUMENTER_KEY: ${{ secrets.DOCUMENTER_KEY }}
+  # Docs job disabled until Stage 4: docs/make.jl is still the Example.jl
+  # template and docs/src/index.md references a non-existent ext/CiroMiddleware.
