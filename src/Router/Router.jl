@@ -115,15 +115,42 @@ function Interface.register!(trie::Trie, method::UInt8, pattern::String, handler
 
     node.handlers[method] = endpoint
 
-    # Auto-generate HEAD from GET (RFC 9110 §9.3.2)
+    # Auto-generate HEAD from GET (RFC 9110 §9.3.2): the GET handler runs, but
+    # the response is sent without a body and with the GET entity's
+    # Content-Length, which is what HEAD must report.
     if method == Methods.GET && !haskey(node.handlers, Methods.HEAD)
         node.handlers[Methods.HEAD] = Endpoint(function(ctx)
             resp = endpoint(ctx)
-            Response(resp.status, resp.headers, UInt8[])
+            headers = copy(resp.headers)
+            _set_content_length!(headers, length(resp.body))
+            return Response(resp.status, headers, UInt8[])
         end; metadata=endpoint.metadata)
     end
 
     return trie
+end
+
+function _set_content_length!(headers::Vector{Pair{String,String}}, n::Int)
+    for i in eachindex(headers)
+        _hdr_key_eq_ci(headers[i].first, "Content-Length") || continue
+        headers[i] = "Content-Length" => string(n)
+        return
+    end
+    push!(headers, "Content-Length" => string(n))
+    return
+end
+
+"""Zero-allocation case-insensitive ASCII comparison."""
+@inline function _hdr_key_eq_ci(a::AbstractString, b::String)::Bool
+    ncodeunits(a) != ncodeunits(b) && return false
+    for i in 1:ncodeunits(b)
+        ca = @inbounds codeunit(a, i)
+        cb = @inbounds codeunit(b, i)
+        ca_lower = (UInt8('A') <= ca <= UInt8('Z')) ? (ca | 0x20) : ca
+        cb_lower = (UInt8('A') <= cb <= UInt8('Z')) ? (cb | 0x20) : cb
+        ca_lower != cb_lower && return false
+    end
+    return true
 end
 
 function Interface.freeze!(trie::Trie)

@@ -7,15 +7,59 @@
 
 HTTP response with status code, headers, and body bytes.
 Body is stored as `Vector{UInt8}` for type stability on the serialization path.
+
+Header names must be RFC 9110 tokens and values must not contain CR, LF or NUL;
+violations throw `ArgumentError` at construction, which closes the header
+injection path before anything reaches the wire.
 """
 struct Response
     status  :: Int
     headers :: Vector{Pair{String,String}}
     body    :: Vector{UInt8}
+
+    function Response(status::Int, headers::Vector{Pair{String,String}}, body::Vector{UInt8})
+        _validate_headers(headers)
+        return new(status, headers, body)
+    end
 end
 
 Response(status::Int, headers::Vector{Pair{String,String}}, body::String) =
     Response(status, headers, Vector{UInt8}(body))
+
+@inline function _is_token_byte(b::UInt8)::Bool
+    (UInt8('a') <= b <= UInt8('z')) && return true
+    (UInt8('A') <= b <= UInt8('Z')) && return true
+    (UInt8('0') <= b <= UInt8('9')) && return true
+    return b in (UInt8('!'), UInt8('#'), UInt8('$'), UInt8('%'), UInt8('&'),
+                 UInt8('\''), UInt8('*'), UInt8('+'), UInt8('-'), UInt8('.'),
+                 UInt8('^'), UInt8('_'), UInt8('`'), UInt8('|'), UInt8('~'))
+end
+
+@inline function _valid_header_name(k::String)::Bool
+    isempty(k) && return false
+    for i in 1:ncodeunits(k)
+        _is_token_byte(@inbounds codeunit(k, i)) || return false
+    end
+    return true
+end
+
+@inline function _valid_header_value(v::String)::Bool
+    for i in 1:ncodeunits(v)
+        b = @inbounds codeunit(v, i)
+        (b == 0x0d || b == 0x0a || b == 0x00) && return false
+    end
+    return true
+end
+
+function _validate_headers(headers::Vector{Pair{String,String}})
+    for (k, v) in headers
+        _valid_header_name(k) ||
+            throw(ArgumentError("invalid HTTP header name: $(repr(k))"))
+        _valid_header_value(v) ||
+            throw(ArgumentError("invalid HTTP header value for '$k': CR/LF/NUL are not allowed"))
+    end
+    return nothing
+end
 
 # ── Response Builders ───────────────────────────────────────────────────────
 

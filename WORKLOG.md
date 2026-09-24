@@ -6,6 +6,122 @@ See `docs/DESIGN_LESSONS.md` for the engineering standards and
 
 ---
 
+## RESUME — next session (planned 2026-09-25)
+
+State at pause:
+- Stage 0 committed on `feat/stage0-safety-net` (`4b9d9a0`).
+- Stage 1 implemented and verified locally, committed as the next commit on the same
+  branch (`Pkg.test()` → 614 passed, 0 failed).
+- Parser branch `PicoHTTPParser.jl` `feat/incremental-head-api` has `07215a5` +
+  `ccd41c6` (89/89 tests). Locally `Pkg.develop`ed into Ciro; Manifest is gitignored.
+
+### First 15 minutes (unblock CI)
+1. Push `PicoHTTPParser.jl` `feat/incremental-head-api` to GitHub.
+2. Either release `PicoHTTPParser v0.3.0` (preferred) or add a Ciro CI step that
+   `Pkg.develop`s the parser from the pushed branch before running tests.
+3. Confirm Ciro CI is green on `feat/stage0-safety-net`.
+
+### Stage 2 — one pipeline, real seams
+- Collapse `Core._dispatch`/`_invoke_handler` and `Runtime.dispatch`/`_invoke` into one
+  pipeline; `Server` calls the shared path. Delete the duplicate `stop!`/`submit!`
+  generics (today `stop!(::Application)` throws `MethodError`).
+- Decide the public frontend: `Server` vs `Application`. One survives; the other is
+  deleted or becomes the single core the survivor wraps.
+- Real graceful shutdown: stop accepting (cancel multishot accept), drain in-flight
+  requests with a deadline, close client sockets, handle SIGTERM/SIGINT. `_in_flight` is
+  currently meaningless with the synchronous executor.
+- Keep `FakeTransport` as the backend-free core test surface once Runtime owns the
+  pipeline (it should force the seams to stay honest).
+
+### Stage 3 — performance and type stability
+- Zero-copy `Request`: views over `rbuf`, `copy` only when a handler lets them escape;
+  lazy query/body parsing. Removes the ~3 KB/request materialization.
+- Remove `Any` from routing (`RouteResult.handler`, `TrieNode.handlers`/`wildcard`);
+  add `@inferred` + allocation-budget tests to CI.
+- Optional: compiled dispatch table after `freeze!`, pinned equal to the generic path by
+  a parity matrix.
+- Idle memory: smaller/streamed read buffers; provided-buffer rings (kernel 5.19+/6.0).
+
+### Backlog (order TBD)
+- Wire tests for chunked transfer-encoding (decoder fixed, no HTTP-level coverage yet).
+- Per-route body limits; `Expect: 100-continue`; early 413 without RST mid-upload.
+- Access logging + metrics (count exceptions as 5xx too). `max_connections` currently
+  sheds by closing silently; consider 503 + `Retry-After`.
+- Async executor (v1.5): bounded queue, 503 shedding, request-copy semantics.
+- SSE/streaming responses (v1.5 architecture) and static files (dotfile denial,
+  traversal matrix).
+- Packaging: JLL artifact, untrack `lib/ciro.so`, docs build, Linux-only CI matrix.
+
+### Gotchas from this session (don't relearn)
+- `close()` on a socket with a pending io_uring read does not FIN the peer: the request
+  holds the file description. Call `shutdown()` first, close after the completion.
+- Preallocated `Base.RefValue` fields passed to `ccall` allocate 16 B each. Keep refs as
+  locals (elided) or use pointer-out parameters.
+- `bytesavailable` on Julia sockets is not a readiness check without an in-flight read.
+- The event loop never yields, so an in-process Julia client can deadlock the scheduler;
+  wire tests use a server subprocess plus raw libc sockets.
+- Header views must be offset-based: growing `rbuf` reallocates and dangles absolute
+  pointers.
+- fd-indexed state (`PendingWrites.close_after`) must be reset whenever an fd is reused.
+- `make -C lib` check-deps needed `_GNU_SOURCE` for `SO_REUSEPORT` with modern glibc.
+
+### Resume commands
+```sh
+cd ~/Documents/GitHub/Julia/Packages/Ciro.jl
+git log --oneline -5
+git status
+cd lib && make && cd ..        # only if the C sources changed
+JULIA_NUM_THREADS=4 julia --project=. -e 'using Pkg; Pkg.test()'
+```
+
+---
+
+## HANDOFF — Stage 1: correctness core (2026-09-24)
+
+Branch: `feat/stage0-safety-net` (continues; Stage 1 changes not committed yet).
+
+### Done
+
+- Incremental per-connection state machine in `src/Core/worker.jl`:
+  - `rbuf` accumulation, `parse_request_head!` with `last_len`, left-over carry and
+    pipelining;
+  - retired-connection protocol: a struct is only recycled after every in-flight
+    io_uring operation completes, so stale completions cannot hit a reused struct;
+  - one op in flight per connection (`:read`/`:write`/`:none`).
+- Validated config/limits on `Server`: `max_header_bytes`, `header_timeout_ms`,
+  `body_timeout_ms`, `idle_timeout_ms`, `max_connections` (plus `max_body_size`),
+  enforced by a per-worker on-tick deadline sweep (431/413 answers; timeouts close).
+- `host` and `backlog` are wired to the native bind; `Server` now actually goes through
+  `IOUringBackend`/`AbstractBackend` (the seam is no longer decorative).
+- SQE exhaustion is no longer silent: C queue helpers return status and every Julia
+  failure path retires the connection instead of dropping the operation.
+- HEAD responses carry the GET entity's `Content-Length`; `Response` rejects CR/LF/NUL
+  in header names/values at construction.
+- Ownership bugs found and fixed by the new tests:
+  - fd-indexed `close_after` leaked across fd reuse (`set_pending!` now clears it);
+  - `close()` on a socket with a pending io_uring read does not FIN the peer — the
+    request holds the file description alive. `shutdown()` now wakes the read and FINs,
+    and the fd is closed after the completion (`shutdown_fd!`).
+- Parser (`PicoHTTPParser.jl`): offset-based header views survive buffer growth
+  (commit `ccd41c6`); allocation-free `parse_request_head!` (commit `07215a5`).
+
+### Gates
+
+- `Pkg.test()` → **614 passed, 0 failed** (full Aqua + JET + 29 wire tests).
+- All six Stage 0 `@test_broken` pins promoted to `@test`; added wire coverage for 431,
+  413, header timeout, body timeout and idle timeout.
+
+### Blocked / next
+
+- **CI is blocked on the parser release.** Ciro declares `PicoHTTPParser = "0.3"` and the
+  local checkout is `Pkg.develop`ed (Manifest holds a local path). Push the parser branch
+  (`feat/incremental-head-api`) and either release `PicoHTTPParser 0.3.0` or add a CI step
+  that `Pkg.develop`s it from git.
+- Next: chunked transfer-encoding wire tests; per-route body limits; access logging;
+  async executor (v1.5); zero-copy `Request` (Stage 3); JLL packaging (Stage 4).
+
+---
+
 ## HANDOFF — Stage 0: safety net (2026-09-24)
 
 Branch: `feat/stage0-safety-net` (changes not committed yet).
@@ -48,6 +164,14 @@ Branch: `feat/stage0-safety-net` (changes not committed yet).
 - **`bytesavailable` is not a readiness check.** Julia only buffers socket data while a
   read is in flight; polling `bytesavailable` returns 0 forever. Acceptance helpers use
   blocking reads with timeouts instead.
+
+### Parser API ready (other repo)
+
+`PicoHTTPParser.jl` branch `feat/incremental-head-api`: allocation-free
+`parse_request_head!` (stateful `HeaderBuffer`, `:partial`/`:done`/`:error`), lazy header
+accessors, and a corrected in-place `decode_chunked!` with `:partial`/`:done`/`:error`
+plus `leftover` for pipelining. 82/82 tests pass; version 0.3.0 (breaking). Stage 1
+should `Pkg.develop` this path into Ciro while the API settles.
 
 ### Next — Stage 1: correctness core
 

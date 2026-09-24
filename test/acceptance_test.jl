@@ -161,15 +161,25 @@ get!(router, "/hello", _ -> text("hello"))
 get!(router, "/head", _ -> text("content"))
 post!(router, "/echo", ctx -> text(body(ctx)))
 get!(router, "/inject", _ -> redirect("/x\r\nX-Injected: yes"))
-start!(Server(; router, port=PORT); nworkers=2)
+start!(Server(; router, port=PORT EXTRA); nworkers=2)
 """
 
-function _start_server(port::Integer)
+function _start_server(port::Integer; extra::AbstractString="")
     project = Base.active_project()
     project === nothing && error("no active project; cannot start test server")
-    src = replace(_SERVER_SRC, "PORT" => string(port))
+    src = replace(_SERVER_SRC, "PORT" => string(port), "EXTRA" => extra)
     cmd = `$(Base.julia_cmd()) --startup-file=no --project=$project --threads=2 -e $src`
     return run(pipeline(cmd; stdout=devnull, stderr=devnull); wait=false)
+end
+
+function _kill_server(proc)
+    proc === nothing && return
+    kill(proc, 9)
+    try
+        wait(proc)
+    catch
+    end
+    return
 end
 
 # ── suite ───────────────────────────────────────────────────────────────────
@@ -225,7 +235,7 @@ end
                     sleep(0.1)
                     _send(c, "st: x\r\nConnection: close\r\n\r\n")
                     resp = read_response(c)
-                    @test_broken startswith(resp, "HTTP/1.1 200")
+                    @test startswith(resp, "HTTP/1.1 200")
                 finally
                     _close(c)
                 end
@@ -238,7 +248,7 @@ end
                     sleep(0.1)
                     _send(c, "67890")
                     resp = read_response(c)
-                    @test_broken startswith(resp, "HTTP/1.1 200")
+                    @test startswith(resp, "HTTP/1.1 200")
                 finally
                     _close(c)
                 end
@@ -250,7 +260,7 @@ end
                 try
                     _send(c, "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 70000\r\nConnection: close\r\n\r\n" * payload)
                     resp = read_response(c)
-                    @test_broken startswith(resp, "HTTP/1.1 200")
+                    @test startswith(resp, "HTTP/1.1 200")
                 finally
                     _close(c)
                 end
@@ -265,7 +275,7 @@ end
                     r2 = read_response(c)
                     got = (r1 !== nothing && occursin("HTTP/1.1 200", r1)) +
                           (r2 !== nothing && occursin("HTTP/1.1 200", r2))
-                    @test_broken got == 2
+                    @test got == 2
                 finally
                     _close(c)
                 end
@@ -276,12 +286,12 @@ end
                                  expect_body=false)
                 @test startswith(resp, "HTTP/1.1 200")
                 @test !occursin("content", resp)
-                @test_broken occursin("Content-Length: 7", resp)
+                @test occursin("Content-Length: 7", resp)
             end
 
             @testset "CRLF header injection (P0 security)" begin
                 resp = roundtrip(port, "GET /inject HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
-                @test_broken !occursin("X-Injected", resp)
+                @test !occursin("X-Injected", resp)
             end
 
             @testset "no fd growth across closed connections" begin
@@ -300,14 +310,77 @@ end
                 GC.gc()
                 @test _fd_count() - before <= 5
             end
-        finally
-            if proc !== nothing
-                kill(proc, 9)
+
+            @testset "limits and timeouts" begin
+                limited_port = port + 1
+                limited = _start_server(limited_port;
+                    extra=", max_header_bytes=1024, max_body_size=64, " *
+                          "header_timeout_ms=400, body_timeout_ms=400, idle_timeout_ms=400")
                 try
-                    wait(proc)
-                catch
+                    _wait_ready(limited_port)
+
+                    @testset "431 header limit" begin
+                        c = TestClient(limited_port; timeout=3.0)
+                        try
+                            _send(c, "GET / HTTP/1.1\r\nX-Big: " * "a"^2000)
+                            resp = read_response(c)
+                            @test startswith(resp, "HTTP/1.1 431")
+                        finally
+                            _close(c)
+                        end
+                    end
+
+                    @testset "413 body limit" begin
+                        @test startswith(roundtrip(limited_port,
+                            "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n"),
+                            "HTTP/1.1 413")
+                    end
+
+                    @testset "header timeout" begin
+                        c = TestClient(limited_port; timeout=3.0)
+                        try
+                            _send(c, "GET / HTTP/1.1\r\nHos")
+                            t0 = time()
+                            resp = read_response(c)
+                            @test resp === nothing
+                            @test time() - t0 < 2.0
+                        finally
+                            _close(c)
+                        end
+                    end
+
+                    @testset "body timeout" begin
+                        c = TestClient(limited_port; timeout=3.0)
+                        try
+                            _send(c, "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\n12345")
+                            t0 = time()
+                            resp = read_response(c)
+                            @test resp === nothing
+                            @test time() - t0 < 2.0
+                        finally
+                            _close(c)
+                        end
+                    end
+
+                    @testset "idle timeout" begin
+                        c = TestClient(limited_port; timeout=3.0)
+                        try
+                            _send(c, "GET /hello HTTP/1.1\r\nHost: x\r\n\r\n")
+                            @test startswith(read_response(c), "HTTP/1.1 200")
+                            t0 = time()
+                            resp = read_response(c)
+                            @test resp === nothing
+                            @test time() - t0 < 2.0
+                        finally
+                            _close(c)
+                        end
+                    end
+                finally
+                    _kill_server(limited)
                 end
             end
+        finally
+            _kill_server(proc)
         end
     end
 end

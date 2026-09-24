@@ -57,10 +57,13 @@ This is the default backend used by `Server`.
 struct IOUringBackend <: AbstractBackend
     queue_depth :: Int
     nworkers    :: Int
+    host        :: String
+    backlog     :: Int
 end
 
-IOUringBackend(; queue_depth::Int=4096, nworkers::Int=Threads.nthreads()) =
-    IOUringBackend(queue_depth, nworkers)
+IOUringBackend(; queue_depth::Int=4096, nworkers::Int=Threads.nthreads(),
+               host::AbstractString="0.0.0.0", backlog::Int=8192) =
+    IOUringBackend(queue_depth, nworkers, String(host), backlog)
 
 function start_backend!(backend::IOUringBackend, handler_factory::F, port::Integer;
                                    running::Threads.Atomic{Bool}=Threads.Atomic{Bool}(true)) where {F}
@@ -69,6 +72,8 @@ function start_backend!(backend::IOUringBackend, handler_factory::F, port::Integ
     run_eventloop_threaded!(handler_factory, port;
                             nthreads=backend.nworkers,
                             queue_depth=backend.queue_depth,
+                            host=backend.host,
+                            backlog=backend.backlog,
                             running)
 end
 
@@ -90,7 +95,7 @@ export IOUringBackend,
        accept_and_queue_read!, queue_write_and_close!, queue_read_reuse!,
        # Connection management
        create_connection, free_connection!,
-       configure_socket!, close_fd!, conn_fd, conn_buffer, set_conn_fd!, set_conn_op!,
+       configure_socket!, close_fd!, shutdown_fd!, conn_fd, conn_buffer, set_conn_fd!, set_conn_op!,
        # Pools
        acquire!, release!,
     PendingWrites, set_pending!, pop_pending!, advance_pending!, pending_slice,

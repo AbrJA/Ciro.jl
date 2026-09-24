@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <liburing.h>
 #include <stdlib.h>
 #include <string.h>
@@ -58,7 +59,9 @@ static void set_tcp_nodelay(int fd) {
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
 }
 
-int setup_server_socket(int port) {
+// Bind to `host` (IPv4 literal; NULL/""/"0.0.0.0" means INADDR_ANY).
+// Returns the listening fd, or -1 on failure.
+int setup_server_socket(const char* host, int port, int backlog) {
     int server_fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
     if (server_fd < 0) {
         perror("socket");
@@ -82,8 +85,15 @@ int setup_server_socket(int port) {
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
     addr.sin_port = htons(port);
+
+    if (host == NULL || host[0] == '\0' || strcmp(host, "0.0.0.0") == 0) {
+        addr.sin_addr.s_addr = INADDR_ANY;
+    } else if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
+        fprintf(stderr, "ciro: invalid IPv4 bind host '%s'\n", host);
+        close(server_fd);
+        return -1;
+    }
 
     if (bind(server_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         perror("bind");
@@ -91,7 +101,7 @@ int setup_server_socket(int port) {
         return -1;
     }
 
-    if (listen(server_fd, 8192) < 0) {
+    if (listen(server_fd, backlog > 0 ? backlog : 8192) < 0) {
         perror("listen");
         close(server_fd);
         return -1;
@@ -103,13 +113,13 @@ int setup_server_socket(int port) {
 }
 
 // Initialization - returns NULL on failure
-struct engine_state* init_engine(int port, int queue_depth) {
+struct engine_state* init_engine(const char* host, int port, int backlog, int queue_depth) {
     struct engine_state* state = malloc(sizeof(struct engine_state));
     if (!state) {
         return NULL;
     }
 
-    state->server_fd = setup_server_socket(port);
+    state->server_fd = setup_server_socket(host, port, backlog);
     if (state->server_fd < 0) {
         free(state);
         return NULL;
@@ -141,16 +151,16 @@ int get_server_fd(struct engine_state* state) {
     return state ? state->server_fd : -1;
 }
 
-// Queue an accept request
-void queue_accept(struct engine_state* state, conn_t* conn) {
+// Queue an accept request. Returns 0 on success, -1 if it could not be queued.
+int queue_accept(struct engine_state* state, conn_t* conn) {
     struct io_uring_sqe *sqe = get_sqe_submit_retry(&state->ring);
-    if (!sqe) return;
+    if (!sqe) return -1;
     conn->type = ACCEPT;
     conn->addr_len = sizeof(conn->addr);
 
     io_uring_prep_accept(sqe, state->server_fd, (struct sockaddr*)&conn->addr, &conn->addr_len, 0);
     io_uring_sqe_set_data(sqe, conn);
-    io_uring_submit(&state->ring);
+    return io_uring_submit(&state->ring) < 0 ? -1 : 0;
 }
 
 // Set TCP_NODELAY on accepted connections (exposed to Julia)
@@ -158,24 +168,27 @@ void configure_client_socket(int fd) {
     set_tcp_nodelay(fd);
 }
 
-// Queue a read request
-void queue_read(struct engine_state* state, conn_t* conn) {
+// Queue a read request. Returns 0 on success, -1 if it could not be queued.
+int queue_read(struct engine_state* state, conn_t* conn) {
     struct io_uring_sqe *sqe = get_sqe_submit_retry(&state->ring);
-    if (!sqe) return;
+    if (!sqe) return -1;
     conn->type = READ;
     io_uring_prep_read(sqe, conn->fd, conn->buffer, BUFFER_SIZE, 0);
     io_uring_sqe_set_data(sqe, conn);
+    return 0;
 }
 
 // Queue a write request - ZERO COPY
 // Caller (Julia) MUST ensure data stays alive until completion!
-void queue_write(struct engine_state* state, conn_t* conn, const char* data, int len) {
+// Returns 0 on success, -1 if it could not be queued.
+int queue_write(struct engine_state* state, conn_t* conn, const char* data, int len) {
     struct io_uring_sqe *sqe = get_sqe_submit_retry(&state->ring);
-    if (!sqe) return;
+    if (!sqe) return -1;
     conn->type = WRITE;
 
     io_uring_prep_write(sqe, conn->fd, data, len, 0);
     io_uring_sqe_set_data(sqe, conn);
+    return 0;
 }
 
 // 2. Add bulk submission support
@@ -224,22 +237,25 @@ int drain_completions(struct engine_state* state, conn_t** conns, int* results, 
 }
 
 // Combined: accept fd → set fd on conn → set TCP_NODELAY → queue read.
-void accept_and_queue_read(struct engine_state* state, conn_t* conn, int client_fd) {
+// Returns 0 on success, -1 if it could not be queued.
+int accept_and_queue_read(struct engine_state* state, conn_t* conn, int client_fd) {
     set_tcp_nodelay(client_fd);   // must happen before first read
     conn->fd = client_fd;
     conn->type = READ;
 
     struct io_uring_sqe *sqe = get_sqe_submit_retry(&state->ring);
-    if (!sqe) return;
+    if (!sqe) return -1;
     io_uring_prep_read(sqe, client_fd, conn->buffer, BUFFER_SIZE, 0);
     io_uring_sqe_set_data(sqe, conn);
+    return 0;
 }
 
 // Combined: queue write + mark for close after (via io_uring linked ops)
-void queue_write_and_close(struct engine_state* state, conn_t* conn, const char* data, int len) {
+// Returns 0 on success, -1 if it could not be queued.
+int queue_write_and_close(struct engine_state* state, conn_t* conn, const char* data, int len) {
     // First: queue the write
     struct io_uring_sqe *sqe = get_sqe_submit_retry(&state->ring);
-    if (!sqe) return;
+    if (!sqe) return -1;
     conn->type = WRITE;
     io_uring_prep_write(sqe, conn->fd, data, len, 0);
     io_uring_sqe_set_data(sqe, conn);
@@ -248,21 +264,23 @@ void queue_write_and_close(struct engine_state* state, conn_t* conn, const char*
 
     // Second: queue close (linked, fires after write completes)
     sqe = get_sqe_submit_retry(&state->ring);
-    if (!sqe) return;
+    if (!sqe) return -1;
     io_uring_prep_close(sqe, conn->fd);
     io_uring_sqe_set_data(sqe, conn);
+    return 0;
 }
 
 // 4. Use io_uring multishot accept (kernel 5.19+)
-void queue_multishot_accept(struct engine_state* state, conn_t* conn) {
+// Returns 0 on success, -1 if it could not be queued.
+int queue_multishot_accept(struct engine_state* state, conn_t* conn) {
     struct io_uring_sqe *sqe = get_sqe_submit_retry(&state->ring);
-    if (!sqe) return;
+    if (!sqe) return -1;
 
     conn->type = ACCEPT;
     // Multishot accept: Keep issuing accepts!
     io_uring_prep_multishot_accept(sqe, state->server_fd, NULL, NULL, 0);
     io_uring_sqe_set_data(sqe, conn);
-    io_uring_submit(&state->ring);
+    return io_uring_submit(&state->ring) < 0 ? -1 : 0;
 }
 
 // Non-blocking check for completions
@@ -278,13 +296,15 @@ conn_t* poll_completion(struct engine_state* state, int* res) {
     return conn;
 }
 
-// Queue read after write completion (keep-alive path)
-void queue_read_reuse(struct engine_state* state, conn_t* conn) {
+// Queue read after write completion (keep-alive path).
+// Returns 0 on success, -1 if it could not be queued.
+int queue_read_reuse(struct engine_state* state, conn_t* conn) {
     conn->type = READ;
     struct io_uring_sqe *sqe = get_sqe_submit_retry(&state->ring);
-    if (!sqe) return;
+    if (!sqe) return -1;
     io_uring_prep_read(sqe, conn->fd, conn->buffer, BUFFER_SIZE, 0);
     io_uring_sqe_set_data(sqe, conn);
+    return 0;
 }
 
 // Compile: gcc -shared -fPIC -O3 -o ./lib/ciro.so ./lib/ciro.c -luring

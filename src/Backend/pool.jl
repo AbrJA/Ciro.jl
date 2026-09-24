@@ -103,6 +103,7 @@ PendingWrites(; max_fd::Int=65536) =
     @inbounds pw.buffers[idx] = buf
     @inbounds pw.lengths[idx] = Int(len)
     @inbounds pw.sent[idx] = 0
+    @inbounds pw.close_after[idx] = false   # never carry close state across fd reuse
     nothing
 end
 

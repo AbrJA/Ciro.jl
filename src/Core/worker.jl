@@ -1,119 +1,598 @@
 # ══════════════════════════════════════════════════════════════════════════════
-# HTTP Worker — built on Backend's event loop
+# HTTP Worker — per-connection state machine on Backend's event loop
+#
+# Each connection owns:
+#   - an unparsed byte buffer (`rbuf`) that accumulates reads; requests are
+#     parsed incrementally with `last_len` and leftover bytes are carried for
+#     pipelining;
+#   - a parse phase (:headers → :body → :writing) and a deadline that the
+#     worker's on_tick sweep enforces.
+#
+# Connection structs are only returned to the pool after every in-flight
+# io_uring operation for them has completed (`retired`), so a recycled struct
+# can never receive a stale completion.
 # ══════════════════════════════════════════════════════════════════════════════
+
+const _INITIAL_RBUF      = 4096
+const _MAX_POOLED_STATES = 256
+const _SWEEP_INTERVAL    = 0.1   # seconds
+
+mutable struct HTTPConn
+    conn        :: Connection
+    fd          :: Cint
+    fd_open     :: Bool
+    rbuf        :: Vector{UInt8}
+    rlen        :: Int
+    hdr_scanned :: Int          # last_len progress for request-head parsing
+    hbuf        :: HeaderBuffer
+    decoder     :: ChunkedDecoder
+    chunkbuf    :: Vector{UInt8}  # raw chunked bytes for the current decode call
+    chunklen    :: Int
+    fed         :: Int            # rbuf bytes already handed to the chunk decoder
+    body        :: Vector{UInt8}  # decoded chunked body accumulator
+    bodylen     :: Int
+    phase       :: Symbol         # :headers | :body | :writing
+    header_len  :: Int
+    body_need   :: Int
+    chunked     :: Bool
+    close_after :: Bool
+    deadline    :: Float64
+    inflight    :: Symbol         # :none | :read | :write
+    retired     :: Bool
+end
+
+HTTPConn(conn::Connection) =
+    HTTPConn(conn, Cint(-1), false, Vector{UInt8}(undef, 0), 0, 0,
+             HeaderBuffer(64), ChunkedDecoder(), Vector{UInt8}(undef, 0), 0, 0,
+             Vector{UInt8}(undef, 0), 0, :headers, 0, 0, false, false, 0.0,
+             :none, false)
+
+mutable struct WorkerCtx
+    conn_pool  :: ConnectionPool
+    buf_pool   :: BufferPool
+    pending    :: PendingWrites
+    states     :: Dict{Ptr{Cvoid}, HTTPConn}
+    free       :: Vector{HTTPConn}
+    last_sweep :: Float64
+end
+
+WorkerCtx() = WorkerCtx(ConnectionPool(), BufferPool(), PendingWrites(),
+                        Dict{Ptr{Cvoid}, HTTPConn}(), HTTPConn[], 0.0)
+
+function _reset!(st::HTTPConn)
+    st.fd = Cint(-1)
+    st.fd_open = false
+    st.rlen = 0
+    st.hdr_scanned = 0
+    st.chunklen = 0
+    st.fed = 0
+    st.bodylen = 0
+    resize!(st.rbuf, 0)
+    resize!(st.chunkbuf, 0)
+    resize!(st.body, 0)
+    st.phase = :headers
+    st.header_len = 0
+    st.body_need = 0
+    st.chunked = false
+    st.close_after = false
+    st.deadline = 0.0
+    st.inflight = :none
+    st.retired = false
+    d = st.decoder
+    d.bytes_left_in_chunk = 0
+    d.consume_trailer = 1
+    d._hex_count = 0
+    d._state = 0
+    d._total_read = 0
+    d._total_overhead = 0
+    return st
+end
+
+# ── Worker startup ──────────────────────────────────────────────────────────
 
 function _start_workers(server::Server, queue_depth::Int, nworkers::Int)
     log!(server.logger, Info, "io_uring backend with $nworkers worker(s)")
+    backend = IOUringBackend(; queue_depth, nworkers,
+                             host=server.host, backlog=server.backlog)
 
-    run_eventloop_threaded!(server.port; nthreads=nworkers, queue_depth, running=server._running) do engine, tid
+    factory = function (engine, tid)
         log!(server.logger, Info, "[Thread $tid] io_uring engine ready")
-
-        conn_pool = ConnectionPool()
-        buf_pool  = BufferPool()
-        pending   = PendingWrites()
-
+        ctx = WorkerCtx()
         accept_conn = create_connection()
-        queue_multishot_accept!(engine, accept_conn)
+        status = queue_multishot_accept!(engine, accept_conn)
+        status != 0 && error("[Thread $tid] failed to arm multishot accept")
 
-        return function(event::CompletionEvent)
-            _handle_http_event(server, engine, event, accept_conn,
-                               conn_pool, buf_pool, pending)
-        end
+        handler = event -> _handle_http_event(server, engine, event, accept_conn, ctx)
+        tick = () -> _sweep_expired!(server, engine, ctx)
+        return handler, tick
     end
+
+    start_backend!(backend, factory, server.port; running=server._running)
 end
 
-# ── Event Dispatch ──────────────────────────────────────────────────────────
+# ── Event dispatch ──────────────────────────────────────────────────────────
 
 @inline function _handle_http_event(server, engine, event::CompletionEvent,
-                                    accept_conn::Connection,
-                                    conn_pool::ConnectionPool,
-                                    buf_pool::BufferPool,
-                                    pending::PendingWrites)
+                                    accept_conn::Connection, ctx::WorkerCtx)
     conn = Connection(event.conn)
     res = event.result
 
     if conn == accept_conn
         res < 0 && return
-        client_fd = res
-        new_conn = acquire!(conn_pool)
-        accept_and_queue_read!(engine, new_conn, client_fd)
+        _on_accept(server, engine, Cint(res), ctx)
         return
     end
+
+    st = get(ctx.states, conn.ptr, nothing)
+    st === nothing && return          # completion for a dead connection
+
+    if st.retired
+        _finalize!(server, st, ctx)   # awaited completion of a retired conn
+        return
+    end
+
+    # The completing operation is done; handlers re-arm as needed.
+    st.inflight = :none
 
     if res < 0
-        fd = conn_fd(conn)
-        fd > 0 && close_fd!(fd)
-        release!(conn_pool, conn)
+        _retire!(server, st, ctx)
         return
     end
 
-    op = event.op_type
-
-    if op == READ
-        _handle_read(server, engine, conn, res, conn_pool, buf_pool, pending)
-    elseif op == WRITE
-        _handle_write(engine, conn, res, conn_pool, buf_pool, pending)
+    if event.op_type == READ
+        _on_read(server, engine, st, Int(res), ctx)
+    elseif event.op_type == WRITE
+        _on_write(server, engine, st, Int(res), ctx)
     end
     nothing
 end
 
-# ── Read Handler ────────────────────────────────────────────────────────────
-
-function _handle_read(server, engine, conn::Connection, bytes_read::Cint,
-                      conn_pool::ConnectionPool, buf_pool::BufferPool,
-                      pending::PendingWrites)
-    if bytes_read <= 0
-        fd = conn_fd(conn)
-        fd > 0 && close_fd!(fd)
-        release!(conn_pool, conn)
+function _on_accept(server, engine, client_fd::Cint, ctx::WorkerCtx)
+    if Threads.atomic_add!(server._conn_count, 1) + 1 > server.max_connections
+        Threads.atomic_sub!(server._conn_count, 1)
+        close_fd!(client_fd)
         return
     end
 
-    # Track in-flight request
-    Threads.atomic_add!(server._in_flight, 1)
+    c = acquire!(ctx.conn_pool)
+    st = _acquire_state(ctx, c)
+    st.fd = client_fd
+    st.fd_open = true
+    st.deadline = time() + server.header_timeout_ms / 1000
+    ctx.states[c.ptr] = st
 
-    buf_ptr = conn_buffer(conn)
-    raw_data = unsafe_wrap(Array, buf_ptr, Int(bytes_read))
-
-    req = try
-        PicoHTTPParser.parse_request(raw_data)
-    catch
-        nothing
+    status = accept_and_queue_read!(engine, c, client_fd)
+    if status != 0
+        _finalize!(server, st, ctx)
+        return
     end
+    st.inflight = :read
+    return
+end
 
-    response = if req === nothing
-        fail(400, "Bad Request")
-    elseif bytes_read > server.max_body_size
-        fail(413, "Content Too Large")
+# ── Reads ───────────────────────────────────────────────────────────────────
+
+function _on_read(server, engine, st::HTTPConn, n::Int, ctx::WorkerCtx)
+    if n <= 0
+        _retire!(server, st, ctx)
+        return
+    end
+    _append_read!(st, n)
+    _set_deadline!(server, st)
+    _pump(server, engine, st, ctx)
+    return
+end
+
+"""Append `n` bytes from the native read buffer. `rbuf` length always equals
+`rlen` (spare capacity is reserved with `sizehint!`), so the parser and all
+stored header pointers see a buffer that never moves under them."""
+function _append_read!(st::HTTPConn, n::Int)
+    need = st.rlen + n
+    if need > length(st.rbuf)
+        sizehint!(st.rbuf, max(need, 2 * st.rlen, _INITIAL_RBUF))
+        resize!(st.rbuf, need)
+    end
+    GC.@preserve st begin
+        unsafe_copyto!(pointer(st.rbuf, st.rlen + 1), conn_buffer(st.conn), n)
+    end
+    st.rlen = need
+    return
+end
+
+"""Queue another read while the request is incomplete; retire on failure."""
+function _pump(server, engine, st::HTTPConn, ctx::WorkerCtx)
+    result = _process(server, engine, st, ctx)
+    if result === :need_more && !st.retired && st.fd_open && st.inflight == :none
+        _set_deadline!(server, st)
+        if queue_read_reuse!(engine, st.conn) != 0
+            _retire!(server, st, ctx)
+        else
+            st.inflight = :read
+        end
+    end
+    return
+end
+
+function _set_deadline!(server, st::HTTPConn)
+    if st.phase == :body
+        st.deadline = time() + server.body_timeout_ms / 1000
+    elseif st.rlen == 0
+        st.deadline = time() + server.idle_timeout_ms / 1000
     else
-        _dispatch(server, req)
+        st.deadline = time() + server.header_timeout_ms / 1000
     end
-
-    should_close = _wants_close(req)
-
-    # Add Connection: close header per RFC 9110 when closing
-    if should_close
-        _set_connection_close!(response.headers)
-    end
-
-    out_buf = acquire!(buf_pool)
-    nbytes = serialize_response!(out_buf, response)
-    fd = conn_fd(conn)
-
-    set_pending!(pending, fd, out_buf, nbytes)
-    should_close && mark_close!(pending, fd)
-
-    set_conn_op!(conn, WRITE)
-    queue_write!(engine, conn, pointer(out_buf), nbytes)
-
-    Threads.atomic_sub!(server._in_flight, 1)
-    nothing
+    return
 end
+
+# ── Parsing state machine ───────────────────────────────────────────────────
+
+"""Returns `:need_more` when more input is required, `:done` otherwise."""
+function _process(server, engine, st::HTTPConn, ctx::WorkerCtx)
+    if st.phase == :headers
+        status = parse_request_head!(st.hbuf, st.rbuf, st.hdr_scanned)
+        if status === :partial
+            if st.rlen > server.max_header_bytes
+                _respond_and_close(server, engine, st, ctx,
+                                   fail(431, "Request Header Fields Too Large"))
+                return :done
+            end
+            st.hdr_scanned = st.rlen
+            return :need_more
+        elseif status === :error
+            _respond_and_close(server, engine, st, ctx, fail(400, "Bad Request"))
+            return :done
+        end
+        st.header_len = head_header_len(st.hbuf)
+        _prepare_body(server, engine, st, ctx) || return :done
+        st.phase = :body
+    end
+
+    if st.phase == :body
+        if st.chunked
+            decoded = _feed_chunked!(server, engine, st, ctx)
+            decoded === :error && return :done
+            decoded === :partial && return :need_more
+        elseif st.rlen < st.header_len + st.body_need
+            return :need_more
+        end
+        st.phase = :writing
+    end
+
+    if st.phase == :writing
+        _complete_request(server, engine, st, ctx)
+    end
+    return :done
+end
+
+"""Parse framing headers. Returns `false` (and answers) on an invalid request."""
+function _prepare_body(server, engine, st::HTTPConn, ctx::WorkerCtx)
+    te = get_header(st.hbuf, st.rbuf, "transfer-encoding")
+    clv = get_header(st.hbuf, st.rbuf, "content-length")
+
+    if te !== nothing && clv !== nothing
+        # RFC 9112 smuggling defense: never accept both.
+        _respond_and_close(server, engine, st, ctx, fail(400, "Bad Request"))
+        return false
+    end
+
+    if te !== nothing
+        if _contains_token_ci(te, "chunked")
+            st.chunked = true
+            st.body_need = 0
+            st.bodylen = 0
+            st.chunklen = 0
+            st.fed = st.header_len
+            return true
+        end
+        _respond_and_close(server, engine, st, ctx, fail(501, "Not Implemented"))
+        return false
+    end
+
+    if clv !== nothing
+        cl = tryparse(Int, clv)
+        if cl === nothing || cl < 0
+            _respond_and_close(server, engine, st, ctx, fail(400, "Bad Request"))
+            return false
+        end
+        if cl > server.max_body_size
+            _respond_and_close(server, engine, st, ctx, fail(413, "Content Too Large"))
+            return false
+        end
+        st.body_need = cl
+    else
+        st.body_need = 0
+    end
+    return true
+end
+
+"""Feed newly arrived raw bytes to the chunked decoder.
+Returns `:partial`, `:done` or `:error` (error already answered)."""
+function _feed_chunked!(server, engine, st::HTTPConn, ctx::WorkerCtx)
+    if st.rlen > st.fed
+        n = st.rlen - st.fed
+        old = st.chunklen
+        st.chunklen += n
+        length(st.chunkbuf) < st.chunklen &&
+            resize!(st.chunkbuf, max(st.chunklen, 2 * length(st.chunkbuf), 1024))
+        GC.@preserve st begin
+            unsafe_copyto!(pointer(st.chunkbuf, old + 1), pointer(st.rbuf, st.fed + 1), n)
+        end
+        st.fed = st.rlen
+    end
+
+    resize!(st.chunkbuf, st.chunklen)
+    result = decode_chunked!(st.decoder, st.chunkbuf)
+
+    if result.status === :error
+        _respond_and_close(server, engine, st, ctx, fail(400, "Bad Request"))
+        return :error
+    end
+
+    if result.decoded_len > 0
+        old = st.bodylen
+        st.bodylen += result.decoded_len
+        length(st.body) < st.bodylen &&
+            resize!(st.body, max(st.bodylen, 2 * length(st.body), 1024))
+        GC.@preserve st begin
+            unsafe_copyto!(pointer(st.body, old + 1), pointer(st.chunkbuf), result.decoded_len)
+        end
+    end
+
+    if st.bodylen > server.max_body_size
+        _respond_and_close(server, engine, st, ctx, fail(413, "Content Too Large"))
+        return :error
+    end
+
+    if result.status === :partial
+        st.chunklen = 0
+        resize!(st.chunkbuf, 0)
+        return :partial
+    end
+
+    # :done — leftover bytes are the start of the next (pipelined) request.
+    leftover = result.leftover
+    if leftover > 0
+        length(st.rbuf) < leftover && resize!(st.rbuf, max(leftover, _INITIAL_RBUF))
+        GC.@preserve st begin
+            unsafe_copyto!(pointer(st.rbuf), pointer(st.chunkbuf, result.decoded_len + 1), leftover)
+        end
+    end
+    st.rlen = leftover
+    st.hdr_scanned = 0
+    st.chunklen = 0
+    resize!(st.chunkbuf, 0)
+    return :done
+end
+
+# ── Request completion and response ─────────────────────────────────────────
+
+function _complete_request(server, engine, st::HTTPConn, ctx::WorkerCtx)
+    req = _build_request(st)
+    response = _dispatch(server, req)
+    close_after = _wants_close(req)
+    close_after && _set_connection_close!(response.headers)
+
+    if !st.chunked
+        consumed = st.header_len + st.body_need
+        leftover = st.rlen - consumed
+        leftover > 0 && copyto!(st.rbuf, 1, st.rbuf, consumed + 1, leftover)
+        st.rlen = max(leftover, 0)
+    end
+
+    st.hdr_scanned = 0
+    st.header_len = 0
+    st.body_need = 0
+    st.chunked = false
+    st.close_after = close_after
+    st.phase = :writing
+
+    _queue_response(server, engine, st, ctx, response; close=close_after)
+    return
+end
+
+function _build_request(st::HTTPConn)
+    hb = st.hbuf
+    buf = st.rbuf
+    method = String(head_method(hb, buf))
+    target = String(head_path(hb, buf))
+    path, query = Interface._split_target(target)
+
+    n = header_count(hb)
+    headers = Vector{Pair{String,String}}(undef, n)
+    for i in 1:n
+        headers[i] = String(header_name(hb, i, buf)) => String(header_value(hb, i, buf))
+    end
+
+    body = if st.chunked
+        copy(view(st.body, 1:st.bodylen))
+    else
+        copy(view(buf, st.header_len + 1:st.header_len + st.body_need))
+    end
+
+    return Request(method, target, path, query, headers, body,
+                   UInt8(head_minor_version(hb)))
+end
+
+"""Serialize and queue a response. Returns `false` if it could not be queued."""
+function _queue_response(server, engine, st::HTTPConn, ctx::WorkerCtx,
+                         response::Response; close::Bool)
+    out_buf = acquire!(ctx.buf_pool)
+    nbytes = serialize_response!(out_buf, response)
+
+    set_pending!(ctx.pending, st.fd, out_buf, nbytes)
+    close && mark_close!(ctx.pending, st.fd)
+
+    if queue_write!(engine, st.conn, pointer(out_buf), nbytes) != 0
+        buf = pop_pending!(ctx.pending, st.fd)
+        buf !== nothing && release!(ctx.buf_pool, buf)
+        _finalize!(server, st, ctx)
+        return false
+    end
+    st.inflight = :write
+    return true
+end
+
+function _respond_and_close(server, engine, st::HTTPConn, ctx::WorkerCtx, response::Response)
+    st.close_after = true
+    st.phase = :writing
+    _queue_response(server, engine, st, ctx, response; close=true)
+    return
+end
+
+# ── Writes ──────────────────────────────────────────────────────────────────
+
+function _on_write(server, engine, st::HTTPConn, n::Int, ctx::WorkerCtx)
+    total, sent, done = advance_pending!(ctx.pending, st.fd, n)
+
+    if !done
+        ptr, remaining = pending_slice(ctx.pending, st.fd)
+        if n <= 0 || ptr == C_NULL || remaining <= 0 || sent < 0
+            _retire!(server, st, ctx)
+            return
+        end
+        if queue_write!(engine, st.conn, ptr, remaining) != 0
+            _retire!(server, st, ctx)
+            return
+        end
+        st.inflight = :write
+        return
+    end
+
+    buf = pop_pending!(ctx.pending, st.fd)
+    buf !== nothing && release!(ctx.buf_pool, buf)
+
+    if st.close_after || should_close!(ctx.pending, st.fd)
+        _finalize!(server, st, ctx)
+        return
+    end
+
+    st.phase = :headers
+    st.hdr_scanned = 0
+    if st.rlen > 0
+        _pump(server, engine, st, ctx)   # pipelined request(s)
+    elseif queue_read_reuse!(engine, st.conn) != 0
+        _retire!(server, st, ctx)
+    else
+        _set_deadline!(server, st)
+        st.inflight = :read
+    end
+    return
+end
+
+# ── Lifecycle ───────────────────────────────────────────────────────────────
+
+"""Close immediately if idle; otherwise shut the socket down (which wakes the
+in-flight io_uring operation and FINs the peer) and wait for the completion
+before recycling the connection struct."""
+function _retire!(server, st::HTTPConn, ctx::WorkerCtx)
+    if st.inflight == :none
+        _finalize!(server, st, ctx)
+        return
+    end
+    st.retired = true
+    st.fd_open && shutdown_fd!(st.fd)
+    return
+end
+
+function _finalize!(server, st::HTTPConn, ctx::WorkerCtx)
+    buf = pop_pending!(ctx.pending, st.fd)
+    buf !== nothing && release!(ctx.buf_pool, buf)
+    if st.fd_open
+        close_fd!(st.fd)
+        st.fd_open = false
+    end
+    delete!(ctx.states, st.conn.ptr)
+    release!(ctx.conn_pool, st.conn)
+    Threads.atomic_sub!(server._conn_count, 1)
+    _park_state(ctx, st)
+    return
+end
+
+function _acquire_state(ctx::WorkerCtx, conn::Connection)
+    st = isempty(ctx.free) ? HTTPConn(conn) : pop!(ctx.free)
+    st.conn = conn
+    _reset!(st)
+    return st
+end
+
+function _park_state(ctx::WorkerCtx, st::HTTPConn)
+    if length(ctx.free) < _MAX_POOLED_STATES
+        # Release oversized buffers instead of retaining them in the pool.
+        length(st.rbuf) > 65_536 && (st.rbuf = Vector{UInt8}(undef, 0))
+        length(st.body) > 65_536 && (st.body = Vector{UInt8}(undef, 0))
+        length(st.chunkbuf) > 65_536 && (st.chunkbuf = Vector{UInt8}(undef, 0))
+        resize!(st.rbuf, 0)
+        resize!(st.body, 0)
+        resize!(st.chunkbuf, 0)
+        st.rlen = 0
+        st.bodylen = 0
+        st.chunklen = 0
+        st.fed = 0
+        push!(ctx.free, st)
+    end
+    return
+end
+
+"""Close connections past their phase deadline (idle, headers or body timeout)."""
+function _sweep_expired!(server, engine, ctx::WorkerCtx)
+    now = time()
+    now - ctx.last_sweep < _SWEEP_INTERVAL && return
+    ctx.last_sweep = now
+
+    expired = HTTPConn[]
+    for (_, st) in ctx.states
+        (st.retired || st.deadline == 0.0) && continue
+        now > st.deadline && push!(expired, st)
+    end
+
+    for st in expired
+        st.retired && continue
+        _retire!(server, st, ctx)
+    end
+    return
+end
+
+# ── Request Dispatch (type-stable via RouteResult) ──────────────────────────
+
+@inline function _dispatch(server::Server, req::Request)::Response
+    method = Methods.from_string(req.method)
+    result = route(server.router, method, req.path)
+
+    if not_found(result)
+        return fail(404, "Not Found")
+    end
+
+    if method_not_allowed(result)
+        allow_str = Methods.allow_header(result.allowed)
+        return Response(405, ["Allow" => allow_str, "Content-Type" => "text/plain"],
+                        "Method Not Allowed")
+    end
+
+    ctx = RequestContext(req, result.params)
+    return _invoke_handler(server, result.handler, ctx)
+end
+
+# Internal migration adapter for parser-level tests and backend code.
+@inline function _dispatch(server::Server, req::PicoHTTPParser.Request)::Response
+    _dispatch(server, Request(req))
+end
+
+"""Isolated handler invocation — @noinline keeps try/catch off the hot path."""
+@noinline function _invoke_handler(server::Server, endpoint, ctx::RequestContext)::Response
+    try
+        response = execute!(server.executor, endpoint, ctx)
+        return response isa Response ? response : text(string(response))
+    catch err
+        return intercept(server.catcher, err isa Exception ? err : ErrorException(string(err)), ctx.request)
+    end
+end
+
+# ── Connection close detection ──────────────────────────────────────────────
+
+@inline _wants_close(req::PicoHTTPParser.Request)::Bool = _wants_close(Request(req))
+@inline _wants_close(::Nothing)::Bool = true
 
 @inline function _wants_close(req::Request)::Bool
-    req === nothing && return true
-
-    # PicoHTTPParser minor_version: 0 => HTTP/1.0, 1 => HTTP/1.1
     http11_or_newer = req.minor_version >= 1
 
     conn_val = nothing
@@ -130,17 +609,14 @@ end
     return false
 end
 
-@inline _wants_close(req::PicoHTTPParser.Request)::Bool = _wants_close(Request(req))
-@inline _wants_close(::Nothing)::Bool = true
-
 @inline function _set_connection_close!(headers::Vector{Pair{String,String}})
     for i in eachindex(headers)
-        k = headers[i].first
-        _hdr_key_eq_ci(k, "connection") || continue
+        _hdr_key_eq_ci(headers[i].first, "connection") || continue
         headers[i] = "Connection" => "close"
         return
     end
     push!(headers, "Connection" => "close")
+    return
 end
 
 """Zero-allocation case-insensitive ASCII string comparison."""
@@ -190,72 +666,4 @@ end
         end
     end
     return false
-end
-
-# ── Write Handler ───────────────────────────────────────────────────────────
-
-function _handle_write(engine, conn::Connection, bytes_written::Cint,
-                       conn_pool::ConnectionPool, buf_pool::BufferPool,
-                       pending::PendingWrites)
-    fd = conn_fd(conn)
-
-    total, sent, done = advance_pending!(pending, fd, bytes_written)
-    if !done
-        ptr, remaining = pending_slice(pending, fd)
-        if ptr == C_NULL || remaining <= 0 || sent < 0 || total <= 0
-            buf = pop_pending!(pending, fd)
-            buf !== nothing && release!(buf_pool, buf)
-            close_fd!(fd)
-            release!(conn_pool, conn)
-            return
-        end
-        queue_write!(engine, conn, ptr, remaining)
-        return
-    end
-
-    buf = pop_pending!(pending, fd)
-    buf !== nothing && release!(buf_pool, buf)
-
-    if should_close!(pending, fd)
-        close_fd!(fd)
-        release!(conn_pool, conn)
-        return
-    end
-
-    queue_read_reuse!(engine, conn)
-    nothing
-end
-
-# ── Request Dispatch (type-stable via RouteResult) ──────────────────────────
-
-@inline function _dispatch(server::Server, req::Request)::Response
-    method = Methods.from_string(req.method)
-    result = route(server.router, method, req.path)
-
-    if not_found(result)
-        return fail(404, "Not Found")
-    end
-
-    if method_not_allowed(result)
-        allow_str = Methods.allow_header(result.allowed)
-        return Response(405, ["Allow" => allow_str, "Content-Type" => "text/plain"],
-                        "Method Not Allowed")
-    end
-
-    ctx = RequestContext(req, result.params)
-    return _invoke_handler(server, result.handler, ctx)
-end
-
-# Internal migration adapter for parser-level tests and backend code.
-@inline _dispatch(server::Server, req::PicoHTTPParser.Request)::Response =
-    _dispatch(server, Request(req))
-
-"""Isolated handler invocation — @noinline keeps try/catch off the hot path."""
-@noinline function _invoke_handler(server::Server, endpoint, ctx::RequestContext)::Response
-    try
-        response = execute!(server.executor, endpoint, ctx)
-        return response isa Response ? response : text(string(response))
-    catch err
-        return intercept(server.catcher, err isa Exception ? err : ErrorException(string(err)), ctx.request)
-    end
 end

@@ -314,18 +314,29 @@ Rules:
 - One `stop!`, one `submit!`, one name per concept.
 - Abstractions stay only while a second implementation or an active fake exercises them.
 
-### Parser contract (PicoHTTPParser.jl additions)
+### Parser contract (implemented in `PicoHTTPParser.jl` branch `feat/incremental-head-api`)
 
 ```julia
-# Caller-owned header storage, reused per connection/thread — no per-attempt allocation.
-parse_request_head!(hb::HeaderBuf, buf::Vector{UInt8}, last_len::Integer) ->
-    (status::Symbol, ret::Cint, method::StringView, path::StringView, minor_version::Int)
-    # status ∈ (:partial, :done, :error); headers exposed lazily via hb
+hb = HeaderBuffer(max_headers)        # one per worker thread, reused
+status = parse_request_head!(hb, buf, last_len)  # :partial | :done | :error, zero alloc
 
-# Incremental chunked decode: consumed bytes + explicit state, leftover-safe.
-decode_chunked!(dec::ChunkedDecoder, buf::Vector{UInt8}, offset::Int, last_len::Integer) ->
-    (consumed::Int, status::Symbol)  # status ∈ (:partial, :done, :error)
+# on :done (all zero-alloc when consumed in place):
+method = head_method(hb, buf)         # BufferView into buf
+path   = head_path(hb, buf)
+hlen   = head_header_len(hb)          # header block length
+minor  = head_minor_version(hb)
+n      = header_count(hb)
+get_header(hb, buf, "host")           # lazy case-insensitive scan, no materialization
+
+# chunked decode: in-place, explicit state, pipelining-safe
+result = decode_chunked!(decoder, buf)
+result.status                         # :partial | :done | :error
+decoded_data(result, buf)             # decoded bytes compacted to buffer front
+leftover_data(result, buf)            # bytes after the terminal chunk (next request)
 ```
+
+Status: 82/82 parser tests pass, including steady-state zero-allocation assertions.
+`ChunkedResult` changed shape (breaking), version bumped to 0.3.0.
 
 `Request` in Ciro is then a view bundle over the connection-owned buffer
 (`method`/`target`/`path`/`body` + header block offset), with lazy
@@ -347,3 +358,24 @@ decode_chunked!(dec::ChunkedDecoder, buf::Vector{UInt8}, offset::Int, last_len::
 - [x] `Project.toml`: stdlib compat fixed (`Dates = "1.11.0"` blocked the declared
       Julia 1.10 floor); `Sockets`/`Test` extras declared for the test target.
 - [x] Test run: 599 passed, 6 broken, 0 failed (Julia 1.13, Linux).
+
+## 10. Stage 1 status — correctness core
+
+- [x] Incremental per-connection state machine: `rbuf` accumulation, `last_len` head
+      parsing, leftover carry/pipelining, retired connections (no stale completions).
+- [x] Validated limits/timeouts: `max_header_bytes`, `header_timeout_ms`,
+      `body_timeout_ms`, `idle_timeout_ms`, `max_connections`; 431/413 answers,
+      deadline sweep closes idle/partial connections.
+- [x] `host`/`backlog` wired through to the native bind; `IOUringBackend` used by
+      `Server` (the `AbstractBackend` seam is real).
+- [x] SQE exhaustion returns status; no silent drops.
+- [x] HEAD carries the GET entity's `Content-Length`; CR/LF/NUL rejected in headers.
+- [x] Ownership fixes: fd-keyed close flag reset on fd reuse; `shutdown()` before close
+      so a pending io_uring read cannot hold the socket open.
+- [x] Parser: `parse_request_head!` allocation-free, offset-based views that survive
+      buffer growth (`PicoHTTPParser.jl` `07215a5`, `ccd41c6`).
+- [x] All six Stage 0 `@test_broken` pins promoted to `@test`.
+- [x] Test run: **614 passed, 0 failed** (incl. full Aqua + JET and 29 wire tests).
+- [ ] CI green — blocked on releasing `PicoHTTPParser 0.3.0` (Ciro `Pkg.develop`s the
+      local checkout today).
+- [ ] Chunked transfer-encoding wire tests; per-route body limits; access logging.

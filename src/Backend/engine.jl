@@ -3,16 +3,18 @@
 # ══════════════════════════════════════════════════════════════════════════════
 
 """
-    init_engine(port; queue_depth=4096) -> Engine
+    init_engine(port; host="0.0.0.0", backlog=8192, queue_depth=4096) -> Union{Engine,Nothing}
 
-Initialize an io_uring engine bound to `port`.
-Creates the server socket with SO_REUSEADDR + SO_REUSEPORT (enables
-thread-per-core scaling where each thread binds the same port).
+Initialize an io_uring engine bound to `host:port`. `host` must be an IPv4
+literal; `"0.0.0.0"` binds all interfaces. The server socket uses SO_REUSEADDR +
+SO_REUSEPORT, so multiple engines can share one port (thread-per-core).
 
 Returns `nothing` if initialization fails.
 """
-function init_engine(port::Integer; queue_depth::Integer=4096)::Union{Engine, Nothing}
-    ptr = ccall((:init_engine, _LIB), Ptr{Cvoid}, (Cint, Cint), Cint(port), Cint(queue_depth))
+function init_engine(port::Integer; host::AbstractString="0.0.0.0",
+                     backlog::Integer=8192, queue_depth::Integer=4096)::Union{Engine,Nothing}
+    ptr = ccall((:init_engine, _LIB), Ptr{Cvoid}, (Cstring, Cint, Cint, Cint),
+                host, Cint(port), Cint(backlog), Cint(queue_depth))
     ptr == C_NULL && return nothing
     return Engine(ptr, port)
 end
@@ -30,37 +32,36 @@ function close_engine!(engine::Engine)
 end
 
 # ── Queue Operations ────────────────────────────────────────────────────────
-# These add SQEs to the submission queue. Call submit!() to flush.
+# These add SQEs to the submission queue. All return 0 on success and -1 when
+# the operation could not be queued (ring full / submission failed): callers
+# must treat -1 as a fatal connection error, never ignore it. Call submit!() to
+# flush unless the operation submits internally (accepts do).
 
 """Queue a single-shot accept on the server socket."""
-@inline function queue_accept!(engine::Engine, conn::Connection)
-    ccall((:queue_accept, _LIB), Cvoid, (Ptr{Cvoid}, Ptr{Cvoid}), engine.ptr, conn.ptr)
-    nothing
+@inline function queue_accept!(engine::Engine, conn::Connection)::Cint
+    ccall((:queue_accept, _LIB), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), engine.ptr, conn.ptr)
 end
 
 """Queue a multishot accept (kernel 5.19+). One SQE serves multiple accepts."""
-@inline function queue_multishot_accept!(engine::Engine, conn::Connection)
-    ccall((:queue_multishot_accept, _LIB), Cvoid, (Ptr{Cvoid}, Ptr{Cvoid}), engine.ptr, conn.ptr)
-    nothing
+@inline function queue_multishot_accept!(engine::Engine, conn::Connection)::Cint
+    ccall((:queue_multishot_accept, _LIB), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), engine.ptr, conn.ptr)
 end
 
 """Queue a read into the connection's internal buffer."""
-@inline function queue_read!(engine::Engine, conn::Connection)
-    ccall((:queue_read, _LIB), Cvoid, (Ptr{Cvoid}, Ptr{Cvoid}), engine.ptr, conn.ptr)
-    nothing
+@inline function queue_read!(engine::Engine, conn::Connection)::Cint
+    ccall((:queue_read, _LIB), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), engine.ptr, conn.ptr)
 end
 
 """
-    queue_write!(engine, conn, data::Ptr{UInt8}, len)
+    queue_write!(engine, conn, data::Ptr{UInt8}, len) -> Cint
 
 Queue a write from `data` (len bytes). The caller MUST keep the data alive
 (via GC.@preserve or pool ownership) until write completion.
 """
-@inline function queue_write!(engine::Engine, conn::Connection, data::Ptr{UInt8}, len::Integer)
-    ccall((:queue_write, _LIB), Cvoid,
+@inline function queue_write!(engine::Engine, conn::Connection, data::Ptr{UInt8}, len::Integer)::Cint
+    ccall((:queue_write, _LIB), Cint,
         (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, Cint),
         engine.ptr, conn.ptr, data, Cint(len))
-    nothing
 end
 
 # ── Submission & Completion ─────────────────────────────────────────────────
@@ -100,33 +101,30 @@ Non-blocking peek at the next completion. Returns `nothing` if none ready.
 end
 
 """
-    accept_and_queue_read!(engine, conn, client_fd)
+    accept_and_queue_read!(engine, conn, client_fd) -> Cint
 
 Combined: set fd on conn + queue read. One ccall instead of 3.
 """
-@inline function accept_and_queue_read!(engine::Engine, conn::Connection, client_fd::Cint)
-    ccall((:accept_and_queue_read, _LIB), Cvoid,
+@inline function accept_and_queue_read!(engine::Engine, conn::Connection, client_fd::Cint)::Cint
+    ccall((:accept_and_queue_read, _LIB), Cint,
         (Ptr{Cvoid}, Ptr{Cvoid}, Cint), engine.ptr, conn.ptr, client_fd)
-    nothing
 end
 
 """
-    queue_write_and_close!(engine, conn, data, len)
+    queue_write_and_close!(engine, conn, data, len) -> Cint
 
 Combined: queue write + linked close. Kernel handles write→close atomically.
 """
-@inline function queue_write_and_close!(engine::Engine, conn::Connection, data::Ptr{UInt8}, len::Integer)
-    ccall((:queue_write_and_close, _LIB), Cvoid,
+@inline function queue_write_and_close!(engine::Engine, conn::Connection, data::Ptr{UInt8}, len::Integer)::Cint
+    ccall((:queue_write_and_close, _LIB), Cint,
         (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, Cint), engine.ptr, conn.ptr, data, Cint(len))
-    nothing
 end
 
 """
-    queue_read_reuse!(engine, conn)
+    queue_read_reuse!(engine, conn) -> Cint
 
 Queue read reusing same conn (keep-alive). One ccall.
 """
-@inline function queue_read_reuse!(engine::Engine, conn::Connection)
-    ccall((:queue_read_reuse, _LIB), Cvoid, (Ptr{Cvoid}, Ptr{Cvoid}), engine.ptr, conn.ptr)
-    nothing
+@inline function queue_read_reuse!(engine::Engine, conn::Connection)::Cint
+    ccall((:queue_read_reuse, _LIB), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), engine.ptr, conn.ptr)
 end

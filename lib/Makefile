@@ -63,5 +63,5 @@ clean:
 check-deps:
 	@command -v $(CC) >/dev/null 2>&1 || \
 	  { echo "ERROR: gcc not found. Install: apt install gcc"; exit 1; }
-	@$(CC) -x c - -luring -o /dev/null </dev/null 2>/dev/null || \
+	@printf 'int main(void){return 0;}\n' | $(CC) -x c - -luring -o /dev/null 2>/dev/null || \
 	  { echo "ERROR: liburing not found. Install: apt install liburing-dev"; exit 1; }

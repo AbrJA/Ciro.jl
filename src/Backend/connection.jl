@@ -70,3 +70,15 @@ end
     ccall(:close, Cint, (Cint,), Cint(fd))
     nothing
 end
+
+"""
+    shutdown_fd!(fd)
+
+Shut down both directions of a socket. This sends FIN immediately even while an
+io_uring read is in flight on the fd (an in-flight request keeps the file
+description alive, so `close` alone would not wake the peer or the read).
+"""
+@inline function shutdown_fd!(fd::Integer)
+    ccall(:shutdown, Cint, (Cint, Cint), Cint(fd), Cint(2))  # SHUT_RDWR
+    nothing
+end
