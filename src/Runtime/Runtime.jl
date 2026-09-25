@@ -10,7 +10,7 @@ using ..Interface
 using ..Interface: Request, RequestContext, Response, Endpoint, RouteResult,
                    matched, not_found, method_not_allowed, Methods, text, fail,
                    route, register!, freeze!, execute!, log!, intercept
-using PicoHTTPParser
+import PicoHTTPParser
 
 export AbstractTransport, TransportToken, Application, FakeTransport,
        handle, dispatch, run_once!, serve!, submit!, response_for,

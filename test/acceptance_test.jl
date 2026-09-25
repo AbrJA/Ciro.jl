@@ -228,6 +228,24 @@ end
                 @test endswith(resp, "12345")
             end
 
+            @testset "malformed framing rejected" begin
+                # obs-fold continuation lines must not be silently re-framed
+                @test startswith(roundtrip(port,
+                    "GET /hello HTTP/1.1\r\nHost: x\r\nX-A: 1\r\n\tcontinued\r\nConnection: close\r\n\r\n"),
+                    "HTTP/1.1 400")
+
+                # duplicate / invalid Content-Length and CL+TE are smuggling hazards
+                @test startswith(roundtrip(port,
+                    "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 1\r\nContent-Length: 1\r\nConnection: close\r\n\r\na"),
+                    "HTTP/1.1 400")
+                @test startswith(roundtrip(port,
+                    "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: abc\r\nConnection: close\r\n\r\n"),
+                    "HTTP/1.1 400")
+                @test startswith(roundtrip(port,
+                    "POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nContent-Length: 1\r\nConnection: close\r\n\r\na"),
+                    "HTTP/1.1 400")
+            end
+
             @testset "split headers (P0: must buffer incrementally)" begin
                 c = TestClient(port)
                 try

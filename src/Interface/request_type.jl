@@ -18,7 +18,7 @@ function _split_target(target::String)
 end
 
 function Request(raw::PicoHTTPParser.Request)
-    target = String(raw.path)
+    target = String(raw.target)
     path, query = _split_target(target)
     headers = Pair{String,String}[String(k) => String(v) for (k, v) in raw.headers]
     body = Vector{UInt8}(raw.body)

@@ -31,7 +31,7 @@ using .Core
 using .Router
 using .Runtime
 using .Backend: IOUringBackend
-using PicoHTTPParser
+import PicoHTTPParser
 
 # ── Public API ──────────────────────────────────────────────────────────────
 # Types

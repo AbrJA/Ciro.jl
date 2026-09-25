@@ -242,7 +242,7 @@ function _process(server, engine, st::HTTPConn, ctx::WorkerCtx)
             _respond_and_close(server, engine, st, ctx, fail(400, "Bad Request"))
             return :done
         end
-        st.header_len = head_header_len(st.hbuf)
+        st.header_len = head_length(st.hbuf)
         _prepare_body(server, engine, st, ctx) || return :done
         st.phase = :body
     end
@@ -266,10 +266,26 @@ end
 
 """Parse framing headers. Returns `false` (and answers) on an invalid request."""
 function _prepare_body(server, engine, st::HTTPConn, ctx::WorkerCtx)
-    te = get_header(st.hbuf, st.rbuf, "transfer-encoding")
-    clv = get_header(st.hbuf, st.rbuf, "content-length")
+    # Obs-fold continuation lines surface as empty header names (picohttpparser
+    # reports them with a NULL name). RFC 9112 allows only reject or replace;
+    # reject rather than implicitly re-frame the message.
+    for i in 1:length(st.hbuf)
+        if isempty(header_name(st.hbuf, i, st.rbuf))
+            _respond_and_close(server, engine, st, ctx, fail(400, "Bad Request"))
+            return false
+        end
+    end
 
-    if te !== nothing && clv !== nothing
+    te = PicoHTTPParser.header(st.hbuf, st.rbuf, "transfer-encoding")
+    cl = try
+        content_length(st.hbuf, st.rbuf)
+    catch err
+        err isa HTTPParseError || rethrow(err)
+        _respond_and_close(server, engine, st, ctx, fail(400, "Bad Request"))
+        return false
+    end
+
+    if te !== nothing && cl !== nothing
         # RFC 9112 smuggling defense: never accept both.
         _respond_and_close(server, engine, st, ctx, fail(400, "Bad Request"))
         return false
@@ -288,12 +304,7 @@ function _prepare_body(server, engine, st::HTTPConn, ctx::WorkerCtx)
         return false
     end
 
-    if clv !== nothing
-        cl = tryparse(Int, clv)
-        if cl === nothing || cl < 0
-            _respond_and_close(server, engine, st, ctx, fail(400, "Bad Request"))
-            return false
-        end
+    if cl !== nothing
         if cl > server.max_body_size
             _respond_and_close(server, engine, st, ctx, fail(413, "Content Too Large"))
             return false
@@ -393,11 +404,11 @@ end
 function _build_request(st::HTTPConn)
     hb = st.hbuf
     buf = st.rbuf
-    method = String(head_method(hb, buf))
-    target = String(head_path(hb, buf))
+    method = String(request_method(hb, buf))
+    target = String(request_target(hb, buf))
     path, query = Interface._split_target(target)
 
-    n = header_count(hb)
+    n = length(hb)
     headers = Vector{Pair{String,String}}(undef, n)
     for i in 1:n
         headers[i] = String(header_name(hb, i, buf)) => String(header_value(hb, i, buf))
@@ -410,7 +421,7 @@ function _build_request(st::HTTPConn)
     end
 
     return Request(method, target, path, query, headers, body,
-                   UInt8(head_minor_version(hb)))
+                   UInt8(minor_version(hb)))
 end
 
 """Serialize and queue a response. Returns `false` if it could not be queued."""

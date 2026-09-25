@@ -12,7 +12,11 @@ module Core
 using ..Interface
 using ..Interface: Request, RequestContext, Response, Context, RouteResult, matched, not_found, method_not_allowed, status, hasheader, log!, execute!, freeze!
 using ..Backend
-using PicoHTTPParser
+import PicoHTTPParser
+using PicoHTTPParser: HeaderBuffer, parse_request_head!, head_length, request_method,
+                      request_target, minor_version, header_name, header_value,
+                      content_length, HTTPParseError,
+                      ChunkedDecoder, decode_chunked!
 using Base.Threads: @threads, nthreads
 
 include("server.jl")

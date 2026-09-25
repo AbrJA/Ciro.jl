@@ -8,9 +8,6 @@ Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
 PicoHTTPParser = "7dfb699f-0de3-4c94-bc59-7670dfa845e2"
 PrecompileTools = "aea7be01-6a6a-4083-8856-8a6e6704d82a"
 
-[sources]
-PicoHTTPParser = {path = "/home/ajaimes/Documents/GitHub/Julia/Packages/PicoHTTPParser.jl"}
-
 [compat]
 Aqua = "0.8"
 Dates = "1"

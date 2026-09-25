@@ -6,20 +6,30 @@ See `docs/DESIGN_LESSONS.md` for the engineering standards and
 
 ---
 
-## RESUME — next session (planned 2026-09-25)
+## RESUME — next session
 
 State at pause:
-- Stage 0 committed on `feat/stage0-safety-net` (`4b9d9a0`).
-- Stage 1 implemented and verified locally, committed as the next commit on the same
-  branch (`Pkg.test()` → 614 passed, 0 failed).
-- Parser branch `PicoHTTPParser.jl` `feat/incremental-head-api` has `07215a5` +
-  `ccd41c6` (89/89 tests). Locally `Pkg.develop`ed into Ciro; Manifest is gitignored.
+- Stage 0 committed on `feat/stage0-safety-net` (`4b9d9a0`); Stage 1 committed as
+  `b0a1996` on the same branch.
+- PicoHTTPParser `v0.3.0` is released and awaiting General registration
+  (JuliaRegistries/General#169521). It contains the Julian API, the unified
+  offset-safe `HeaderBuffer` path (`parse_request`/`parse_response`/`parse_headers`
+  wrappers, `parse_response_head!`, `parse_headers!`), strict stateful parsing
+  (obs-fold, bounds, strict `content_length`, TE rejection, bodyless 1xx/204/304),
+  and does not export the generic `header`/`headers` names. Parser suite 181/181;
+  docs build for 0.3.0.
+- Ciro is aligned to the release: compat `PicoHTTPParser = "0.3"`, committed
+  `[sources]` removed, strict `content_length` + obs-fold 400 + wire tests for
+  obs-fold, duplicate/invalid `Content-Length`, and CL+TE. `Pkg.test()` →
+  **618 passed, 0 failed** against the release (via the gitignored Manifest dev path).
+- Uncommitted: the alignment changes (Project.toml, Core/Interface/Runtime imports,
+  worker names, `Request.target` adapter, acceptance tests, WORKLOG, DESIGN_REVIEW).
 
-### First 15 minutes (unblock CI)
-1. Push `PicoHTTPParser.jl` `feat/incremental-head-api` to GitHub.
-2. Either release `PicoHTTPParser v0.3.0` (preferred) or add a Ciro CI step that
-   `Pkg.develop`s the parser from the pushed branch before running tests.
-3. Confirm Ciro CI is green on `feat/stage0-safety-net`.
+### First 15 minutes
+1. Commit the Ciro alignment on `feat/stage0-safety-net`.
+2. Wait for the General PR to merge, then `Pkg.resolve()` (or
+   `Pkg.free("PicoHTTPParser")`) so CI resolves 0.3.0 from the registry.
+3. Confirm Ciro CI is green, then open `feat/stage0-safety-net` → `master`.
 
 ### Stage 2 — one pipeline, real seams
 - Collapse `Core._dispatch`/`_invoke_handler` and `Runtime.dispatch`/`_invoke` into one
@@ -113,10 +123,9 @@ Branch: `feat/stage0-safety-net` (continues; Stage 1 changes not committed yet).
 
 ### Blocked / next
 
-- **CI is blocked on the parser release.** Ciro declares `PicoHTTPParser = "0.3"` and the
-  local checkout is `Pkg.develop`ed (Manifest holds a local path). Push the parser branch
-  (`feat/incremental-head-api`) and either release `PicoHTTPParser 0.3.0` or add a CI step
-  that `Pkg.develop`s it from git.
+- CI: `PicoHTTPParser 0.3.0` is released and awaiting General registration
+  (JuliaRegistries/General#169521). Local runs use the gitignored Manifest dev path;
+  once the PR merges, resolving from the registry unblocks CI.
 - Next: chunked transfer-encoding wire tests; per-route body limits; access logging;
   async executor (v1.5); zero-copy `Request` (Stage 3); JLL packaging (Stage 4).
 

@@ -8,7 +8,7 @@ type-stable contract. Extension points use abstract types + function stubs.
 """
 module Interface
 
-using PicoHTTPParser
+import PicoHTTPParser
 
 include("request_type.jl")
 export Request

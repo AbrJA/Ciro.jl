@@ -318,15 +318,15 @@ Rules:
 
 ```julia
 hb = HeaderBuffer(max_headers)        # one per worker thread, reused
-status = parse_request_head!(hb, buf, last_len)  # :partial | :done | :error, zero alloc
+status = parse_request_head!(hb, buf, prev_len)  # :partial | :done | :error, zero alloc
 
 # on :done (all zero-alloc when consumed in place):
-method = head_method(hb, buf)         # BufferView into buf
-path   = head_path(hb, buf)
-hlen   = head_header_len(hb)          # header block length
-minor  = head_minor_version(hb)
-n      = header_count(hb)
-get_header(hb, buf, "host")           # lazy case-insensitive scan, no materialization
+method = request_method(hb, buf)      # BufferView into buf
+target = request_target(hb, buf)      # includes query
+hlen   = head_length(hb)              # request line + header section
+minor  = minor_version(hb)
+n      = length(hb)
+header(hb, buf, "host")               # lazy case-insensitive scan, no materialization
 
 # chunked decode: in-place, explicit state, pipelining-safe
 result = decode_chunked!(decoder, buf)
