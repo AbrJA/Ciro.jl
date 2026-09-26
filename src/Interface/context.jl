@@ -24,6 +24,15 @@ struct RequestContext{R,P}
     params  :: P
 end
 
+"""
+    copy(context::RequestContext) -> RequestContext
+
+Owned copy of the request and its params. The context a handler receives
+holds views into the connection buffer that are only valid until the handler
+returns; use this to retain or hand them to another task.
+"""
+Base.copy(ctx::RequestContext) = RequestContext(copy(ctx.request), copy(ctx.params))
+
 """Construct a `RequestContext` with no route parameters."""
 RequestContext(request::Request) = RequestContext(request, ())
 RequestContext(request::PicoHTTPParser.Request, params) =

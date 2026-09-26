@@ -135,6 +135,24 @@ redirect("/login")
 fail(404, "Not Found")
 ```
 
+### Zero-copy request views (retention rule)
+
+Handlers receive views into the connection buffer: `ctx.request.path`,
+`ctx.request.headers`, and the body are valid **only until the handler
+returns**, because the buffer is reused for the next request. Copy anything
+you need to keep:
+
+```julia
+function audit(ctx)
+    saved = copy(ctx)          # owned request + params
+    @async process(saved)      # safe to hand to another task
+    text("ok")
+end
+```
+
+`body(ctx)` and `rawbody(ctx)` already return owned copies. See
+`ARCHITECTURE.md` §4.4 for the lifetime rules.
+
 ### Middleware Pattern (Callable Struct)
 
 ```julia

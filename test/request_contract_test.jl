@@ -22,6 +22,20 @@ function _request_contract_tests()
         @test query(request) == "model=small"
     end
 
+    @testset "copy(ctx) materializes views" begin
+        raw = Vector{UInt8}("POST /x?a=1 HTTP/1.1\r\nHost: h\r\nContent-Length: 2\r\n\r\nhi")
+        request = Ciro.Request(PicoHTTPParser.parse_request(raw))
+        context = RequestContext(request, [:id => "1"])
+
+        copied = copy(context)
+        @test copied.request.method isa String
+        @test copied.request.path isa String
+        @test copied.request.headers isa Vector{Pair{String,String}}
+        @test String(copied.request.body) == "hi"
+        @test copied.params !== context.params
+        @test header(copied.request, "Host") == "h"
+    end
+
     @testset "RequestContext contract" begin
         request = Ciro.Request("GET", "/models/42";
                                headers=["Host" => "localhost"],

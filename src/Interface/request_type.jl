@@ -69,6 +69,20 @@ function Request(raw::PicoHTTPParser.Request)
                    UInt8(raw.minor_version))
 end
 
+"""
+    copy(request::Request) -> Request
+
+Owned, materialized copy of a request. Use this to retain anything past the
+handler's return: the request a handler receives points into the connection
+buffer, which is reused for the next request.
+"""
+function Base.copy(req::Request)
+    return Request(String(req.method), String(req.target),
+                   String(req.path), String(req.query),
+                   Pair{String,String}[String(k) => String(v) for (k, v) in req.headers],
+                   Vector{UInt8}(req.body), req.minor_version)
+end
+
 function Request(method::AbstractString, target::AbstractString;
                  headers::AbstractVector{<:Pair}=Pair{String,String}[],
                  body::AbstractVector{UInt8}=UInt8[],
