@@ -203,10 +203,18 @@ Everything in §3.3 is implemented, plus the `HTTP`/`Backend` extraction:
   chunk for backpressure, and `_finish_stream` resumes keep-alive/pipelining.
   Retirement (client disconnect, forced shutdown) fails the handshake and releases
   the worker; streaming requires `AsyncExecutor`.
-- Gates: `Pkg.test()` → 789 passed, 0 failed; acceptance 97/97, also under
+- **Observability**: `AbstractTelemetry` seam (default `NullTelemetry`, compiles
+  away) with built-in `ServerMetrics` (atomic counters: requests, responses, status
+  classes, exceptions, bytes in/out) and `AccessLog` (one line per response, lock-
+  serialized). The HTTP layer reports parsed requests, every response at the queue
+  choke point (streams at end/abort; protocol errors included), and bytes read; the
+  adapter's `_TelemetryCatcher` wrapper counts intercepted exceptions. `Server`
+  gained a telemetry type parameter (`Server{R,L,C,E,T}`).
+- Gates: `Pkg.test()` → 825 passed, 0 failed; acceptance 111/111, also under
   `--check-bounds=yes`.
 
-Still open: compiled routing, HTTP/2/TLS (see §4.2 and §9).
+Still open: per-route limits (Stage 3.5), compiled routing, HTTP/2/TLS (see §4.2
+and §9).
 
 ---
 
@@ -345,6 +353,7 @@ don't have to read this whole document to add a router or a backend.
 | `AbstractBackend` | **implemented, minimal** | `start_backend!(backend, handler_factory, port; kwargs...)`, `stop_backend!(backend)` | Today this is really "how to boot an io_uring engine," not a byte-level seam — see `AbstractIO` below, which will absorb the real per-connection contract. |
 | `AbstractIO` (byte-transport seam) | **target, §4.2** | `accept_loop_started`, `on_connect`, `read`, `write`, `shutdown`, `close`, `timer` | This is the seam a second backend (Sockets, Reseau, ...) implements. Not to be confused with `AbstractBackend` above, which is the boot-time contract — naming these two consistently is an open decision (see §7). |
 | `AbstractExecutor` | **implemented** | `execute!(executor, endpoint, ctx) -> Response` (`SyncExecutor`); `isasync`, `start_executor!`, `stop_executor!`, and the `Runtime.dispatch_async(..., reply)` path (`AsyncExecutor`) | Moves slow handlers (model inference) off the ring thread. Contract: the request is copied before crossing the boundary; `reply` is called exactly once, possibly from another thread; the adapter marshals it back to its event-loop thread; excess queued/running work → 503 + `Retry-After`. |
+| `AbstractTelemetry` | **implemented** | `telemetry_request!`, `telemetry_response!`, `telemetry_read!`, `telemetry_exception!` (all default to no-ops); traits `telemetry_active`, `telemetry_capture_path` | Per-request observer attached with `Server(; telemetry=...)`. Built-ins: `NullTelemetry` (default), `ServerMetrics`, `AccessLog`. |
 
 **Rule for every trait above:** it is documented with its full required-method list in
 one place (this table), and a change to that list is proposed as an ADR, not a silent
@@ -457,7 +466,7 @@ Questions I'd most like a maintainer decision on:
 | 0–2 ✅ | Parametric server, trie router, fused worker loop, connection/buffer pooling, thread-per-core event loop — verified in §3. |
 | **2.5** ✅ | Closed the §3.3 gap with wire tests, extracted `HTTP` from `worker.jl`, froze the `AbstractIO` seam, added the portable Sockets adapter, split config from runtime state. |
 | 3 ✅ | Zero-copy `Request` views, lazy `Headers`, copy-free routing, `copy(ctx)` escape hatch, request build ~480 B. Zero-allocation route params on the served path (`route!` + connection scratch; `route! static/param = 0 B`), `@inferred` guards. Pending: compiled routing (dispatch-table at `freeze!`). |
-| 3.5 | Per-route limits, access log/metrics. |
+| 3.5 (partial) ✅ | Observability: `AbstractTelemetry` seam, `ServerMetrics` counters, `AccessLog`, exception counting. Pending: per-route limits (body size, timeouts). |
 | 4 | JLL packaging for the native lib, docs build, CI matrix. |
 | v1.5 ✅ | Async executor (bounded, 503 shedding, copy-on-escape, both backends) and streaming/SSE on the same ownership boundary (chunked, backpressure, disconnect-safe). |
 | v2 | Sockets backend ✅ (proves the seam), then Reseau/native alternatives only if benchmarks demand them. |

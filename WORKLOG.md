@@ -10,13 +10,33 @@ See `docs/DESIGN_LESSONS.md` for the engineering standards and
 
 State at pause:
 - `dev`: Stages 0–2.5, async executor (`bacca8b`, `625c2bb`), streaming/SSE
-  (`095058e`), and the lock-free-queue note (`0969dab`) committed and pushed.
-  `Pkg.test()` → **789 passed, 0 failed**; acceptance 97/97 (both backends);
-  PicoHTTPParser `0.3.0` resolves from General.
-- Uncommitted (this session): Stage 3 completion — zero-allocation route params
-  (`route!` + per-connection scratch), `@inferred` guards, docs.
+  (`095058e`), zero-alloc route params (`a7690ab`), and the lock-free-queue note
+  (`0969dab`) committed and pushed. `Pkg.test()` → **825 passed, 0 failed**;
+  acceptance 111/111 (both backends); PicoHTTPParser `0.3.0` resolves from General.
+- Uncommitted (this session): Stage 3.5 observability — `AbstractTelemetry`,
+  `ServerMetrics`, `AccessLog`, HTTP instrumentation, adapter catcher wrapper.
 
-### Stage 3 — zero-allocation route params (uncommitted, this session)
+### Stage 3.5 — observability (uncommitted, this session)
+- `Interface/telemetry.jl`: `AbstractTelemetry` with no-op defaults for
+  `telemetry_request!`/`telemetry_response!`/`telemetry_read!`/
+  `telemetry_exception!` and traits `telemetry_active`/`telemetry_capture_path`;
+  built-in `ServerMetrics` (atomic counters + `metrics_snapshot`) and `AccessLog`
+  (lock-serialized one-liner with target/status/bytes/elapsed).
+- `Server` gained a telemetry type parameter (`Server{R,L,C,E,T}`) and a
+  `telemetry=` keyword (default `NullTelemetry`).
+- HTTP instrumentation: reads counted and per-request start time in
+  `http_on_read`; request method/target/version reported after head parse
+  (`_telemetry_begin`); every response reported once at `_queue_response`
+  (protocol errors included; streams report at end or on abort in
+  `http_finalize`); path copied only when `telemetry_capture_path` is true.
+- Adapters expose `io_telemetry(io)` and dispatch through a per-call
+  `_TelemetryCatcher` wrapper so intercepted exceptions are counted without
+  changing `server.catcher` identity.
+- Tests: `test/telemetry_test.jl` (20 unit) + 14 in-process sockets acceptance
+  assertions (metrics counters incl. 400/404/500 + exceptions + bytes; AccessLog
+  line for a real request). `Pkg.test()` 825; acceptance 111/111.
+
+### Stage 3 — zero-allocation route params (committed: `a7690ab`)
 - `RouteResult.params` values for Trie matches are now
   `Pair{Symbol,UnitRange{Int}}` byte ranges into the routed path; `param` resolves
   them to views on demand (`SubString(path(ctx.request), ...)`) and `copy(ctx)`
@@ -76,9 +96,10 @@ State at pause:
   `max_pending=1`). `Pkg.test()` 775; acceptance 97/97.
 
 ### Next
-- Compiled routing (dispatch table at `freeze!`); Stage 3.5 (per-route limits,
-  access log/metrics); Stage 4 packaging (untrack `lib/ciro.so`, JLL, docs build,
-  CI matrix); static files.
+- Stage 3.5 remainder: per-route limits (body size, timeouts) — needs routing
+  before body accumulation. Then compiled routing (dispatch table at `freeze!`);
+  Stage 4 packaging (untrack `lib/ciro.so`, JLL, docs build, CI matrix); static
+  files.
 
 ### Stage 2 — DONE (one pipeline, graceful shutdown)
 - Single dispatch pipeline: `Runtime.dispatch(router, executor, catcher, request)` is
@@ -171,6 +192,10 @@ State at pause:
 - `@allocated` at the REPL top level can report a phantom 32 B box for any
   non-isbits struct returned by a dynamic call. Measure inside a compiled function
   (single-call wrapper) before concluding there is a real allocation.
+- PicoHTTPParser accessors do not always match Ciro's stored types (e.g.
+  `minor_version` returns `Int`, while `Request.minor_version` is `UInt8`);
+  convert at the boundary. A `MethodError` showing an extra hidden argument is a
+  world-age display, but here it was just a type mismatch.
 
 ### Resume commands
 ```sh

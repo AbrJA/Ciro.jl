@@ -68,13 +68,15 @@ struct Server{
     L <: AbstractLogger,
     C <: AbstractCatcher,
     E <: AbstractExecutor,
+    T <: AbstractTelemetry,
 }
-    router   :: R
-    logger   :: L
-    catcher  :: C
-    executor :: E
-    config   :: ServerConfig
-    runtime  :: ServerRuntime
+    router    :: R
+    logger    :: L
+    catcher   :: C
+    executor  :: E
+    telemetry :: T
+    config    :: ServerConfig
+    runtime   :: ServerRuntime
 end
 
 function Server(;
@@ -82,6 +84,7 @@ function Server(;
     logger::AbstractLogger      = NullLogger(),
     catcher::AbstractCatcher    = DefaultCatcher(),
     executor::AbstractExecutor  = SyncExecutor(),
+    telemetry::AbstractTelemetry = NullTelemetry(),
     backend::Symbol             = :uring,
     host::AbstractString        = "0.0.0.0",
     port::Int                   = 8080,
@@ -97,7 +100,7 @@ function Server(;
     config = ServerConfig(; backend, host, port, backlog, max_body_size, max_header_bytes,
                           header_timeout_ms, body_timeout_ms, idle_timeout_ms,
                           max_connections, shutdown_timeout)
-    return Server(router, logger, catcher, executor, config, ServerRuntime())
+    return Server(router, logger, catcher, executor, telemetry, config, ServerRuntime())
 end
 
 """

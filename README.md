@@ -24,6 +24,8 @@
   blocks.
 - 🌊 **Streaming & SSE**: chunked responses and `text/event-stream` with backpressure;
   a disconnected client releases its worker instead of leaking it.
+- 📊 **Observability**: opt-in `ServerMetrics` counters and one-line `AccessLog`, plus
+  an `AbstractTelemetry` seam for custom metrics/tracing.
 - 🛡️ **Strict framing & limits**: header/body/idle timeouts, size and connection caps;
   obs-fold, duplicate `Content-Length`, and CL+TE are rejected; header injection is
   impossible through `Response`.
@@ -217,6 +219,30 @@ Streaming requires `AsyncExecutor` (a synchronous handler would block the event
 loop for the whole body). If the client disconnects, the next write throws
 `StreamClosedError` and the worker is released. Supplying a `Content-Length`
 header switches chunking off and sends bytes raw.
+
+### 📊 Metrics & Access Logs
+
+Attach an observer with `Server(; telemetry=...)`:
+
+```julia
+metrics = ServerMetrics()
+server = Server(; router, telemetry=metrics)
+start!(server)
+
+metrics_snapshot(metrics)
+# (requests = 12, responses = 12, status_2xx = 11, status_4xx = 1, status_5xx = 0,
+#  exceptions = 0, bytes_in = 640, bytes_out = 1740)
+
+Server(; router, telemetry=AccessLog())     # one line per response to stderr
+Server(; router, telemetry=AccessLog(io))   # ... or any IO
+# 2026-09-26T07:13:25.123 "GET /hello?x=1" 200 123 0.532ms
+```
+
+`AccessLog` lines include the request target, status, response bytes, and
+elapsed time (for streams: to the end of the body). Implement
+`AbstractTelemetry` (`telemetry_request!`, `telemetry_response!`,
+`telemetry_read!`, `telemetry_exception!`) to feed Prometheus/OpenTelemetry.
+The default `NullTelemetry` compiles away.
 
 ### 🧱 Middleware Pattern (Callable Struct)
 

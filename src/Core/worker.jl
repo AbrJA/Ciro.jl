@@ -218,16 +218,21 @@ function io_release(io::UringIO, st::HTTPConn)
     return
 end
 
+@inline _catcher(io::UringIO) =
+    _TelemetryCatcher(io.server.catcher, io.server.telemetry)
+
 function io_dispatch(io::UringIO, req::Request)::Response
-    return dispatch(io.server.router, io.server.executor, io.server.catcher, req)
+    return dispatch(io.server.router, io.server.executor, _catcher(io), req)
 end
 
 function io_dispatch(io::UringIO, req::Request,
                      captures::Vector{Pair{Symbol,UnitRange{Int}}})::Response
-    return dispatch(io.server.router, io.server.executor, io.server.catcher, req, captures)
+    return dispatch(io.server.router, io.server.executor, _catcher(io), req, captures)
 end
 
 io_isasync(io::UringIO)::Bool = isasync(io.server.executor)
+
+io_telemetry(io::UringIO) = io.server.telemetry
 
 """Async handlers run away from this thread; their responses and stream chunks
 are posted to `io.replies` and delivered from `_worker_tick!`
@@ -242,7 +247,7 @@ function io_dispatch_async(io::UringIO, st::HTTPConn, req::Request)::Bool
                 put!(io.replies, _Reply(st, gen, payload))
             end
         end
-        dispatch_async(io.server.router, io.server.executor, io.server.catcher,
+        dispatch_async(io.server.router, io.server.executor, _catcher(io),
                        req, reply, st.captures)
         return true
     end

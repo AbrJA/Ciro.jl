@@ -19,6 +19,7 @@ include("methods.jl")
 include("response.jl")
 include("stream.jl")
 include("types.jl")
+include("telemetry.jl")
 include("request.jl")
 
 end # module Interface

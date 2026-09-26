@@ -93,14 +93,19 @@ function io_release(io::SocketsIO, st::HTTPConn)
     return
 end
 
+@inline _catcher(io::SocketsIO) =
+    _TelemetryCatcher(io.server.catcher, io.server.telemetry)
+
 io_dispatch(io::SocketsIO, req::Request)::Response =
-    dispatch(io.server.router, io.server.executor, io.server.catcher, req)
+    dispatch(io.server.router, io.server.executor, _catcher(io), req)
 
 io_dispatch(io::SocketsIO, req::Request,
             captures::Vector{Pair{Symbol,UnitRange{Int}}})::Response =
-    dispatch(io.server.router, io.server.executor, io.server.catcher, req, captures)
+    dispatch(io.server.router, io.server.executor, _catcher(io), req, captures)
 
 io_isasync(io::SocketsIO)::Bool = isasync(io.server.executor)
+
+io_telemetry(io::SocketsIO) = io.server.telemetry
 
 """Async handlers reply from another thread through the connection's channel;
 only this connection task touches `st`, so no state is shared."""
@@ -115,7 +120,7 @@ function io_dispatch_async(io::SocketsIO, st::HTTPConn, req::Request)::Bool
                 put!(entry.reply, _Reply(st, gen, payload))
             end
         end
-        dispatch_async(io.server.router, io.server.executor, io.server.catcher,
+        dispatch_async(io.server.router, io.server.executor, _catcher(io),
                        req, reply, st.captures)
         return true
     end

@@ -60,6 +60,9 @@ export Server, start!, stop!
 export AbstractRouter, AbstractLogger, AbstractCatcher, AbstractBackend
 export AbstractExecutor, SyncExecutor, AsyncExecutor, execute!
 export isasync, start_executor!, stop_executor!
+export AbstractTelemetry, NullTelemetry, ServerMetrics, AccessLog
+export telemetry_request!, telemetry_response!, telemetry_read!, telemetry_exception!
+export telemetry_active, telemetry_capture_path, metrics_snapshot
 export IOUringBackend
 export NullLogger, DefaultCatcher
 export Severity, Debug, Info, Warn, Error, Fatal

@@ -18,6 +18,7 @@
 
 using Test
 using Ciro
+using Sockets
 
 const _LIB_OK = Sys.islinux() && isfile(Ciro.Backend._LIB)
 
@@ -158,6 +159,25 @@ function _read_chunked_body(c::TestClient)
         _recv(c, 2)   # CRLF after chunk data
     end
     return String(copy(body))
+end
+
+"""
+Blocking (yielding) client for in-process servers. The raw `TestClient` would
+stall the Julia scheduler while the server shares this process, so in-process
+tests use libuv sockets, which yield while the server tasks run.
+"""
+function _julia_request(port::Integer, data::AbstractString)
+    sock = Sockets.connect(Sockets.IPv4("127.0.0.1"), port)
+    try
+        write(sock, data)
+        result = Ref("")
+        task = @async (result[] = String(readuntil(sock, "\r\n\r\n")))
+        timedwait(() -> istaskdone(task), 10.0) == :ok ||
+            error("in-process request to port $port timed out")
+        return result[]
+    finally
+        close(sock)
+    end
 end
 
 """Send a full request on a fresh connection and read one response."""
@@ -694,6 +714,64 @@ end
                     finally
                         _kill_server(sp)
                     end
+                end
+            end
+
+            @testset "telemetry (in-process sockets)" begin
+                metrics = ServerMetrics()
+                mport = port + 8
+                mrouter = Trie()
+                get!(mrouter, "/hello", _ -> text("hello"))
+                get!(mrouter, "/boom", _ -> error("kaboom"))
+                mserver = Server(; router=mrouter, port=mport, backend=:sockets,
+                                 telemetry=metrics)
+                mtask = Threads.@spawn start!(mserver; nworkers=1)
+                try
+                    _wait_ready(mport)
+                    @test startswith(_julia_request(mport,
+                        "GET /hello HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"),
+                        "HTTP/1.1 200")
+                    @test startswith(_julia_request(mport,
+                        "GET /missing HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"),
+                        "HTTP/1.1 404")
+                    @test startswith(_julia_request(mport,
+                        "GET /boom HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"),
+                        "HTTP/1.1 500")
+                    @test startswith(_julia_request(mport, "BAD REQUEST\r\n\r\n"),
+                                     "HTTP/1.1 400")
+
+                    @test timedwait(() -> metrics_snapshot(metrics).responses >= 4, 5.0) == :ok
+                    s = metrics_snapshot(metrics)
+                    @test s.requests == 3      # the malformed head never became a request
+                    @test s.responses == 4
+                    @test s.status_2xx == 1 && s.status_4xx == 2 && s.status_5xx == 1
+                    @test s.exceptions == 1    # /boom, counted by the catcher wrapper
+                    @test s.bytes_in > 0 && s.bytes_out > 0
+                finally
+                    stop!(mserver)
+                    timedwait(() -> istaskdone(mtask), 5.0)
+                end
+
+                logbuf = IOBuffer()
+                lport = port + 9
+                lrouter = Trie()
+                get!(lrouter, "/hello", _ -> text("hello"))
+                lserver = Server(; router=lrouter, port=lport, backend=:sockets,
+                                 telemetry=AccessLog(logbuf))
+                ltask = Threads.@spawn start!(lserver; nworkers=1)
+                try
+                    _wait_ready(lport)
+                    @test startswith(_julia_request(lport,
+                        "GET /hello?x=1 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"),
+                        "HTTP/1.1 200")
+                    @test timedwait(() ->
+                        occursin("\"GET /hello?x=1\" 200", String(copy(logbuf.data))), 5.0) == :ok
+                    line = String(take!(logbuf))
+                    @test occursin("\"GET /hello?x=1\" 200", line)
+                    @test occursin("ms", line)
+                finally
+                    stop!(lserver)
+                    timedwait(() -> istaskdone(ltask), 5.0)
                 end
             end
 

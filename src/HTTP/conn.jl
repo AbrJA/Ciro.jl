@@ -37,6 +37,13 @@ mutable struct HTTPConn{H}
     stream_final   :: Bool        # terminal chunk queued; finish on completion
     stream_ack     :: Union{Nothing, Channel{Bool}}
     captures       :: Vector{Pair{Symbol,UnitRange{Int}}}  # route-param scratch
+    t_method       :: UInt8       # telemetry: method of the current request
+    t_path         :: String      # telemetry: request target, when captured
+    t_start        :: Float64     # telemetry: first byte of the current request
+    t_bytes        :: Int         # telemetry: response bytes so far (streams)
+    t_status       :: Int         # telemetry: stream status
+    t_reported     :: Bool        # telemetry: current response already reported
+    t_streaming    :: Bool        # telemetry: an unfinished stream is open
 end
 
 HTTPConn(handle::H) where {H} =
@@ -45,7 +52,8 @@ HTTPConn(handle::H) where {H} =
                 Vector{UInt8}(undef, 0), 0, Vector{UInt8}(undef, 0), 0,
                 :headers, 0, 0, false, false, 0.0, :none, false, 0,
                 false, false, false, false, nothing,
-                Pair{Symbol,UnitRange{Int}}[])
+                Pair{Symbol,UnitRange{Int}}[],
+                UInt8(0), "", 0.0, 0, 0, false, false)
 
 """Reset every field for a new connection, reusing the allocated buffers."""
 function http_reset!(st::HTTPConn)
@@ -74,6 +82,13 @@ function http_reset!(st::HTTPConn)
     st.stream_final = false
     st.stream_ack = nothing
     empty!(st.captures)
+    st.t_method = UInt8(0)
+    st.t_path = ""
+    st.t_start = 0.0
+    st.t_bytes = 0
+    st.t_status = 0
+    st.t_reported = false
+    st.t_streaming = false
     d = st.decoder
     d.bytes_left_in_chunk = 0
     d.consume_trailer = 1

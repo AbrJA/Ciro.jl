@@ -7,6 +7,7 @@ using Ciro
     include("router_test.jl")
     include("runtime_test.jl")
     include("stream_test.jl")
+    include("telemetry_test.jl")
     include("core_test.jl")
     include("backend_test.jl")
     include("acceptance_test.jl")

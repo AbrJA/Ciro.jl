@@ -34,6 +34,8 @@ Required methods:
   backend may instead implement `io_dispatch(io, request, captures)`, receiving
   the connection's reusable route-capture scratch so routing does not allocate
   (the default 3-argument method forwards to the 2-argument one).
+- `io_telemetry(io) -> AbstractTelemetry` — per-request observer (metrics,
+  access log); defaults to `NullTelemetry()`.
 
 Optional capabilities (multishot accept, provided buffers, batching) are
 reported through separate predicates, never required methods, so a plain
@@ -63,9 +65,13 @@ function io_release end
 function io_dispatch end
 function io_isasync end
 function io_dispatch_async end
+function io_telemetry end
 
 "Backends without deferred dispatch are synchronous."
 io_isasync(::AbstractIO)::Bool = false
 
 "Backends that do not use the connection's route-capture scratch."
 io_dispatch(io::AbstractIO, req::Request, captures) = io_dispatch(io, req)
+
+"Backends without an observer are unobserved."
+io_telemetry(::AbstractIO) = NullTelemetry()

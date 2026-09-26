@@ -19,6 +19,11 @@ function http_on_read(io::AbstractIO, st::HTTPConn, src::Ptr{UInt8}, n::Int)
         http_retire(io, st)
         return
     end
+    t = io_telemetry(io)
+    if telemetry_active(t)
+        telemetry_read!(t, n)
+        st.rlen == 0 && (st.t_start = time())
+    end
     _append_read!(st, src, n)
     _set_deadline!(io, st)
     _pump(io, st)
@@ -63,6 +68,34 @@ end
 """Whether the connection is past its phase deadline and must be retired."""
 @inline http_expired(st::HTTPConn, now::Float64)::Bool =
     !st.retired && st.deadline != 0.0 && now > st.deadline
+
+# ── Telemetry ───────────────────────────────────────────────────────────────
+
+"""Start observing the request whose head was just parsed."""
+@inline function _telemetry_begin(io::AbstractIO, st::HTTPConn)
+    t = io_telemetry(io)
+    telemetry_active(t) || return
+    st.t_method = Methods.from_string(request_method(st.hbuf, st.rbuf))
+    st.t_start == 0.0 && (st.t_start = time())
+    st.t_bytes = 0
+    st.t_reported = false
+    st.t_streaming = false
+    target = request_target(st.hbuf, st.rbuf)
+    telemetry_capture_path(t) && (st.t_path = String(target))
+    telemetry_request!(t, st.t_method, target, UInt8(minor_version(st.hbuf)))
+    return
+end
+
+"""Report the completed response once, with total bytes and elapsed time."""
+@inline function _telemetry_report(io::AbstractIO, st::HTTPConn, status::Int, bytes::Int)
+    t = io_telemetry(io)
+    telemetry_active(t) || return
+    st.t_reported && return
+    st.t_reported = true
+    elapsed = st.t_start == 0.0 ? 0.0 : time() - st.t_start
+    telemetry_response!(t, st.t_method, st.t_path, status, bytes, elapsed)
+    return
+end
 
 """A completed write. Returns nothing; may retire or finalize the connection."""
 function http_on_write(io::AbstractIO, st::HTTPConn, n::Int)
@@ -186,6 +219,9 @@ function http_stream_begin(io::AbstractIO, st::HTTPConn, stream::Stream,
     out = io_acquire_buffer(io)
     n = serialize_head!(out, stream.status, stream.headers,
                         st.stream_chunked, st.close_after)
+    st.t_status = stream.status
+    st.t_bytes = n
+    st.t_streaming = true
     if io_write(io, st, out, n) != 0
         http_finalize(io, st)
     end
@@ -214,6 +250,7 @@ function http_stream_chunk(io::AbstractIO, st::HTTPConn, bytes::Vector{UInt8},
     if io_write(io, st, out, n) != 0
         http_finalize(io, st)
     end
+    st.t_bytes += n
     return
 end
 
@@ -233,10 +270,16 @@ function http_stream_end(io::AbstractIO, st::HTTPConn)
         n = serialize_last_chunk!(out)
         if io_write(io, st, out, n) != 0
             http_finalize(io, st)
+            return
         end
+        st.t_bytes += n
+        _telemetry_report(io, st, st.t_status, st.t_bytes)
+        st.t_streaming = false
         return
     end
 
+    _telemetry_report(io, st, st.t_status, st.t_bytes)
+    st.t_streaming = false
     st.inflight == :none && _resume_connection(io, st)
     return
 end
@@ -256,6 +299,10 @@ end
 
 function http_finalize(io::AbstractIO, st::HTTPConn)
     st.retired = true   # guards in-flight dispatch against the recycled state
+    if st.t_streaming && !st.t_reported
+        _telemetry_report(io, st, st.t_status, st.t_bytes)   # stream cut short
+        st.t_streaming = false
+    end
     _fail_stream!(st)
     io_close(io, st)
     io_release(io, st)
@@ -280,6 +327,7 @@ function _process(io::AbstractIO, st::HTTPConn)
             return :done
         end
         st.header_len = head_length(st.hbuf)
+        _telemetry_begin(io, st)
         _prepare_body(io, st) || return :done
         st.phase = :body
     end
@@ -496,6 +544,7 @@ function _queue_response(io::AbstractIO, st::HTTPConn, response::Response)
         http_finalize(io, st)
         return false
     end
+    _telemetry_report(io, st, response.status, nbytes)
     return true
 end
 
