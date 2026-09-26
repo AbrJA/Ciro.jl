@@ -30,16 +30,18 @@ mutable struct HTTPConn{H}
     deadline    :: Float64
     inflight    :: Symbol         # :none | :read | :write
     retired     :: Bool
+    gen         :: UInt64         # bumped on reuse; stale async replies are dropped
 end
 
 HTTPConn(handle::H) where {H} =
     HTTPConn{H}(handle, Vector{UInt8}(undef, 0), 0, 0,
                 HeaderBuffer(64), ChunkedDecoder(), Vector{UInt8}(undef, 0), 0, 0,
                 Vector{UInt8}(undef, 0), 0, Vector{UInt8}(undef, 0), 0,
-                :headers, 0, 0, false, false, 0.0, :none, false)
+                :headers, 0, 0, false, false, 0.0, :none, false, 0)
 
 """Reset every field for a new connection, reusing the allocated buffers."""
 function http_reset!(st::HTTPConn)
+    st.gen += 1
     st.rlen = 0
     st.hdr_scanned = 0
     st.chunklen = 0

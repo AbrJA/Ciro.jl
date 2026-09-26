@@ -19,8 +19,9 @@ using PicoHTTPParser: HeaderBuffer, ChunkedDecoder, decode_chunked!,
 
 export AbstractIO,
        io_config, io_running, io_read, io_acquire_buffer, io_write, io_on_write,
-       io_shutdown, io_close, io_release, io_dispatch
-export serialize_response!
+       io_shutdown, io_close, io_release, io_dispatch,
+       io_isasync, io_dispatch_async
+export serialize_response!, http_deliver_response
 
 include("config.jl")
 include("io.jl")

@@ -19,6 +19,9 @@
   `Runtime.dispatch`, so fakes can't drift from production.
 - 🪞 **Zero-copy request views**: method, target, headers, and body are views into the
   connection buffer — request construction measured at **~480 B** (was ~4 KB).
+- ⏱️ **Async executor**: slow handlers (model inference, blocking I/O) run on a bounded
+  worker pool with automatic copy-on-escape and `503` shedding — the event loop never
+  blocks.
 - 🛡️ **Strict framing & limits**: header/body/idle timeouts, size and connection caps;
   obs-fold, duplicate `Content-Length`, and CL+TE are rejected; header injection is
   impossible through `Response`.
@@ -167,6 +170,22 @@ end)
 > `body(ctx)` / `rawbody(ctx)` already return owned copies.
 > Lifetime rules: `ARCHITECTURE.md` §4.4.
 
+### ⏱️ Async Handlers — Slow Work Off the Event Loop
+
+Give the server an `AsyncExecutor` and slow handlers no longer occupy a ring
+thread. Requests are copied across the worker boundary automatically, and overload
+is shed with `503 Service Unavailable` + `Retry-After`:
+
+```julia
+server = Server(; router,
+                executor = AsyncExecutor(worker_threads=4, max_pending=256))
+start!(server; nworkers=2)
+```
+
+Run Julia with more threads than event-loop workers (e.g. `julia --threads=6` for
+`nworkers=2` + `worker_threads=4`) so handlers get real parallelism. Defaults are
+safe; tune `worker_threads`/`max_pending` to your workload.
+
 ### 🧱 Middleware Pattern (Callable Struct)
 
 ```julia
@@ -241,8 +260,9 @@ Requires [oha](https://github.com/hatoo/oha) (`cargo install oha`).
   `stop!` from another task, or SIGINT: systemd `KillSignal=SIGINT`, Docker
   `docker stop --signal=SIGINT`.
 - 🌐 HTTP/1.1 only; no TLS or HTTP/2 in the core (terminate TLS at a reverse proxy).
-- 📐 Parameterized routes still allocate a small params vector; compiled routing and the
-  async executor are on the roadmap.
+- 📐 Parameterized routes still allocate a small params vector; compiled routing and
+  streaming/SSE are on the roadmap. Async handlers hold their connection until the
+  handler returns (no mid-response streaming yet).
 
 ---
 

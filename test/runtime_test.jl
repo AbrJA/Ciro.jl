@@ -199,4 +199,131 @@ using PicoHTTPParser
             @test header(a, "Allow") == header(b, "Allow")
         end
     end
+
+    @testset "dispatch_async with a sync executor" begin
+        router = Trie()
+        get!(router, "/x", _ -> text("x"))
+        replies = Channel{Any}(1)
+        @test dispatch_async(router, SyncExecutor(), DefaultCatcher(),
+                             Request("GET", "/x"), r -> put!(replies, r)) === false
+        @test isready(replies)
+        @test take!(replies).status == 200
+    end
+
+    @testset "AsyncExecutor" begin
+        @test isasync(AsyncExecutor()) === true
+        @test isasync(SyncExecutor()) === false
+        @test_throws ArgumentError AsyncExecutor(worker_threads=0)
+        @test_throws ArgumentError AsyncExecutor(max_pending=0)
+
+        router = Trie()
+        get!(router, "/slow", _ -> text("slow"))
+        get!(router, "/boom", _ -> error("handler exploded"))
+
+        ex = AsyncExecutor(worker_threads=2, max_pending=8)
+        start_executor!(ex)
+        try
+            replies = Channel{Any}(8)
+
+            # Deferred delivery: the call returns before the response exists.
+            @test dispatch_async(router, ex, DefaultCatcher(), Request("GET", "/slow"),
+                                 r -> put!(replies, r)) === true
+            @test timedwait(() -> isready(replies), 5.0) == :ok
+            resp = take!(replies)
+            @test resp.status == 200 && String(resp.body) == "slow"
+            @test timedwait(() -> Ciro.Runtime.pending_count(ex) == 0, 5.0) == :ok
+
+            # Routing fallbacks also arrive through the callback.
+            dispatch_async(router, ex, DefaultCatcher(), Request("GET", "/missing"),
+                           r -> put!(replies, r))
+            @test take!(replies).status == 404
+            dispatch_async(router, ex, DefaultCatcher(), Request("PUT", "/slow"),
+                           r -> put!(replies, r))
+            resp = take!(replies)
+            @test resp.status == 405
+            @test contains(header(resp, "Allow"), "GET")
+
+            # Handler errors are intercepted on the worker thread.
+            dispatch_async(router, ex, DefaultCatcher(), Request("GET", "/boom"),
+                           r -> put!(replies, r))
+            resp = take!(replies)
+            @test resp.status == 500
+            @test !contains(String(resp.body), "exploded")
+
+            # copy-on-escape: the worker sees owned bytes even if the source
+            # buffer is mutated after the handler started.
+            gate = Channel{Nothing}(1)
+            entered = Channel{Nothing}(1)
+            post!(router, "/hold", ctx -> (put!(entered, nothing); take!(gate);
+                                           text(String(ctx.request.body))))
+            buf = Vector{UInt8}("hello")
+            req = Ciro.Interface.Request("POST", "/hold", "/hold", "",
+                                         Pair{String,String}[], view(buf, 1:5), UInt8(1))
+            dispatch_async(router, ex, DefaultCatcher(), req, r -> put!(replies, r))
+            @test timedwait(() -> isready(entered), 5.0) == :ok
+            take!(entered)
+            buf .= 0x00
+            put!(gate, nothing)
+            @test timedwait(() -> isready(replies), 5.0) == :ok
+            @test String(take!(replies).body) == "hello"
+        finally
+            stop_executor!(ex)
+        end
+    end
+
+    @testset "AsyncExecutor shedding" begin
+        router = Trie()
+        get!(router, "/hold", _ -> (sleep(0.5); text("held")))
+
+        ex = AsyncExecutor(worker_threads=1, max_pending=1)
+        start_executor!(ex)
+        try
+            replies = Channel{Any}(4)
+            dispatch_async(router, ex, DefaultCatcher(), Request("GET", "/hold"),
+                           r -> put!(replies, r))
+            @test Ciro.Runtime.pending_count(ex) == 1
+
+            dispatch_async(router, ex, DefaultCatcher(), Request("GET", "/hold"),
+                           r -> put!(replies, r))
+            @test timedwait(() -> isready(replies), 5.0) == :ok
+            shed = take!(replies)
+            @test shed.status == 503
+            @test header(shed, "Retry-After") == "1"
+            @test Ciro.Runtime.shed_count(ex) == 1
+
+            @test timedwait(() -> isready(replies), 5.0) == :ok
+            held = take!(replies)
+            @test held.status == 200 && String(held.body) == "held"
+        finally
+            stop_executor!(ex)
+        end
+    end
+
+    @testset "AsyncExecutor restart" begin
+        router = Trie()
+        get!(router, "/x", _ -> text("x"))
+        ex = AsyncExecutor(worker_threads=1)
+        start_executor!(ex)
+        replies = Channel{Any}(2)
+        dispatch_async(router, ex, DefaultCatcher(), Request("GET", "/x"),
+                       r -> put!(replies, r))
+        @test timedwait(() -> isready(replies), 5.0) == :ok
+        @test take!(replies).status == 200
+        stop_executor!(ex)
+
+        start_executor!(ex)
+        dispatch_async(router, ex, DefaultCatcher(), Request("GET", "/x"),
+                       r -> put!(replies, r))
+        @test timedwait(() -> isready(replies), 5.0) == :ok
+        @test take!(replies).status == 200
+        stop_executor!(ex)
+    end
+
+    @testset "AsyncExecutor requires the callback path" begin
+        router = Trie()
+        get!(router, "/x", _ -> text("x"))
+        app = Application(; router, executor=AsyncExecutor())
+        resp = dispatch(app, Request("GET", "/x"))
+        @test resp.status == 500
+    end
 end

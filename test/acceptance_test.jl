@@ -161,14 +161,16 @@ get!(router, "/hello", _ -> text("hello"))
 get!(router, "/head", _ -> text("content"))
 post!(router, "/echo", ctx -> text(body(ctx)))
 get!(router, "/inject", _ -> redirect("/x\r\nX-Injected: yes"))
+get!(router, "/slow", _ -> (sleep(0.3); text("slow")))
+get!(router, "/hold", _ -> (sleep(0.6); text("held")))
 start!(Server(; router, port=PORT EXTRA); nworkers=2)
 """
 
-function _start_server(port::Integer; extra::AbstractString="")
+function _start_server(port::Integer; extra::AbstractString="", threads::Int=2)
     project = Base.active_project()
     project === nothing && error("no active project; cannot start test server")
     src = replace(_SERVER_SRC, "PORT" => string(port), "EXTRA" => extra)
-    cmd = `$(Base.julia_cmd()) --startup-file=no --project=$project --threads=2 -e $src`
+    cmd = `$(Base.julia_cmd()) --startup-file=no --project=$project --threads=$threads -e $src`
     return run(pipeline(cmd; stdout=devnull, stderr=devnull); wait=false)
 end
 
@@ -486,6 +488,88 @@ end
                         "HTTP/1.1 400")
                 finally
                     _kill_server(sp)
+                end
+            end
+
+            @testset "async executor (both backends)" begin
+                for backend in (:uring, :sockets)
+                    async_port = port + (backend === :uring ? 4 : 5)
+                    ap = _start_server(async_port; threads=4,
+                        extra=", executor=AsyncExecutor(worker_threads=2, max_pending=8), backend=:$backend")
+                    try
+                        _wait_ready(async_port)
+
+                        # A slow handler is answered correctly, off the loop.
+                        t0 = time()
+                        resp = roundtrip(async_port,
+                            "GET /slow HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+                            timeout=10.0)
+                        @test startswith(resp, "HTTP/1.1 200")
+                        @test endswith(resp, "slow")
+                        @test time() - t0 >= 0.25
+
+                        # ... and does not block other connections.
+                        cslow = TestClient(async_port; timeout=10.0)
+                        cfast = TestClient(async_port; timeout=10.0)
+                        try
+                            _send(cslow, "GET /slow HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                            sleep(0.05)
+                            _send(cfast, "GET /hello HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                            t0 = time()
+                            fast = read_response(cfast)
+                            elapsed = time() - t0
+                            slow = read_response(cslow)
+                            @test startswith(fast, "HTTP/1.1 200") && endswith(fast, "hello")
+                            @test startswith(slow, "HTTP/1.1 200") && endswith(slow, "slow")
+                            @test elapsed < 0.25
+                        finally
+                            _close(cslow)
+                            _close(cfast)
+                        end
+
+                        # Keep-alive and pipelining after a deferred response.
+                        c = TestClient(async_port; timeout=10.0)
+                        try
+                            _send(c, "GET /slow HTTP/1.1\r\nHost: x\r\n\r\n" *
+                                     "GET /hello HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                            r1 = read_response(c)
+                            r2 = read_response(c)
+                            @test startswith(r1, "HTTP/1.1 200") && endswith(r1, "slow")
+                            @test startswith(r2, "HTTP/1.1 200") && endswith(r2, "hello")
+                        finally
+                            _close(c)
+                        end
+                    finally
+                        _kill_server(ap)
+                    end
+                end
+            end
+
+            @testset "async executor shedding (both backends)" begin
+                for backend in (:uring, :sockets)
+                    shed_port = port + (backend === :uring ? 6 : 7)
+                    sp = _start_server(shed_port; threads=4,
+                        extra=", executor=AsyncExecutor(worker_threads=1, max_pending=1), backend=:$backend")
+                    try
+                        _wait_ready(shed_port)
+                        c1 = TestClient(shed_port; timeout=10.0)
+                        c2 = TestClient(shed_port; timeout=10.0)
+                        try
+                            _send(c1, "GET /hold HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                            _send(c2, "GET /hold HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                            r1 = read_response(c1)
+                            r2 = read_response(c2)
+                            codes = sort([parse(Int, split(r, " ")[2]) for r in (r1, r2)])
+                            @test codes == [200, 503]
+                            shed_resp = startswith(r1, "HTTP/1.1 503") ? r1 : r2
+                            @test occursin("Retry-After: 1", shed_resp)
+                        finally
+                            _close(c1)
+                            _close(c2)
+                        end
+                    finally
+                        _kill_server(sp)
+                    end
                 end
             end
 

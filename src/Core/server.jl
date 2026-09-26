@@ -117,6 +117,12 @@ closed, and workers exit once every connection is released (or after
 function start!(server::Server; queue_depth::Int=4096, nworkers::Int=nthreads())
     freeze!(server.router)
     server.runtime.running[] = true
+    if isasync(server.executor) && nthreads() <= nworkers
+        log!(server.logger, Warn,
+             "async handlers share threads with $nworkers event loop(s); " *
+             "run Julia with more threads than workers (e.g. --threads=$(nworkers + 1))")
+    end
+    start_executor!(server.executor)
     log!(server.logger, Info, "Ciro starting on $(server.config.host):$(server.config.port)")
     try
         _start_workers(server, queue_depth, nworkers)
@@ -124,6 +130,7 @@ function start!(server::Server; queue_depth::Int=4096, nworkers::Int=nthreads())
         e isa InterruptException || rethrow(e)
     finally
         server.runtime.running[] = false
+        stop_executor!(server.executor)
         log!(server.logger, Info, "Ciro stopped")
     end
 end

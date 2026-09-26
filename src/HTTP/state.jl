@@ -5,6 +5,7 @@
 #   http_on_read(io, st, src, n)
 #   http_on_write(io, st, n)
 #   http_retire(io, st) / http_finalize(io, st) / http_expired(st, now)
+#   http_deliver_response(io, st, response)   # async executors only
 #
 # The machine only touches the outside world through `io_*` methods; it has no
 # knowledge of fds, rings, or pools.
@@ -90,6 +91,30 @@ function http_on_write(io::AbstractIO, st::HTTPConn, n::Int)
     return
 end
 
+# ── Response delivery ───────────────────────────────────────────────────────
+
+"""
+    http_deliver_response(io, st, response)
+
+Deliver the response for a request dispatched through `io_dispatch_async`.
+Adapters call this on the event-loop thread once an asynchronous executor
+reports back; it is a no-op when the connection was retired in the meantime.
+"""
+function http_deliver_response(io::AbstractIO, st::HTTPConn, response::Response)
+    st.retired && return
+    st.close_after && set_connection_close!(response.headers)
+    st.phase = :writing
+    _queue_response(io, st, response)
+    return
+end
+
+# Default async dispatch: backends without deferred execution answer inline.
+# Async backends override this; see `AbstractIO` in io.jl.
+function io_dispatch_async(io::AbstractIO, st::HTTPConn, req::Request)::Bool
+    http_deliver_response(io, st, io_dispatch(io, req))
+    return false
+end
+
 """Close immediately if idle; otherwise shut the socket down (which wakes the
 in-flight operation and FINs the peer) and wait for the completion before
 recycling the connection state."""
@@ -104,6 +129,7 @@ function http_retire(io::AbstractIO, st::HTTPConn)
 end
 
 function http_finalize(io::AbstractIO, st::HTTPConn)
+    st.retired = true   # guards in-flight dispatch against the recycled state
     io_close(io, st)
     io_release(io, st)
     return
@@ -267,9 +293,17 @@ end
 
 function _complete_request(io::AbstractIO, st::HTTPConn)
     req = _build_request(st)
-    response = io_dispatch(io, req)
-    close_after = wants_close(req)
-    close_after && set_connection_close!(response.headers)
+    st.close_after = wants_close(req)
+
+    # An async executor retains the request past this call, and the views die
+    # at the next buffer advance: hand it an owned copy (copy-on-escape).
+    io_isasync(io) && (req = copy(req))
+
+    # Dispatch while the request views are still valid; a synchronous backend
+    # serializes the response here, an asynchronous one only queues the job.
+    st.phase = :writing
+    deferred = io_dispatch_async(io, st, req)
+    st.retired && return   # a failed synchronous write may have finalized us
 
     if st.chunked
         # The head was materialized above; now make the stream start with the
@@ -292,10 +326,13 @@ function _complete_request(io::AbstractIO, st::HTTPConn)
     st.header_len = 0
     st.body_need = 0
     st.chunked = false
-    st.close_after = close_after
-    st.phase = :writing
 
-    _queue_response(io, st, response)
+    if deferred
+        # Deferred: no read is armed and the phase deadline is disabled until
+        # the executor reports back through `http_deliver_response`.
+        st.phase = :awaiting
+        st.deadline = 0.0
+    end
     return
 end
 

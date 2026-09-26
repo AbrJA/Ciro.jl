@@ -117,7 +117,16 @@ function execute! end
 @inline execute!(::SyncExecutor, endpoint, context::RequestContext) =
     endpoint(context)
 
-export AbstractExecutor, SyncExecutor, execute!
+"Whether `execute!` may complete after the dispatch call returns."
+isasync(::AbstractExecutor)::Bool = false
+
+"Start executor-owned workers (no-op for synchronous executors)."
+start_executor!(::AbstractExecutor) = nothing
+
+"Stop executor-owned workers (no-op for synchronous executors)."
+stop_executor!(::AbstractExecutor) = nothing
+
+export AbstractExecutor, SyncExecutor, execute!, isasync, start_executor!, stop_executor!
 
 """
     stop!(component)

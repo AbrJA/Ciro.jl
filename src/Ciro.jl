@@ -57,7 +57,8 @@ export Server, start!, stop!
 
 # Extension points (abstract types + functions)
 export AbstractRouter, AbstractLogger, AbstractCatcher, AbstractBackend
-export AbstractExecutor, SyncExecutor, execute!
+export AbstractExecutor, SyncExecutor, AsyncExecutor, execute!
+export isasync, start_executor!, stop_executor!
 export IOUringBackend
 export NullLogger, DefaultCatcher
 export Severity, Debug, Info, Warn, Error, Fatal
@@ -65,7 +66,7 @@ export log!, intercept, start_backend!, stop_backend!
 
 # Runtime (transport-independent)
 export Application, AbstractTransport, TransportToken, FakeTransport
-export dispatch, handle, run_once!, serve!, enqueue!, response_for
+export dispatch, dispatch_async, handle, run_once!, serve!, enqueue!, response_for
 export send_response!, close!, transport_state
 
 # ── Precompilation ──────────────────────────────────────────────────────────

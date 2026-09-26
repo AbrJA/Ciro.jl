@@ -12,6 +12,7 @@ mutable struct SocketsEntry
     sock     :: Sockets.TCPSocket
     wrote    :: Int          # bytes of the last response written synchronously
     released :: Bool
+    reply    :: Channel{Response}  # async executor replies; closed to wake the task
 end
 
 mutable struct SocketsIO{S <: Server} <: AbstractIO
@@ -70,6 +71,7 @@ function _sockets_close(io::SocketsIO, st::HTTPConn)
     entry = get(io.entries, objectid(st.handle), nothing)
     entry === nothing && return
     isopen(entry.sock) && close(entry.sock)
+    isopen(entry.reply) && close(entry.reply)   # wake a task waiting for a reply
     return
 end
 
@@ -89,21 +91,44 @@ end
 io_dispatch(io::SocketsIO, req::Request)::Response =
     dispatch(io.server.router, io.server.executor, io.server.catcher, req)
 
+io_isasync(io::SocketsIO)::Bool = isasync(io.server.executor)
+
+"""Async handlers reply from another thread through the connection's channel;
+only this connection task touches `st`, so no state is shared."""
+function io_dispatch_async(io::SocketsIO, st::HTTPConn, req::Request)::Bool
+    if isasync(io.server.executor)
+        entry = io.entries[objectid(st.handle)]
+        dispatch_async(io.server.router, io.server.executor, io.server.catcher,
+                       req, r -> put!(entry.reply, r))
+        return true
+    end
+    http_deliver_response(io, st, io_dispatch(io, req))
+    return false
+end
+
 # ── Per-connection task ─────────────────────────────────────────────────────
 
 function _sockets_connection(io::SocketsIO, st::HTTPConn, entry::SocketsEntry)
     id = objectid(st.handle)
     try
         while !st.retired && io.server.runtime.running[]
-            data = try
-                readavailable(entry.sock)
-            catch
-                break
-            end
-            isempty(data) && break
+            if st.phase != :awaiting
+                data = try
+                    readavailable(entry.sock)
+                catch
+                    break
+                end
+                isempty(data) && break
 
-            st.inflight = :none
-            http_on_read(io, st, pointer(data), length(data))
+                st.inflight = :none
+                http_on_read(io, st, pointer(data), length(data))
+            end
+
+            # A handler may run on a worker thread; wait for its reply before
+            # touching this connection's state again.
+            if st.phase == :awaiting && !st.retired
+                http_deliver_response(io, st, take!(entry.reply))
+            end
 
             # Drain synchronous write completions, including pipelined responses.
             while entry.wrote > 0 && !st.retired
@@ -146,7 +171,7 @@ function _sockets_accept_loop(io::SocketsIO)
         st.inflight = :read
 
         id = objectid(sock)
-        entry = SocketsEntry(sock, 0, false)
+        entry = SocketsEntry(sock, 0, false, Channel{Response}(1))
         io.states[id] = st
         io.entries[id] = entry
         @async _sockets_connection(io, st, entry)
@@ -167,16 +192,19 @@ function _sockets_drain_loop(io::SocketsIO)
 
     isopen(io.listener) && close(io.listener)
     io.stop_time = time()
-    for (_, st) in collect(io.states)
-        st.retired || http_retire(io, st)
-    end
-
     deadline = io.stop_time + io.server.config.shutdown_timeout
+
+    # Retire everything except handlers still running on an async executor;
+    # those get until the deadline to report back.
     while !isempty(io.states) && time() < deadline
+        for (_, st) in collect(io.states)
+            (st.retired || st.phase == :awaiting) && continue
+            http_retire(io, st)
+        end
         sleep(0.05)
     end
     for (_, st) in collect(io.states)
-        http_finalize(io, st)
+        st.retired || http_finalize(io, st)
     end
     return
 end

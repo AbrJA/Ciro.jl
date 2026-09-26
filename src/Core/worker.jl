@@ -40,6 +40,7 @@ mutable struct UringIO{S <: Server} <: AbstractIO
     free      :: Vector{HTTPConn{Connection}}
     last_sweep:: Float64
     stop_time :: Float64
+    replies   :: Channel{Tuple{HTTPConn{Connection},UInt64,Response}}
 end
 
 function UringIO(server::S, engine::Engine) where {S <: Server}
@@ -49,7 +50,8 @@ function UringIO(server::S, engine::Engine) where {S <: Server}
     return UringIO{S}(server, engine, ConnectionPool(), BufferPool(), cfg,
                       Dict{Ptr{Cvoid}, HTTPConn{Connection}}(),
                       Dict{Ptr{Cvoid}, ConnEntry}(),
-                      HTTPConn{Connection}[], 0.0, 0.0)
+                      HTTPConn{Connection}[], 0.0, 0.0,
+                      Channel{Tuple{HTTPConn{Connection},UInt64,Response}}(Inf))
 end
 
 # ── AbstractIO implementation ───────────────────────────────────────────────
@@ -130,6 +132,22 @@ end
 
 function io_dispatch(io::UringIO, req::Request)::Response
     return dispatch(io.server.router, io.server.executor, io.server.catcher, req)
+end
+
+io_isasync(io::UringIO)::Bool = isasync(io.server.executor)
+
+"""Async handlers run away from this thread; their replies are posted to
+`io.replies` and delivered from `_worker_tick!` (generation-checked, so a
+reply for a recycled connection is dropped)."""
+function io_dispatch_async(io::UringIO, st::HTTPConn, req::Request)::Bool
+    if isasync(io.server.executor)
+        gen = st.gen
+        dispatch_async(io.server.router, io.server.executor, io.server.catcher,
+                       req, r -> put!(io.replies, (st, gen, r)))
+        return true
+    end
+    http_deliver_response(io, st, io_dispatch(io, req))
+    return false
 end
 
 function _shrink_buffers!(st::HTTPConn)
@@ -241,8 +259,9 @@ end
 
 # ── Tick: drain and deadline sweep ──────────────────────────────────────────
 
-"""Connection draining and deadline sweep, once per tick."""
+"""Reply delivery, connection draining and deadline sweep, once per tick."""
 function _worker_tick!(io::UringIO)
+    _drain_replies!(io)
     if !io.server.runtime.running[]
         io.stop_time == 0.0 && (io.stop_time = time())
         _drain_connections!(io)
@@ -251,14 +270,25 @@ function _worker_tick!(io::UringIO)
     return
 end
 
+"""Deliver responses produced by async executors on the event-loop thread."""
+function _drain_replies!(io::UringIO)
+    while isready(io.replies)
+        st, gen, response = take!(io.replies)
+        get(io.states, st.handle.ptr, nothing) === st || continue
+        st.gen == gen || continue
+        http_deliver_response(io, st, response)
+    end
+    return
+end
+
 """Close connections during shutdown so the worker can exit: in-flight writes
-are allowed to flush, everything else is retired. After `shutdown_timeout`
-even pending writes are dropped."""
+and in-flight async handlers are allowed to finish, everything else is
+retired. After `shutdown_timeout` even those are dropped."""
 function _drain_connections!(io::UringIO)
     forced = time() - io.stop_time > io.server.config.shutdown_timeout
     for st in collect(values(io.states))
         st.retired && continue
-        (forced || st.inflight != :write) && http_retire(io, st)
+        (forced || (st.inflight != :write && st.phase != :awaiting)) && http_retire(io, st)
     end
     return
 end

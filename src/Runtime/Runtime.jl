@@ -10,12 +10,15 @@ using ..Interface
 using ..Interface: Request, RequestContext, Response, Endpoint, RouteResult,
                    matched, not_found, method_not_allowed, Methods, text, fail,
                    route, register!, freeze!, execute!, log!, intercept
-import ..Interface: stop!
+import ..Interface: stop!, execute!, isasync, start_executor!, stop_executor!
 import PicoHTTPParser
 
 export AbstractTransport, TransportToken, Application, FakeTransport,
-       handle, dispatch, run_once!, serve!, enqueue!, response_for,
+       handle, dispatch, dispatch_async, run_once!, serve!, enqueue!, response_for,
        send_response!, close!, transport_state, start_transport!, stop_transport!
+export AsyncExecutor, shed_count, pending_count
+
+include("executor.jl")
 
 # ── Transport contract ─────────────────────────────────────────────────────
 
@@ -127,6 +130,50 @@ dispatch(app::Application, request::PicoHTTPParser.Request)::Response =
     dispatch(app, Request(request))
 
 handle(app::Application, request) = dispatch(app, request)
+
+"""
+    dispatch_async(router, executor, catcher, request, reply) -> Bool
+
+Callback pipeline used by I/O backends. When `executor` is synchronous this is
+[`dispatch`](@ref) followed by `reply(response)`, and returns `false`. When the
+executor is asynchronous the request is copied (its views must not escape the
+event-loop thread), submitted to the executor, and `true` is returned; `reply`
+is then invoked later, possibly from another thread. `reply` is called exactly
+once either way.
+"""
+function dispatch_async(router::AbstractRouter, executor::AbstractExecutor,
+                        catcher::AbstractCatcher, request::Request, reply)::Bool
+    if !isasync(executor)
+        reply(dispatch(router, executor, catcher, request))
+        return false
+    end
+
+    method = Methods.from_string(request.method)
+    result = route(router, method, request.path)
+
+    if not_found(result)
+        reply(fail(404, "Not Found"))
+        return true
+    end
+
+    if method_not_allowed(result)
+        allow_str = Methods.allow_header(result.allowed)
+        reply(Response(405, ["Allow" => allow_str, "Content-Type" => "text/plain"],
+                       "Method Not Allowed"))
+        return true
+    end
+
+    # Copy-on-escape: the request's views die when the connection buffer is
+    # advanced, which the caller does right after this function returns.
+    ctx = copy(RequestContext(request, result.params))
+    _submit_async!(executor, catcher, result.handler, ctx, reply)
+    return true
+end
+
+dispatch_async(router::AbstractRouter, executor::AbstractExecutor,
+               catcher::AbstractCatcher, request::PicoHTTPParser.Request,
+               reply)::Bool =
+    dispatch_async(router, executor, catcher, Request(request), reply)
 
 @noinline function _invoke(executor::AbstractExecutor, catcher::AbstractCatcher,
                            endpoint, ctx::RequestContext)::Response

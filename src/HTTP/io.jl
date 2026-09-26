@@ -35,6 +35,16 @@ Required methods:
 Optional capabilities (multishot accept, provided buffers, batching) are
 reported through separate predicates, never required methods, so a plain
 blocking-socket backend can satisfy the contract.
+
+Asynchronous dispatch is opt-in through two defaulted methods:
+
+- `io_isasync(io) -> Bool` — whether `io_dispatch_async` may return before the
+  response exists (default `false`).
+- `io_dispatch_async(io, st, request) -> Bool` — dispatch and arrange delivery
+  through [`http_deliver_response`](@ref). Returns `true` when delivery is
+  deferred. The default runs `io_dispatch` inline and delivers immediately.
+  A backend that returns `true` must call `http_deliver_response` on its
+  event-loop thread; the connection sits in the `:awaiting` phase until then.
 """
 abstract type AbstractIO end
 
@@ -48,3 +58,8 @@ function io_shutdown end
 function io_close end
 function io_release end
 function io_dispatch end
+function io_isasync end
+function io_dispatch_async end
+
+"Backends without deferred dispatch are synchronous."
+io_isasync(::AbstractIO)::Bool = false

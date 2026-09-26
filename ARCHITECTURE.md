@@ -169,7 +169,7 @@ Everything in §3.3 is implemented, plus the `HTTP`/`Backend` extraction:
 
 - Incremental parsing, pipelining, chunked bodies, limits/timeouts, and framing
   defenses (obs-fold, duplicate CL, CL+TE) all have wire coverage, as does
-  header-injection validation (acceptance suite: 51 tests).
+  header-injection validation (acceptance suite: 70 tests).
 - Module graph is the §4.1 target:
   `Interface → Router → Runtime → HTTP → Backend (UringIO | SocketsIO) → Core`.
 - `AbstractIO` byte seam (read/write/completion/shutdown/close/buffer/config) has two
@@ -180,11 +180,22 @@ Everything in §3.3 is implemented, plus the `HTTP`/`Backend` extraction:
   `copy(req)`/`copy(ctx)` is the documented retention escape hatch.
 - `ServerConfig`/`ServerRuntime` split; one `stop!`; one dispatch pipeline shared with
   `Application` (parity-tested); `stop!`/SIGINT drain gracefully.
-- Gates: `Pkg.test()` → 668 passed, 0 failed; acceptance 51/51, also under
+- **Async executor (v1.5)**: `AsyncExecutor(worker_threads, max_pending)` runs handlers
+  on a bounded worker pool, so model inference cannot block a ring thread.
+  `io_isasync`/`io_dispatch_async` extend `AbstractIO`; the deferred path copies the
+  request before crossing the boundary (`copy-on-escape`), a per-connection generation
+  drops replies for recycled connections, and `http_deliver_response` runs on the
+  event-loop thread (UringIO drains a reply inbox in `on_tick`; SocketsIO uses one
+  reply channel per connection task). Overload is shed with `503` + `Retry-After`;
+  shutdown lets in-flight handlers finish until `shutdown_timeout`. Worker tasks run
+  user code via `invokelatest` so handlers registered across `start!` cycles are
+  visible (world-age safety); `run_eventloop!` submits after `on_tick`, so replies
+  queued from worker threads are flushed even when no completion arrives.
+- Gates: `Pkg.test()` → 722 passed, 0 failed; acceptance 70/70, also under
   `--check-bounds=yes`.
 
 Still open: params allocation on parameterized routes, compiled routing, `@inferred`
-guards, async executor, streaming (see §4.2 and §9).
+guards, streaming/SSE (see §4.2 and §9).
 
 ---
 
@@ -322,7 +333,7 @@ don't have to read this whole document to add a router or a backend.
 | `AbstractCatcher` | **implemented** | `intercept(catcher, err::Exception, req) -> Response` | Must never leak internals by default (`DefaultCatcher` returns a generic 500). |
 | `AbstractBackend` | **implemented, minimal** | `start_backend!(backend, handler_factory, port; kwargs...)`, `stop_backend!(backend)` | Today this is really "how to boot an io_uring engine," not a byte-level seam — see `AbstractIO` below, which will absorb the real per-connection contract. |
 | `AbstractIO` (byte-transport seam) | **target, §4.2** | `accept_loop_started`, `on_connect`, `read`, `write`, `shutdown`, `close`, `timer` | This is the seam a second backend (Sockets, Reseau, ...) implements. Not to be confused with `AbstractBackend` above, which is the boot-time contract — naming these two consistently is an open decision (see §7). |
-| `AbstractExecutor` | **target, v1.5** | `run(executor, handler, ctx) -> Response` (or scheduled equivalent) | For the async executor that moves slow handlers (model inference) off the ring thread. Contract must define: request is copied before crossing the boundary, connection is owned by the async task until the response is queued, abandoned work → 503 + `Retry-After`. |
+| `AbstractExecutor` | **implemented** | `execute!(executor, endpoint, ctx) -> Response` (`SyncExecutor`); `isasync`, `start_executor!`, `stop_executor!`, and the `Runtime.dispatch_async(..., reply)` path (`AsyncExecutor`) | Moves slow handlers (model inference) off the ring thread. Contract: the request is copied before crossing the boundary; `reply` is called exactly once, possibly from another thread; the adapter marshals it back to its event-loop thread; excess queued/running work → 503 + `Retry-After`. |
 
 **Rule for every trait above:** it is documented with its full required-method list in
 one place (this table), and a change to that list is proposed as an ADR, not a silent
@@ -412,7 +423,10 @@ Questions I'd most like a maintainer decision on:
   a corresponding test name cited, and CI should fail if a doc section referencing a
   test file's line count goes stale (a cheap grep-based check is enough to start).
 - **Latency of synchronous handlers** under slow inference: sync v1 blocks a ring
-  thread. Mitigation: async executor (§5, `AbstractExecutor`), v1.5.
+  thread. Mitigation: `AsyncExecutor` (v1.5, implemented) copies the request and runs
+  the handler on a bounded worker pool. A hung handler still holds its own connection
+  (and `stop_executor!` does not join hung workers); bounded by `shutdown_timeout`
+  for connections, documented in `Server.start!`.
 - **io_uring availability** (seccomp, old kernels, containers): mitigated by the
   portable Sockets fallback (§4.5) and fail-fast error messages (already partly done
   via the `_LIB` file-existence check in `Backend.jl`).
@@ -434,8 +448,8 @@ Questions I'd most like a maintainer decision on:
 | 3 (partial) ✅ | Zero-copy `Request` views, lazy `Headers`, copy-free routing, `copy(ctx)` escape hatch, allocation budget (~480 B). Pending: params allocation, compiled routing, `@inferred` guards. |
 | 3.5 | Per-route limits, access log/metrics. |
 | 4 | JLL packaging for the native lib, docs build, CI matrix. |
-| v1.5 | Async executor (bounded, 503 shedding) → then streaming/SSE, reusing the executor's request-ownership boundary. |
-| v2 | Sockets backend first (proves the seam), then Reseau/native alternatives only if benchmarks demand them. |
+| v1.5 (partial) ✅ | Async executor (bounded, 503 shedding, copy-on-escape, both backends). Pending: streaming/SSE, reusing the executor's request-ownership boundary. |
+| v2 | Sockets backend ✅ (proves the seam), then Reseau/native alternatives only if benchmarks demand them. |
 
 Rationale: every stage must leave the test suite green and must not require moving
 code a later stage adds. The one deliberate reordering versus the previous document is

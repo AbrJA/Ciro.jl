@@ -9,11 +9,38 @@ See `docs/DESIGN_LESSONS.md` for the engineering standards and
 ## RESUME — next session
 
 State at pause:
-- `feat/stage0-safety-net`: Stage 0 (`4b9d9a0`), Stage 1 (`b0a1996`), parser `0.3`
-  alignment (`58afad7`), and Stage 2 (this commit) all done. `Pkg.test()` →
-  **643 passed, 0 failed**; acceptance 36/36; PicoHTTPParser `0.3.0` resolves from
-  General.
-- Uncommitted: nothing (this section describes the committed state).
+- `dev`: Stages 0–2.5 and Stage 3a/3b committed. `Pkg.test()` → **722 passed,
+  0 failed**; acceptance 70/70 (both backends, including 20 async wire assertions);
+  PicoHTTPParser `0.3.0` resolves from General.
+- Uncommitted (this session): v1.5 async executor — `Runtime/executor.jl`,
+  `dispatch_async`, the `:awaiting` HTTP phase, both adapters, server lifecycle,
+  and tests.
+
+### v1.5 — Async executor (uncommitted, this session)
+- `AsyncExecutor(worker_threads=2, max_pending=256)`: unbounded job `Channel` gated
+  by an atomic `pending` counter, `503` + `Retry-After: 1` on overload, `shed_count`/
+  `pending_count` for metrics/tests. `stop_executor!` does not join hung workers
+  (a hung handler must not wedge shutdown).
+- `Runtime.dispatch_async(router, executor, catcher, request, reply)::Bool`: one
+  routing path for both executors; sync replies inline (`false`), async copies the
+  request (copy-on-escape), submits, replies later (`true`); `reply` is called
+  exactly once either way.
+- HTTP seam: optional `io_isasync`/`io_dispatch_async` (default methods preserve the
+  sync contract for third-party adapters), new `:awaiting` phase (no read armed, no
+  deadline), and `http_deliver_response` as the single delivery entry point
+  (`http_finalize` now sets `retired` so a released state can't be mutated again).
+- Adapters: UringIO delivers via a generation-checked reply inbox drained in
+  `on_tick`; SocketsIO uses one reply channel per connection, consumed by the
+  connection task (`_sockets_close` closes it to wake a waiter). Shutdown lets
+  `:awaiting` connections finish, then forces at `shutdown_timeout`.
+- Server: `start_executor!`/`stop_executor!` around the worker loops; warns when
+  `nthreads() <= nworkers` because handlers then share event-loop threads.
+- Event-loop fix: `run_eventloop!` submits after `on_tick`; without it, writes queued
+  by reply delivery were never flushed when no completion arrived.
+
+### Next
+- Streaming/SSE on top of the async ownership boundary; routing params allocation;
+  compiled routing; `@inferred` guards; push `dev` and open the master PR for CI.
 
 ### Stage 2 — DONE (one pipeline, graceful shutdown)
 - Single dispatch pipeline: `Runtime.dispatch(router, executor, catcher, request)` is
@@ -61,8 +88,8 @@ State at pause:
 - Wire tests for chunked transfer-encoding (decoder fixed, no HTTP-level coverage yet).
 - Per-route body limits; `Expect: 100-continue`; early 413 without RST mid-upload.
 - Access logging + metrics (count exceptions as 5xx too). `max_connections` currently
-  sheds by closing silently; consider 503 + `Retry-After`.
-- Async executor (v1.5): bounded queue, 503 shedding, request-copy semantics.
+  sheds by closing silently; consider 503 + `Retry-After` (the async executor already
+  uses 503 shedding).
 - SSE/streaming responses (v1.5 architecture) and static files (dotfile denial,
   traversal matrix).
 - Packaging: JLL artifact, untrack `lib/ciro.so`, docs build, Linux-only CI matrix.
@@ -79,6 +106,12 @@ State at pause:
   pointers.
 - fd-indexed state (`PendingWrites.close_after`) must be reset whenever an fd is reused.
 - `make -C lib` check-deps needed `_GNU_SOURCE` for `SO_REUSEPORT` with modern glibc.
+- `Threads.@spawn` tasks are pinned to the world age at spawn. Long-lived workers
+  (and anything else that outlives `start!`) must run user code with
+  `Base.invokelatest`, or closures/methods defined later fail with a MethodError
+  that can be swallowed by the worker's error path.
+- Queuing I/O from `on_tick` requires a `submit!` after the tick; otherwise SQEs sit
+  unsubmitted until the next unrelated completion.
 
 ### Resume commands
 ```sh
