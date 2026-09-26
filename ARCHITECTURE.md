@@ -4,10 +4,11 @@
 > documents: the previously circulated `ARCHITECTURE.md`, and
 > `docs/ARCHITECTURE_FEASIBILITY.md` + `docs/IMPLEMENTATION_PLAN.md`. Those described
 > either aspirational features not present in code, or a multi-package ecosystem this
-> project is not adopting (see §2). Everything in **§3 ("Today")** was verified against
-> `src/` on `feat/refactor` at the time of writing. Everything in **§4 ("Target")** is
-> proposed and open for review. If this document and the code disagree, the code is
-> right and this document is stale — file an issue.
+> project is not adopting (see §2). **§3** was verified against `src/` on
+> `feat/refactor` and is kept as the historical baseline; **§3.4** records the current
+> `dev` status. Everything in **§4 ("Target")** is proposed and open for review. If this
+> document and the code disagree, the code is right and this document is stale — file an
+> issue.
 >
 > Audience: maintainers and contributors. Update this doc in the same PR that changes
 > an invariant it documents.
@@ -162,6 +163,29 @@ build on sand. **§4.2 makes closing this gap the literal first item of Stage 2.
 ahead of any new feature work, including ahead of the `HTTP`/`Backend` extraction if
 the two end up competing for time.
 
+### 3.4 Current status on `dev` (supersedes §3.1–3.3)
+
+Everything in §3.3 is implemented, plus the `HTTP`/`Backend` extraction:
+
+- Incremental parsing, pipelining, chunked bodies, limits/timeouts, and framing
+  defenses (obs-fold, duplicate CL, CL+TE) all have wire coverage, as does
+  header-injection validation (acceptance suite: 51 tests).
+- Module graph is the §4.1 target:
+  `Interface → Router → Runtime → HTTP → Backend (UringIO | SocketsIO) → Core`.
+- `AbstractIO` byte seam (read/write/completion/shutdown/close/buffer/config) has two
+  implementations, and the portable Sockets backend passes the same wire suite — the
+  seam is proven, not just documented.
+- Zero-copy request views: `Headers` is a lazy view, routing does not copy the path,
+  and `_build_request` allocates ~480 B (from ~4 KB) under an allocation-budget test.
+  `copy(req)`/`copy(ctx)` is the documented retention escape hatch.
+- `ServerConfig`/`ServerRuntime` split; one `stop!`; one dispatch pipeline shared with
+  `Application` (parity-tested); `stop!`/SIGINT drain gracefully.
+- Gates: `Pkg.test()` → 668 passed, 0 failed; acceptance 51/51, also under
+  `--check-bounds=yes`.
+
+Still open: params allocation on parameterized routes, compiled routing, `@inferred`
+guards, async executor, streaming (see §4.2 and §9).
+
 ---
 
 ## 4. Target architecture (proposed, open for review)
@@ -199,12 +223,9 @@ frame" that isn't tangled with `queue_write!`/`ConnectionPool` calls.
 
 ### 4.2 Stage 2.5 — in priority order
 
-1. **Close the gap in §3.3 inside the current fused code first**, with wire-level
-   regression tests for each: header/body/idle timeouts, CL/TE conflict rejection,
-   obs-fold rejection, response header-injection validation at `Response`
-   construction. Doing this *before* the `HTTP` extraction means the extraction has a
-   correctness baseline to preserve, rather than extracting a module and discovering
-   mid-refactor that the invariants it's supposed to encode were never true.
+1. **Close the gap in §3.3 inside the current fused code first** — **done** (§3.4):
+   wire-level tests exist for timeouts, CL/TE conflict, obs-fold, and header-injection
+   validation, so the `HTTP` extraction had a correctness baseline to preserve.
 2. **Extract `HTTP`** with the write contract below, moving the now-hardened framing
    logic wholesale.
 3. **Freeze the byte-transport seam** (`AbstractIO` — read/write/shutdown/timer
@@ -409,8 +430,8 @@ Questions I'd most like a maintainer decision on:
 | Stage | Content |
 |---|---|
 | 0–2 ✅ | Parametric server, trie router, fused worker loop, connection/buffer pooling, thread-per-core event loop — verified in §3. |
-| **2.5** | Close the §3.3 gap (timeouts, framing defenses, header-injection validation) with wire tests **first**, then extract `HTTP` from `worker.jl`, freeze the `AbstractIO` byte seam, split config from runtime state. |
-| 3 | Zero-copy `Request` (views + copy-on-escape), remove remaining `Any` (A1/A2), allocation budgets. |
+| **2.5** ✅ | Closed the §3.3 gap with wire tests, extracted `HTTP` from `worker.jl`, froze the `AbstractIO` seam, added the portable Sockets adapter, split config from runtime state. |
+| 3 (partial) ✅ | Zero-copy `Request` views, lazy `Headers`, copy-free routing, `copy(ctx)` escape hatch, allocation budget (~480 B). Pending: params allocation, compiled routing, `@inferred` guards. |
 | 3.5 | Per-route limits, access log/metrics. |
 | 4 | JLL packaging for the native lib, docs build, CI matrix. |
 | v1.5 | Async executor (bounded, 503 shedding) → then streaming/SSE, reusing the executor's request-ownership boundary. |

@@ -46,14 +46,16 @@ State at pause:
   hazards are gone.
 - Gates at each commit: acceptance 51/51; `Pkg.test()` -> 658 passed, 0 failed.
 
-### Stage 3 — performance and type stability
-- Zero-copy `Request`: views over `rbuf`, `copy` only when a handler lets them escape;
-  lazy query/body parsing. Removes the ~3 KB/request materialization.
-- Remove `Any` from routing (`RouteResult.handler`, `TrieNode.handlers`/`wildcard`);
-  add `@inferred` + allocation-budget tests to CI.
-- Optional: compiled dispatch table after `freeze!`, pinned equal to the generic path by
-  a parity matrix.
-- Idle memory: smaller/streamed read buffers; provided-buffer rings (kernel 5.19+/6.0).
+### Stage 3 — PARTIAL (3a/3b done; routing/params pending)
+- [x] Zero-copy request views: method/target/path/query/headers/body as views, lazy
+  `Headers`, copy-free routing. Request construction measured 4088 B -> 480 B, guarded
+  by an allocation-budget test.
+- [x] `copy(req)`/`copy(ctx)` escape hatch, documented (retention rule) and tested.
+- [ ] Routing `Any`/params: parametric `RouteResult{H}` alone does not remove the trie's
+  dynamic dispatch; the real win is a reusable params scratch threaded through
+  `Runtime.dispatch` (or a compiled dispatch table at `freeze!` with a parity matrix).
+- [ ] `@inferred` guards and tighter budgets in CI; idle memory (smaller/streamed read
+  buffers, provided-buffer rings).
 
 ### Backlog (order TBD)
 - Wire tests for chunked transfer-encoding (decoder fixed, no HTTP-level coverage yet).
