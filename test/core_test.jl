@@ -474,7 +474,7 @@ using PicoHTTPParser
         st.header_len = Ciro.HTTP.head_length(st.hbuf)
 
         Ciro.HTTP._build_request(st)   # warmup
-        @test (@allocated Ciro.HTTP._build_request(st)) < 1500
+        @test (@allocated Ciro.HTTP._build_request(st)) < 800
 
         req = Ciro.HTTP._build_request(st)
         @test req.path == "/users/42"

@@ -306,11 +306,7 @@ function _build_request(st::HTTPConn)
     target = request_target(hb, buf)
     path, query = Interface._split_target(target)
 
-    n = length(hb)
-    headers = Vector{Pair{typeof(method),typeof(method)}}(undef, n)
-    for i in 1:n
-        headers[i] = header_name(hb, i, buf) => header_value(hb, i, buf)
-    end
+    headers = Headers(hb, buf, length(hb))
 
     body = if st.chunked
         view(st.body, 1:st.bodylen)

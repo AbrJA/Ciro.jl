@@ -216,18 +216,17 @@ export group!
 # ══════════════════════════════════════════════════════════════════════════════
 
 function Interface.route(trie::Trie, method::UInt8, path::AbstractString)::RouteResult
-    path_str = String(path)
-    len = sizeof(path_str)
+    len = ncodeunits(path)
     captured = Pair{Symbol,String}[]
 
-    handler = _match_path(trie.root, path_str, 1, len, method, captured)
+    handler = _match_path(trie.root, path, 1, len, method, captured)
 
     if handler !== nothing
         return RouteResult(handler, captured)
     end
 
     # No handler found — check if path exists with other methods (→ 405)
-    allowed_mask = _find_allowed_path(trie.root, path_str, 1, len)
+    allowed_mask = _find_allowed_path(trie.root, path, 1, len)
     if allowed_mask != 0x00
         return RouteResult(allowed_mask)
     end
@@ -240,7 +239,7 @@ end
 # Internal: Zero-alloc Trie Matching (inline segment iteration)
 # ══════════════════════════════════════════════════════════════════════════════
 
-function _match_path(node::TrieNode, path::String, pos::Int, len::Int,
+function _match_path(node::TrieNode, path::AbstractString, pos::Int, len::Int,
                      method::UInt8, captured::Vector{Pair{Symbol,String}})
     # Skip leading slashes
     while pos <= len && @inbounds(codeunit(path, pos)) == UInt8('/')
@@ -288,7 +287,7 @@ function _match_path(node::TrieNode, path::String, pos::Int, len::Int,
 end
 
 """Build a bitmask of all methods registered for a path (for 405 Allow header)."""
-function _find_allowed_path(node::TrieNode, path::String, pos::Int, len::Int)::UInt8
+function _find_allowed_path(node::TrieNode, path::AbstractString, pos::Int, len::Int)::UInt8
     # Skip leading slashes
     while pos <= len && @inbounds(codeunit(path, pos)) == UInt8('/')
         pos += 1

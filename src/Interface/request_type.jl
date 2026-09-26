@@ -10,6 +10,33 @@ using StringViews: StringView
 const BufferView = StringView{SubArray{UInt8,1,Vector{UInt8},Tuple{UnitRange{Int}},true}}
 
 """
+    Headers{H,B}
+
+Lazy view of a parsed field section: `length`, iteration and indexing yield
+`name => value` pairs of views into the connection buffer, without
+materializing the list. Valid while the request is being handled (synchronous
+dispatch); `collect(req.headers)` retains an owned copy.
+"""
+struct Headers{H,B}
+    hbuf :: H
+    buf  :: B
+    n    :: Int
+end
+
+Base.length(h::Headers)::Int = h.n
+Base.isempty(h::Headers)::Bool = h.n == 0
+
+@inline function Base.getindex(h::Headers, i::Integer)::Pair{BufferView,BufferView}
+    return PicoHTTPParser.header_name(h.hbuf, i, h.buf) =>
+           PicoHTTPParser.header_value(h.hbuf, i, h.buf)
+end
+
+function Base.iterate(h::Headers, state::Int=1)
+    state > h.n && return nothing
+    return (h[state], state + 1)
+end
+
+"""
     Request{M,T,P,Q,H,B}
 
 A parsed request. Fields are abstract-string/vector-like so the same type

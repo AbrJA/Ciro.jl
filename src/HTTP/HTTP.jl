@@ -11,7 +11,7 @@ using Dates: DateFormat, format, unix2datetime
 import PicoHTTPParser
 import ..Interface
 using ..Interface
-using ..Interface: Request, Response, status, hasheader, fail
+using ..Interface: Request, Response, status, hasheader, fail, Headers
 using PicoHTTPParser: HeaderBuffer, ChunkedDecoder, decode_chunked!,
                       parse_request_head!, head_length, request_method,
                       request_target, minor_version, header_name, header_value,
