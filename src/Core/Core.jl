@@ -14,6 +14,9 @@ using ..Interface: Request, RequestContext, Response, Context, RouteResult, matc
 import ..Interface: stop!
 using ..Backend
 using ..Runtime: dispatch
+using ..HTTP
+import ..HTTP: io_read, io_write, io_on_write, io_shutdown, io_close, io_release, io_dispatch
+using ..HTTP: serialize_response!, _http_date
 import PicoHTTPParser
 using PicoHTTPParser: HeaderBuffer, parse_request_head!, head_length, request_method,
                       request_target, minor_version, header_name, header_value,
@@ -22,7 +25,6 @@ using PicoHTTPParser: HeaderBuffer, parse_request_head!, head_length, request_me
 using Base.Threads: @threads, nthreads
 
 include("server.jl")
-include("serialize.jl")
 include("worker.jl")
 
 export Server, start!, stop!

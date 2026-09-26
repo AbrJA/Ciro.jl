@@ -2,8 +2,6 @@
 # Zero-copy response serialization
 # ══════════════════════════════════════════════════════════════════════════════
 
-using Dates: DateFormat, format, unix2datetime
-
 # ── Cached Date Header (refreshed every second, RFC 5322 format) ────────────
 # Thread-safety: _DATE_SEC is an Atomic so the stale-check is race-free.
 # _DATE_LOCK serialises the string update; after the lock the new string is
@@ -34,7 +32,7 @@ Serialize HTTP response into pre-allocated buffer. Returns bytes written.
 Zero-allocation for the common path (status line is a const String).
 """
 function serialize_response!(buf::Vector{UInt8}, response::Response)::Int
-    sl = Interface.status(response.status)
+    sl = status(response.status)
     sl_len = sizeof(sl)
 
     # Body length
@@ -47,8 +45,8 @@ function serialize_response!(buf::Vector{UInt8}, response::Response)::Int
         headers_len += sizeof(k) + 2 + sizeof(v) + 2  # "key: value\r\n"
     end
 
-    has_cl = Interface.hasheader(response, "Content-Length")
-    has_date = Interface.hasheader(response, "Date")
+    has_cl = hasheader(response, "Content-Length")
+    has_date = hasheader(response, "Date")
     date_str = has_date ? "" : _http_date()
 
     if !has_cl

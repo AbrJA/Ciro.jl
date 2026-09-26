@@ -15,7 +15,7 @@ const HAS_JET = try using JET; true catch; false end
     if HAS_JET
         @testset "JET.jl" begin
             rep = JET.report_package(Ciro;
-                target_modules=(Ciro, Ciro.Interface, Ciro.Backend,
+                target_modules=(Ciro, Ciro.Interface, Ciro.Backend, Ciro.HTTP,
                                 Ciro.Core, Ciro.Router, Ciro.Runtime))
             reports = JET.get_reports(rep)
             foreach(println, reports)

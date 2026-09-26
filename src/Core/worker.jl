@@ -1,12 +1,12 @@
 # ══════════════════════════════════════════════════════════════════════════════
-# HTTP Worker — per-connection state machine on Backend's event loop
+# UringIO — io_uring adapter + per-connection HTTP state
 #
-# Each connection owns:
-#   - an unparsed byte buffer (`rbuf`) that accumulates reads; requests are
-#     parsed incrementally with `last_len` and leftover bytes are carried for
-#     pipelining;
-#   - a parse phase (:headers → :body → :writing) and a deadline that the
-#     worker's on_tick sweep enforces.
+# This file is deliberately split by ownership:
+#   - `UringIO` and the `io_*` methods implement HTTP's `AbstractIO` seam;
+#   - the `HTTPConn` state machine (parse → frame → dispatch → write) still
+#     lives here for now and will move into the `HTTP` module in the next
+#     slice; it only touches the backend through `io.*` fields and `io_*`
+#     methods.
 #
 # Connection structs are only returned to the pool after every in-flight
 # io_uring operation for them has completed (`retired`), so a recycled struct
@@ -49,18 +49,35 @@ HTTPConn(conn::Connection) =
              Vector{UInt8}(undef, 0), 0, Vector{UInt8}(undef, 0), 0,
              :headers, 0, 0, false, false, 0.0, :none, false)
 
-mutable struct WorkerCtx
-    conn_pool  :: ConnectionPool
-    buf_pool   :: BufferPool
-    pending    :: PendingWrites
-    states     :: Dict{Ptr{Cvoid}, HTTPConn}
-    free       :: Vector{HTTPConn}
-    last_sweep :: Float64
-    stop_time  :: Float64   # when this worker noticed shutdown (0 = still running)
+"""Response bytes queued for one connection until the kernel reports them sent."""
+mutable struct PendingWrite
+    buf :: Vector{UInt8}
+    len :: Int
+    sent:: Int
 end
 
-WorkerCtx() = WorkerCtx(ConnectionPool(), BufferPool(), PendingWrites(),
-                        Dict{Ptr{Cvoid}, HTTPConn}(), HTTPConn[], 0.0, 0.0)
+"""
+    UringIO <: AbstractIO
+
+io_uring adapter: owns the ring, the connection/buffer pools, per-connection
+pending writes, and the handle→state table. One per worker thread, never shared.
+"""
+mutable struct UringIO{S <: Server} <: AbstractIO
+    server    :: S
+    engine    :: Engine
+    conn_pool :: ConnectionPool
+    buf_pool  :: BufferPool
+    states    :: Dict{Ptr{Cvoid}, HTTPConn}
+    free      :: Vector{HTTPConn}
+    pending   :: Dict{Ptr{Cvoid}, PendingWrite}
+    last_sweep:: Float64
+    stop_time :: Float64
+end
+
+UringIO(server::S, engine::Engine) where {S <: Server} =
+    UringIO{S}(server, engine, ConnectionPool(), BufferPool(),
+               Dict{Ptr{Cvoid}, HTTPConn}(), HTTPConn[],
+               Dict{Ptr{Cvoid}, PendingWrite}(), 0.0, 0.0)
 
 function _reset!(st::HTTPConn)
     st.fd = Cint(-1)
@@ -93,6 +110,74 @@ function _reset!(st::HTTPConn)
     return st
 end
 
+# ── AbstractIO implementation ───────────────────────────────────────────────
+
+function io_read(io::UringIO, st::HTTPConn)::Int
+    if queue_read_reuse!(io.engine, st.conn) != 0
+        return -1
+    end
+    st.inflight = :read
+    return 0
+end
+
+function io_write(io::UringIO, st::HTTPConn, buf::Vector{UInt8}, len::Int)::Int
+    io.pending[st.conn.ptr] = PendingWrite(buf, len, 0)
+    if queue_write!(io.engine, st.conn, pointer(buf), len) != 0
+        delete!(io.pending, st.conn.ptr)
+        release!(io.buf_pool, buf)
+        return -1
+    end
+    st.inflight = :write
+    return 0
+end
+
+function io_on_write(io::UringIO, st::HTTPConn, n::Int)::Symbol
+    pw = get(io.pending, st.conn.ptr, nothing)
+    pw === nothing && return :error
+    n <= 0 && return :error
+
+    sent = pw.sent + n
+    if sent < pw.len
+        pw.sent = sent
+        if queue_write!(io.engine, st.conn, pointer(pw.buf, sent + 1), pw.len - sent) != 0
+            return :error
+        end
+        st.inflight = :write
+        return :partial
+    end
+
+    delete!(io.pending, st.conn.ptr)
+    release!(io.buf_pool, pw.buf)
+    return :done
+end
+
+function io_shutdown(io::UringIO, st::HTTPConn)
+    st.fd_open && shutdown_fd!(st.fd)
+    return
+end
+
+function io_close(io::UringIO, st::HTTPConn)
+    pw = pop!(io.pending, st.conn.ptr, nothing)
+    pw !== nothing && release!(io.buf_pool, pw.buf)
+    if st.fd_open
+        close_fd!(st.fd)
+        st.fd_open = false
+    end
+    return
+end
+
+function io_release(io::UringIO, st::HTTPConn)
+    delete!(io.states, st.conn.ptr)
+    release!(io.conn_pool, st.conn)
+    Threads.atomic_sub!(io.server._conn_count, 1)
+    _park_state(io, st)
+    return
+end
+
+function io_dispatch(io::UringIO, req::Request)::Response
+    return dispatch(io.server.router, io.server.executor, io.server.catcher, req)
+end
+
 # ── Worker startup ──────────────────────────────────────────────────────────
 
 function _start_workers(server::Server, queue_depth::Int, nworkers::Int)
@@ -102,14 +187,14 @@ function _start_workers(server::Server, queue_depth::Int, nworkers::Int)
 
     factory = function (engine, tid)
         log!(server.logger, Info, "[Thread $tid] io_uring engine ready")
-        ctx = WorkerCtx()
+        io = UringIO(server, engine)
         accept_conn = create_connection()
         status = queue_multishot_accept!(engine, accept_conn)
         status != 0 && error("[Thread $tid] failed to arm multishot accept")
 
-        handler = event -> _handle_http_event(server, engine, event, accept_conn, ctx)
-        tick = () -> _worker_tick!(server, engine, ctx)
-        drain = () -> _drain_complete(ctx)
+        handler = event -> _handle_http_event(io, event, accept_conn)
+        tick = () -> _worker_tick!(io)
+        drain = () -> _drain_complete(io)
         return handler, tick, drain
     end
 
@@ -118,22 +203,22 @@ end
 
 # ── Event dispatch ──────────────────────────────────────────────────────────
 
-@inline function _handle_http_event(server, engine, event::CompletionEvent,
-                                    accept_conn::Connection, ctx::WorkerCtx)
+@inline function _handle_http_event(io::UringIO, event::CompletionEvent,
+                                    accept_conn::Connection)
     conn = Connection(event.conn)
     res = event.result
 
     if conn == accept_conn
         res < 0 && return
-        _on_accept(server, engine, Cint(res), ctx)
+        _on_accept(io, Cint(res))
         return
     end
 
-    st = get(ctx.states, conn.ptr, nothing)
+    st = get(io.states, conn.ptr, nothing)
     st === nothing && return          # completion for a dead connection
 
     if st.retired
-        _finalize!(server, st, ctx)   # awaited completion of a retired conn
+        _finalize!(io, st)            # awaited completion of a retired conn
         return
     end
 
@@ -141,35 +226,35 @@ end
     st.inflight = :none
 
     if res < 0
-        _retire!(server, st, ctx)
+        _retire!(io, st)
         return
     end
 
     if event.op_type == READ
-        _on_read(server, engine, st, Int(res), ctx)
+        _on_read(io, st, Int(res))
     elseif event.op_type == WRITE
-        _on_write(server, engine, st, Int(res), ctx)
+        _on_write(io, st, Int(res))
     end
     nothing
 end
 
-function _on_accept(server, engine, client_fd::Cint, ctx::WorkerCtx)
-    if Threads.atomic_add!(server._conn_count, 1) + 1 > server.max_connections
-        Threads.atomic_sub!(server._conn_count, 1)
+function _on_accept(io::UringIO, client_fd::Cint)
+    if Threads.atomic_add!(io.server._conn_count, 1) + 1 > io.server.max_connections
+        Threads.atomic_sub!(io.server._conn_count, 1)
         close_fd!(client_fd)
         return
     end
 
-    c = acquire!(ctx.conn_pool)
-    st = _acquire_state(ctx, c)
+    c = acquire!(io.conn_pool)
+    st = _acquire_state(io, c)
     st.fd = client_fd
     st.fd_open = true
-    st.deadline = time() + server.header_timeout_ms / 1000
-    ctx.states[c.ptr] = st
+    st.deadline = time() + io.server.header_timeout_ms / 1000
+    io.states[c.ptr] = st
 
-    status = accept_and_queue_read!(engine, c, client_fd)
+    status = accept_and_queue_read!(io.engine, c, client_fd)
     if status != 0
-        _finalize!(server, st, ctx)
+        _finalize!(io, st)
         return
     end
     st.inflight = :read
@@ -178,14 +263,14 @@ end
 
 # ── Reads ───────────────────────────────────────────────────────────────────
 
-function _on_read(server, engine, st::HTTPConn, n::Int, ctx::WorkerCtx)
+function _on_read(io::UringIO, st::HTTPConn, n::Int)
     if n <= 0
-        _retire!(server, st, ctx)
+        _retire!(io, st)
         return
     end
     _append_read!(st, n)
-    _set_deadline!(server, st)
-    _pump(server, engine, st, ctx)
+    _set_deadline!(io, st)
+    _pump(io, st)
     return
 end
 
@@ -206,26 +291,24 @@ function _append_read!(st::HTTPConn, n::Int)
 end
 
 """Queue another read while the request is incomplete; retire on failure."""
-function _pump(server, engine, st::HTTPConn, ctx::WorkerCtx)
-    result = _process(server, engine, st, ctx)
+function _pump(io::UringIO, st::HTTPConn)
+    result = _process(io, st)
     if result === :need_more && !st.retired && st.fd_open && st.inflight == :none
-        _set_deadline!(server, st)
-        if queue_read_reuse!(engine, st.conn) != 0
-            _retire!(server, st, ctx)
-        else
-            st.inflight = :read
+        _set_deadline!(io, st)
+        if io_read(io, st) != 0
+            _retire!(io, st)
         end
     end
     return
 end
 
-function _set_deadline!(server, st::HTTPConn)
+function _set_deadline!(io::UringIO, st::HTTPConn)
     if st.phase == :body
-        st.deadline = time() + server.body_timeout_ms / 1000
+        st.deadline = time() + io.server.body_timeout_ms / 1000
     elseif st.rlen == 0
-        st.deadline = time() + server.idle_timeout_ms / 1000
+        st.deadline = time() + io.server.idle_timeout_ms / 1000
     else
-        st.deadline = time() + server.header_timeout_ms / 1000
+        st.deadline = time() + io.server.header_timeout_ms / 1000
     end
     return
 end
@@ -233,29 +316,28 @@ end
 # ── Parsing state machine ───────────────────────────────────────────────────
 
 """Returns `:need_more` when more input is required, `:done` otherwise."""
-function _process(server, engine, st::HTTPConn, ctx::WorkerCtx)
+function _process(io::UringIO, st::HTTPConn)
     if st.phase == :headers
         status = parse_request_head!(st.hbuf, st.rbuf, st.hdr_scanned)
         if status === :partial
-            if st.rlen > server.max_header_bytes
-                _respond_and_close(server, engine, st, ctx,
-                                   fail(431, "Request Header Fields Too Large"))
+            if st.rlen > io.server.max_header_bytes
+                _respond_and_close(io, st, fail(431, "Request Header Fields Too Large"))
                 return :done
             end
             st.hdr_scanned = st.rlen
             return :need_more
         elseif status === :error
-            _respond_and_close(server, engine, st, ctx, fail(400, "Bad Request"))
+            _respond_and_close(io, st, fail(400, "Bad Request"))
             return :done
         end
         st.header_len = head_length(st.hbuf)
-        _prepare_body(server, engine, st, ctx) || return :done
+        _prepare_body(io, st) || return :done
         st.phase = :body
     end
 
     if st.phase == :body
         if st.chunked
-            decoded = _feed_chunked!(server, engine, st, ctx)
+            decoded = _feed_chunked!(io, st)
             decoded === :error && return :done
             decoded === :partial && return :need_more
         elseif st.rlen < st.header_len + st.body_need
@@ -265,19 +347,19 @@ function _process(server, engine, st::HTTPConn, ctx::WorkerCtx)
     end
 
     if st.phase == :writing
-        _complete_request(server, engine, st, ctx)
+        _complete_request(io, st)
     end
     return :done
 end
 
 """Parse framing headers. Returns `false` (and answers) on an invalid request."""
-function _prepare_body(server, engine, st::HTTPConn, ctx::WorkerCtx)
+function _prepare_body(io::UringIO, st::HTTPConn)
     # Obs-fold continuation lines surface as empty header names (picohttpparser
     # reports them with a NULL name). RFC 9112 allows only reject or replace;
     # reject rather than implicitly re-frame the message.
     for i in 1:length(st.hbuf)
         if isempty(header_name(st.hbuf, i, st.rbuf))
-            _respond_and_close(server, engine, st, ctx, fail(400, "Bad Request"))
+            _respond_and_close(io, st, fail(400, "Bad Request"))
             return false
         end
     end
@@ -287,13 +369,13 @@ function _prepare_body(server, engine, st::HTTPConn, ctx::WorkerCtx)
         content_length(st.hbuf, st.rbuf)
     catch err
         err isa HTTPParseError || rethrow(err)
-        _respond_and_close(server, engine, st, ctx, fail(400, "Bad Request"))
+        _respond_and_close(io, st, fail(400, "Bad Request"))
         return false
     end
 
     if te !== nothing && cl !== nothing
         # RFC 9112 smuggling defense: never accept both.
-        _respond_and_close(server, engine, st, ctx, fail(400, "Bad Request"))
+        _respond_and_close(io, st, fail(400, "Bad Request"))
         return false
     end
 
@@ -306,13 +388,13 @@ function _prepare_body(server, engine, st::HTTPConn, ctx::WorkerCtx)
             st.fed = st.header_len
             return true
         end
-        _respond_and_close(server, engine, st, ctx, fail(501, "Not Implemented"))
+        _respond_and_close(io, st, fail(501, "Not Implemented"))
         return false
     end
 
     if cl !== nothing
-        if cl > server.max_body_size
-            _respond_and_close(server, engine, st, ctx, fail(413, "Content Too Large"))
+        if cl > io.server.max_body_size
+            _respond_and_close(io, st, fail(413, "Content Too Large"))
             return false
         end
         st.body_need = cl
@@ -324,7 +406,7 @@ end
 
 """Feed newly arrived raw bytes to the chunked decoder.
 Returns `:partial`, `:done` or `:error` (error already answered)."""
-function _feed_chunked!(server, engine, st::HTTPConn, ctx::WorkerCtx)
+function _feed_chunked!(io::UringIO, st::HTTPConn)
     if st.rlen > st.fed
         n = st.rlen - st.fed
         old = st.chunklen
@@ -341,7 +423,7 @@ function _feed_chunked!(server, engine, st::HTTPConn, ctx::WorkerCtx)
     result = decode_chunked!(st.decoder, st.chunkbuf)
 
     if result.status === :error
-        _respond_and_close(server, engine, st, ctx, fail(400, "Bad Request"))
+        _respond_and_close(io, st, fail(400, "Bad Request"))
         return :error
     end
 
@@ -355,8 +437,8 @@ function _feed_chunked!(server, engine, st::HTTPConn, ctx::WorkerCtx)
         end
     end
 
-    if st.bodylen > server.max_body_size
-        _respond_and_close(server, engine, st, ctx, fail(413, "Content Too Large"))
+    if st.bodylen > io.server.max_body_size
+        _respond_and_close(io, st, fail(413, "Content Too Large"))
         return :error
     end
 
@@ -387,9 +469,9 @@ end
 
 # ── Request completion and response ─────────────────────────────────────────
 
-function _complete_request(server, engine, st::HTTPConn, ctx::WorkerCtx)
+function _complete_request(io::UringIO, st::HTTPConn)
     req = _build_request(st)
-    response = _dispatch(server, req)
+    response = io_dispatch(io, req)
     close_after = _wants_close(req)
     close_after && _set_connection_close!(response.headers)
 
@@ -417,7 +499,7 @@ function _complete_request(server, engine, st::HTTPConn, ctx::WorkerCtx)
     st.close_after = close_after
     st.phase = :writing
 
-    _queue_response(server, engine, st, ctx, response; close=close_after)
+    _queue_response(io, st, response)
     return
 end
 
@@ -445,67 +527,50 @@ function _build_request(st::HTTPConn)
 end
 
 """Serialize and queue a response. Returns `false` if it could not be queued."""
-function _queue_response(server, engine, st::HTTPConn, ctx::WorkerCtx,
-                         response::Response; close::Bool)
-    out_buf = acquire!(ctx.buf_pool)
+function _queue_response(io::UringIO, st::HTTPConn, response::Response)
+    out_buf = acquire!(io.buf_pool)
     nbytes = serialize_response!(out_buf, response)
 
-    set_pending!(ctx.pending, st.fd, out_buf, nbytes)
-    close && mark_close!(ctx.pending, st.fd)
-
-    if queue_write!(engine, st.conn, pointer(out_buf), nbytes) != 0
-        buf = pop_pending!(ctx.pending, st.fd)
-        buf !== nothing && release!(ctx.buf_pool, buf)
-        _finalize!(server, st, ctx)
+    if io_write(io, st, out_buf, nbytes) != 0
+        _finalize!(io, st)
         return false
     end
-    st.inflight = :write
     return true
 end
 
-function _respond_and_close(server, engine, st::HTTPConn, ctx::WorkerCtx, response::Response)
+function _respond_and_close(io::UringIO, st::HTTPConn, response::Response)
     st.close_after = true
     st.phase = :writing
-    _queue_response(server, engine, st, ctx, response; close=true)
+    _queue_response(io, st, response)
     return
 end
 
 # ── Writes ──────────────────────────────────────────────────────────────────
 
-function _on_write(server, engine, st::HTTPConn, n::Int, ctx::WorkerCtx)
-    total, sent, done = advance_pending!(ctx.pending, st.fd, n)
+function _on_write(io::UringIO, st::HTTPConn, n::Int)
+    result = io_on_write(io, st, n)
 
-    if !done
-        ptr, remaining = pending_slice(ctx.pending, st.fd)
-        if n <= 0 || ptr == C_NULL || remaining <= 0 || sent < 0
-            _retire!(server, st, ctx)
-            return
-        end
-        if queue_write!(engine, st.conn, ptr, remaining) != 0
-            _retire!(server, st, ctx)
-            return
-        end
-        st.inflight = :write
+    if result === :error
+        _retire!(io, st)
+        return
+    elseif result === :partial
         return
     end
 
-    buf = pop_pending!(ctx.pending, st.fd)
-    buf !== nothing && release!(ctx.buf_pool, buf)
-
-    if st.close_after || should_close!(ctx.pending, st.fd) || !server._running[]
-        _finalize!(server, st, ctx)
+    if st.close_after || !io.server._running[]
+        _finalize!(io, st)
         return
     end
 
     st.phase = :headers
     st.hdr_scanned = 0
     if st.rlen > 0
-        _pump(server, engine, st, ctx)   # pipelined request(s)
-    elseif queue_read_reuse!(engine, st.conn) != 0
-        _retire!(server, st, ctx)
+        _pump(io, st)   # pipelined request(s)
     else
-        _set_deadline!(server, st)
-        st.inflight = :read
+        _set_deadline!(io, st)
+        if io_read(io, st) != 0
+            _retire!(io, st)
+        end
     end
     return
 end
@@ -515,39 +580,31 @@ end
 """Close immediately if idle; otherwise shut the socket down (which wakes the
 in-flight io_uring operation and FINs the peer) and wait for the completion
 before recycling the connection struct."""
-function _retire!(server, st::HTTPConn, ctx::WorkerCtx)
+function _retire!(io::UringIO, st::HTTPConn)
     if st.inflight == :none
-        _finalize!(server, st, ctx)
+        _finalize!(io, st)
         return
     end
     st.retired = true
-    st.fd_open && shutdown_fd!(st.fd)
+    io_shutdown(io, st)
     return
 end
 
-function _finalize!(server, st::HTTPConn, ctx::WorkerCtx)
-    buf = pop_pending!(ctx.pending, st.fd)
-    buf !== nothing && release!(ctx.buf_pool, buf)
-    if st.fd_open
-        close_fd!(st.fd)
-        st.fd_open = false
-    end
-    delete!(ctx.states, st.conn.ptr)
-    release!(ctx.conn_pool, st.conn)
-    Threads.atomic_sub!(server._conn_count, 1)
-    _park_state(ctx, st)
+function _finalize!(io::UringIO, st::HTTPConn)
+    io_close(io, st)
+    io_release(io, st)
     return
 end
 
-function _acquire_state(ctx::WorkerCtx, conn::Connection)
-    st = isempty(ctx.free) ? HTTPConn(conn) : pop!(ctx.free)
+function _acquire_state(io::UringIO, conn::Connection)
+    st = isempty(io.free) ? HTTPConn(conn) : pop!(io.free)
     st.conn = conn
     _reset!(st)
     return st
 end
 
-function _park_state(ctx::WorkerCtx, st::HTTPConn)
-    if length(ctx.free) < _MAX_POOLED_STATES
+function _park_state(io::UringIO, st::HTTPConn)
+    if length(io.free) < _MAX_POOLED_STATES
         # Release oversized buffers instead of retaining them in the pool.
         length(st.rbuf) > 65_536 && (st.rbuf = Vector{UInt8}(undef, 0))
         length(st.body) > 65_536 && (st.body = Vector{UInt8}(undef, 0))
@@ -562,51 +619,51 @@ function _park_state(ctx::WorkerCtx, st::HTTPConn)
         st.chunklen = 0
         st.fed = 0
         st.carrylen = 0
-        push!(ctx.free, st)
+        push!(io.free, st)
     end
     return
 end
 
 """Connection draining and deadline sweep, once per tick."""
-function _worker_tick!(server, engine, ctx::WorkerCtx)
-    if !server._running[]
-        ctx.stop_time == 0.0 && (ctx.stop_time = time())
-        _drain_connections!(server, engine, ctx)
+function _worker_tick!(io::UringIO)
+    if !io.server._running[]
+        io.stop_time == 0.0 && (io.stop_time = time())
+        _drain_connections!(io)
     end
-    _sweep_expired!(server, engine, ctx)
+    _sweep_expired!(io)
     return
 end
 
 """Close connections during shutdown so the worker can exit: in-flight writes
 are allowed to flush, everything else is retired. After `shutdown_timeout`
 even pending writes are dropped."""
-function _drain_connections!(server, engine, ctx::WorkerCtx)
-    forced = time() - ctx.stop_time > server.shutdown_timeout
-    for st in collect(values(ctx.states))
+function _drain_connections!(io::UringIO)
+    forced = time() - io.stop_time > io.server.shutdown_timeout
+    for st in collect(values(io.states))
         st.retired && continue
-        (forced || st.inflight != :write) && _retire!(server, st, ctx)
+        (forced || st.inflight != :write) && _retire!(io, st)
     end
     return
 end
 
 """Drain predicate for the event loop: true once every connection is released."""
-_drain_complete(ctx::WorkerCtx)::Bool = isempty(ctx.states)
+_drain_complete(io::UringIO)::Bool = isempty(io.states)
 
 """Close connections past their phase deadline (idle, headers or body timeout)."""
-function _sweep_expired!(server, engine, ctx::WorkerCtx)
+function _sweep_expired!(io::UringIO)
     now = time()
-    now - ctx.last_sweep < _SWEEP_INTERVAL && return
-    ctx.last_sweep = now
+    now - io.last_sweep < _SWEEP_INTERVAL && return
+    io.last_sweep = now
 
     expired = HTTPConn[]
-    for (_, st) in ctx.states
+    for (_, st) in io.states
         (st.retired || st.deadline == 0.0) && continue
         now > st.deadline && push!(expired, st)
     end
 
     for st in expired
         st.retired && continue
-        _retire!(server, st, ctx)
+        _retire!(io, st)
     end
     return
 end

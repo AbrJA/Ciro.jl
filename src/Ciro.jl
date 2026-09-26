@@ -26,6 +26,7 @@ include("Interface/Interface.jl")
 include("Backend/Backend.jl")
 include("Router/Router.jl")
 include("Runtime/Runtime.jl")
+include("HTTP/HTTP.jl")
 include("Core/Core.jl")
 
 using .Interface
