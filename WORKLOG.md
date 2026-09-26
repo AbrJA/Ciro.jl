@@ -30,6 +30,22 @@ State at pause:
   `sigaction` handler runs), so the documented stop signals are SIGINT
   (`docker stop --signal=SIGINT`, systemd `KillSignal=SIGINT`) and `stop!`.
 
+### Stage 2.5 — DONE (HTTP seam, portable backend, config split)
+
+- Chunked wire coverage (complete, fragmented, trailers, pipelined, 413) exposed and fixed
+  a real bug: leftover after a chunked message was installed into `rbuf` before the head
+  was materialized (`a690fec`).
+- New `HTTP` module: `AbstractIO` byte-transport seam and response serialization
+  (`015fb7d`); the connection state machine followed into `HTTP/state.jl`, leaving
+  `Core/worker.jl` a 288-line adapter + event pump (`2c22a7c`).
+- `ServerConfig` split from `ServerRuntime` (`0852817`).
+- Sockets backend (`218f3eb`): `Server(; backend=:sockets)` implements the full seam with
+  blocking sockets and per-connection tasks; acceptance runs the whole wire suite against
+  it. This is the proof the seam is transport-agnostic.
+- E2 done early: per-connection pending writes replace the fd-indexed table; fd-reuse
+  hazards are gone.
+- Gates at each commit: acceptance 51/51; `Pkg.test()` -> 658 passed, 0 failed.
+
 ### Stage 3 — performance and type stability
 - Zero-copy `Request`: views over `rbuf`, `copy` only when a handler lets them escape;
   lazy query/body parsing. Removes the ~3 KB/request materialization.
