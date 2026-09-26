@@ -376,6 +376,20 @@ Status: 82/82 parser tests pass, including steady-state zero-allocation assertio
       buffer growth (`PicoHTTPParser.jl` `07215a5`, `ccd41c6`).
 - [x] All six Stage 0 `@test_broken` pins promoted to `@test`.
 - [x] Test run: **614 passed, 0 failed** (incl. full Aqua + JET and 29 wire tests).
-- [ ] CI green — blocked on releasing `PicoHTTPParser 0.3.0` (Ciro `Pkg.develop`s the
-      local checkout today).
+- [ ] CI green — `PicoHTTPParser 0.3.0` is released; CI unblocks once General
+      registration completes.
 - [ ] Chunked transfer-encoding wire tests; per-route body limits; access logging.
+
+## 11. Stage 2 status — one pipeline, graceful shutdown
+
+- [x] Single pipeline: `Runtime.dispatch(router, executor, catcher, request)`; `Server`
+      and `Application` both delegate; parity-tested against each other.
+- [x] One `stop!` generic in `Interface` (`stop!(::Server)` and `stop!(::Application)`);
+      FakeTransport enqueues with `enqueue!` (no `submit!` collision).
+- [x] Graceful drain: in-flight writes flush, idle/partial connections close, forced
+      close after `shutdown_timeout`; failure/interrupt paths wait for drain.
+- [x] `yield()` in the event loop fixes the in-process scheduler deadlock (P0 #12) and
+      makes SIGINT deliverable.
+- [ ] SIGTERM cannot be intercepted in Julia 1.13 (runtime swallows it); documented.
+- [ ] Still open: cancel/park multishot accept explicitly, async executor (v1.5),
+      access log/metrics, chunked wire tests.

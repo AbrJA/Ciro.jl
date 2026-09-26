@@ -20,11 +20,13 @@ start!(server)
 """
 module Ciro
 
+# Strict include order: each layer only depends on the ones above it.
+# Runtime must precede Core (Core delegates to the Runtime pipeline).
 include("Interface/Interface.jl")
 include("Backend/Backend.jl")
-include("Core/Core.jl")
 include("Router/Router.jl")
 include("Runtime/Runtime.jl")
+include("Core/Core.jl")
 
 using .Interface
 using .Core
@@ -62,7 +64,7 @@ export log!, intercept, start_backend!, stop_backend!
 
 # Runtime (transport-independent)
 export Application, AbstractTransport, TransportToken, FakeTransport
-export dispatch, handle, run_once!, serve!, submit!, response_for
+export dispatch, handle, run_once!, serve!, enqueue!, response_for
 export send_response!, close!, transport_state
 
 # ── Precompilation ──────────────────────────────────────────────────────────

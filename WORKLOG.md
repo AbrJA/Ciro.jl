@@ -9,39 +9,26 @@ See `docs/DESIGN_LESSONS.md` for the engineering standards and
 ## RESUME — next session
 
 State at pause:
-- Stage 0 committed on `feat/stage0-safety-net` (`4b9d9a0`); Stage 1 committed as
-  `b0a1996` on the same branch.
-- PicoHTTPParser `v0.3.0` is released and awaiting General registration
-  (JuliaRegistries/General#169521). It contains the Julian API, the unified
-  offset-safe `HeaderBuffer` path (`parse_request`/`parse_response`/`parse_headers`
-  wrappers, `parse_response_head!`, `parse_headers!`), strict stateful parsing
-  (obs-fold, bounds, strict `content_length`, TE rejection, bodyless 1xx/204/304),
-  and does not export the generic `header`/`headers` names. Parser suite 181/181;
-  docs build for 0.3.0.
-- Ciro is aligned to the release: compat `PicoHTTPParser = "0.3"`, committed
-  `[sources]` removed, strict `content_length` + obs-fold 400 + wire tests for
-  obs-fold, duplicate/invalid `Content-Length`, and CL+TE. `Pkg.test()` →
-  **618 passed, 0 failed** against the release (via the gitignored Manifest dev path).
-- Uncommitted: the alignment changes (Project.toml, Core/Interface/Runtime imports,
-  worker names, `Request.target` adapter, acceptance tests, WORKLOG, DESIGN_REVIEW).
+- `feat/stage0-safety-net`: Stage 0 (`4b9d9a0`), Stage 1 (`b0a1996`), parser `0.3`
+  alignment (`58afad7`), and Stage 2 (this commit) all done. `Pkg.test()` →
+  **643 passed, 0 failed**; acceptance 36/36; PicoHTTPParser `0.3.0` resolves from
+  General.
+- Uncommitted: nothing (this section describes the committed state).
 
-### First 15 minutes
-1. Commit the Ciro alignment on `feat/stage0-safety-net`.
-2. Wait for the General PR to merge, then `Pkg.resolve()` (or
-   `Pkg.free("PicoHTTPParser")`) so CI resolves 0.3.0 from the registry.
-3. Confirm Ciro CI is green, then open `feat/stage0-safety-net` → `master`.
-
-### Stage 2 — one pipeline, real seams
-- Collapse `Core._dispatch`/`_invoke_handler` and `Runtime.dispatch`/`_invoke` into one
-  pipeline; `Server` calls the shared path. Delete the duplicate `stop!`/`submit!`
-  generics (today `stop!(::Application)` throws `MethodError`).
-- Decide the public frontend: `Server` vs `Application`. One survives; the other is
-  deleted or becomes the single core the survivor wraps.
-- Real graceful shutdown: stop accepting (cancel multishot accept), drain in-flight
-  requests with a deadline, close client sockets, handle SIGTERM/SIGINT. `_in_flight` is
-  currently meaningless with the synchronous executor.
-- Keep `FakeTransport` as the backend-free core test surface once Runtime owns the
-  pipeline (it should force the seams to stay honest).
+### Stage 2 — DONE (one pipeline, graceful shutdown)
+- Single dispatch pipeline: `Runtime.dispatch(router, executor, catcher, request)` is
+  the only path; `Core._dispatch` and `Application` delegate to it; a parity test pins
+  Application and Server results equal. `_invoke_handler` duplication removed.
+- One `stop!` generic owned by `Interface` (`stop!(server)` and `stop!(app)` both
+  work); FakeTransport's `submit!` renamed `enqueue!` (no clash with `Backend.submit!`).
+- Graceful drain: `run_eventloop!` takes a `drain` predicate; workers flush in-flight
+  writes, close idle/partial connections, and force-close after `shutdown_timeout`.
+  `run_eventloop_threaded!` stops peers and waits for drain on failure/interrupt.
+- `yield()` in the event loop fixed the in-process scheduler deadlock (P0 #12) and
+  makes Ctrl-C/SIGINT deliverable; the drain is covered by an in-process acceptance test.
+- SIGTERM is swallowed by Julia 1.13's runtime (verified: neither `signal()` nor a C
+  `sigaction` handler runs), so the documented stop signals are SIGINT
+  (`docker stop --signal=SIGINT`, systemd `KillSignal=SIGINT`) and `stop!`.
 
 ### Stage 3 — performance and type stability
 - Zero-copy `Request`: views over `rbuf`, `copy` only when a handler lets them escape;

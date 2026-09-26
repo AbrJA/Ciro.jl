@@ -8,7 +8,8 @@
 # ══════════════════════════════════════════════════════════════════════════════
 
 """
-    run_eventloop!(handler, engine; running=Ref(true), batch_size=64, on_tick=nothing)
+    run_eventloop!(handler, engine; running=Ref(true), batch_size=64,
+                   on_tick=nothing, drain=nothing)
 
 Run the io_uring completion loop. For each completion, calls:
 
@@ -18,14 +19,20 @@ Additionally, after every loop iteration (including timeouts), calls
 `on_tick()` if provided. `on_tick` enables deadline sweeps and heartbeats
 without a second task.
 
+When `running[]` becomes false the loop exits immediately, unless a `drain`
+function is provided: then it keeps running until `drain()` returns true
+(typically because every connection has been released), letting in-flight
+writes flush before the engine is closed.
+
 The handler is responsible for interpreting events (accept → configure + read,
-read → parse + write, write → recycle or close). Exits when `running[] == false`.
+read → parse + write, write → recycle or close).
 """
 function run_eventloop!(handler::H, engine::Engine;
                         running::Threads.Atomic{Bool}=Threads.Atomic{Bool}(true),
                         batch_size::Int=64,
-                        on_tick::T=nothing) where {H, T}
-    while running[]
+                        on_tick::T=nothing,
+                        drain::D=nothing) where {H, T, D}
+    while running[] || (drain !== nothing && !drain())
         event = wait_completion(engine; timeout_ms=5)
 
         if event !== nothing
@@ -40,6 +47,10 @@ function run_eventloop!(handler::H, engine::Engine;
         end
 
         on_tick === nothing || on_tick()
+
+        # Yield so the Julia scheduler can run other tasks (interrupts, GC,
+        # test clients) on this thread. The 5ms wait timeout bounds latency.
+        yield()
     end
     nothing
 end
@@ -54,9 +65,10 @@ the same port via SO_REUSEPORT). The kernel distributes connections across
 engines.
 
 The `handler_factory` is called once per thread as `handler_factory(engine, tid)`
-and must return a tuple `(handler, on_tick)`, where `handler` is called for each
-`CompletionEvent` and `on_tick` (may be `nothing`) is called after every loop
-iteration.
+and must return a tuple `(handler, on_tick, drain)`, where `handler` is called
+for each `CompletionEvent`, `on_tick` (may be `nothing`) is called after every
+loop iteration, and `drain` (may be `nothing`) is polled instead of exiting once
+`running[]` is false — return `true` when shutdown is complete.
 
 # Example
 ```julia
@@ -70,7 +82,8 @@ run_eventloop_threaded!(port=8080, running=running) do engine, tid
         # per-event handling with captured thread-local state
     end
     on_tick = () -> nothing
-    return handler, on_tick
+    drain = () -> true
+    return handler, on_tick, drain
 end
 ```
 """
@@ -89,17 +102,29 @@ function run_eventloop_threaded!(handler_factory::F, port::Integer;
             engine === nothing && error("[Thread $tid] Failed to init io_uring engine")
 
             try
-                handler, on_tick = handler_factory(engine, tid)
-                run_eventloop!(handler, engine; running, on_tick)
+                handler, on_tick, drain = handler_factory(engine, tid)
+                run_eventloop!(handler, engine; running, on_tick, drain)
             finally
                 close_engine!(engine)
             end
         end
     end
 
-    # Wait for all workers to finish
-    for t in tasks
-        wait(t)
+    # Wait for all workers to finish. If one fails (including an interrupt),
+    # stop the others and let them drain before propagating.
+    try
+        for t in tasks
+            wait(t)
+        end
+    catch
+        running[] = false
+        for t in tasks
+            try
+                wait(t)
+            catch
+            end
+        end
+        rethrow()
     end
     nothing
 end

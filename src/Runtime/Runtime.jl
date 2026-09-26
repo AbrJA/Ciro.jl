@@ -10,10 +10,11 @@ using ..Interface
 using ..Interface: Request, RequestContext, Response, Endpoint, RouteResult,
                    matched, not_found, method_not_allowed, Methods, text, fail,
                    route, register!, freeze!, execute!, log!, intercept
+import ..Interface: stop!
 import PicoHTTPParser
 
 export AbstractTransport, TransportToken, Application, FakeTransport,
-       handle, dispatch, run_once!, serve!, submit!, response_for,
+       handle, dispatch, run_once!, serve!, enqueue!, response_for,
        send_response!, close!, transport_state, start_transport!, stop_transport!
 
 # ── Transport contract ─────────────────────────────────────────────────────
@@ -34,7 +35,6 @@ function start_transport! end
 function stop_transport! end
 function send_response! end
 function close! end
-function stop! end
 
 """
     TransportToken
@@ -87,14 +87,17 @@ end
 # ── Dispatch ───────────────────────────────────────────────────────────────
 
 """
-    dispatch(app, request) -> Response
+    dispatch(router, executor, catcher, request) -> Response
 
-Pure request→response pipeline: route lookup, executor invocation and
-error interception. No I/O happens here.
+The single request→response pipeline: route lookup, executor invocation and
+error interception. No I/O happens here. `Application` and the io_uring
+`Server` both go through this function, so the transport-free test surface and
+the production path can never drift apart.
 """
-function dispatch(app::Application, request::Request)::Response
+function dispatch(router::AbstractRouter, executor::AbstractExecutor,
+                  catcher::AbstractCatcher, request::Request)::Response
     method = Methods.from_string(request.method)
-    result = route(app.router, method, request.path)
+    result = route(router, method, request.path)
 
     not_found(result) && return fail(404, "Not Found")
 
@@ -105,20 +108,33 @@ function dispatch(app::Application, request::Request)::Response
     end
 
     ctx = RequestContext(request, result.params)
-    return _invoke(app, result.handler, ctx)
+    return _invoke(executor, catcher, result.handler, ctx)
 end
+
+dispatch(router::AbstractRouter, executor::AbstractExecutor,
+         catcher::AbstractCatcher, request::PicoHTTPParser.Request)::Response =
+    dispatch(router, executor, catcher, Request(request))
+
+"""
+    dispatch(app, request) -> Response
+
+`Application` front-end for [`dispatch`](@ref).
+"""
+dispatch(app::Application, request::Request)::Response =
+    dispatch(app.router, app.executor, app.catcher, request)
 
 dispatch(app::Application, request::PicoHTTPParser.Request)::Response =
     dispatch(app, Request(request))
 
 handle(app::Application, request) = dispatch(app, request)
 
-@noinline function _invoke(app::Application, endpoint, ctx::RequestContext)::Response
+@noinline function _invoke(executor::AbstractExecutor, catcher::AbstractCatcher,
+                           endpoint, ctx::RequestContext)::Response
     try
-        response = execute!(app.executor, endpoint, ctx)
+        response = execute!(executor, endpoint, ctx)
         return response isa Response ? response : text(string(response))
     catch err
-        return intercept(app.catcher,
+        return intercept(catcher,
                          err isa Exception ? err : ErrorException(string(err)),
                          ctx.request)
     end
@@ -175,7 +191,8 @@ function _check_owner(t::FakeTransport, token::TransportToken)
     return nothing
 end
 
-function submit!(t::FakeTransport, request::Request)
+"""Enqueue a request on a `FakeTransport`; returns its `TransportToken`."""
+function enqueue!(t::FakeTransport, request::Request)
     t.state in (:created, :running) || throw(ArgumentError("transport is $(t.state)"))
     t.next += 1
     token = TransportToken(t.owner, t.next)

@@ -23,7 +23,6 @@ struct Server{
     max_connections   :: Int
     shutdown_timeout  :: Float64
     _running          :: Threads.Atomic{Bool}
-    _in_flight        :: Threads.Atomic{Int}
     _conn_count       :: Threads.Atomic{Int}
 end
 
@@ -67,15 +66,22 @@ function Server(;
     Server(router, logger, catcher, executor, host_str, port, backlog,
            max_body_size, max_header_bytes, header_timeout_ms, body_timeout_ms,
            idle_timeout_ms, max_connections, shutdown_timeout,
-           Threads.Atomic{Bool}(false), Threads.Atomic{Int}(0), Threads.Atomic{Int}(0))
+           Threads.Atomic{Bool}(false), Threads.Atomic{Int}(0))
 end
 
 """
     start!(server; queue_depth=4096, nworkers=nthreads())
 
-Start the server. Blocks until `stop!()` is called or an interrupt is received.
-On interrupt, performs graceful shutdown: stops accepting new connections and
-drains in-flight requests up to `shutdown_timeout` seconds.
+Start the server. Blocks until [`stop!`](@ref) is called or an interrupt
+(SIGINT / Ctrl-C) is received. Shutdown is graceful: accepting stops
+immediately, in-flight writes are flushed, idle keep-alive connections are
+closed, and workers exit once every connection is released (or after
+`shutdown_timeout` seconds).
+
+!!! note
+    SIGTERM cannot be intercepted by ordinary Julia code; send SIGINT instead
+    (`docker stop --signal=SIGINT`, systemd `KillSignal=SIGINT`) or call
+    [`stop!`](@ref) from another task.
 """
 function start!(server::Server; queue_depth::Int=4096, nworkers::Int=nthreads())
     freeze!(server.router)
@@ -86,26 +92,14 @@ function start!(server::Server; queue_depth::Int=4096, nworkers::Int=nthreads())
     catch e
         e isa InterruptException || rethrow(e)
     finally
-        log!(server.logger, Info, "Ciro shutting down (draining in-flight requests)...")
         server._running[] = false
-        _drain(server)
         log!(server.logger, Info, "Ciro stopped")
     end
 end
 
-"""Stop the server gracefully."""
+"""Request a graceful stop; `start!` drains and returns."""
 function stop!(server::Server)
     server._running[] = false
     log!(server.logger, Info, "Ciro stop requested")
-end
-
-"""Wait for in-flight requests to complete (up to timeout)."""
-function _drain(server::Server)
-    deadline = time() + server.shutdown_timeout
-    while server._in_flight[] > 0 && time() < deadline
-        sleep(0.01)
-    end
-    remaining = server._in_flight[]
-    remaining > 0 && log!(server.logger, Warn,
-        "Shutdown timeout: $remaining request(s) still in-flight")
+    return server
 end

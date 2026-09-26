@@ -54,10 +54,11 @@ mutable struct WorkerCtx
     states     :: Dict{Ptr{Cvoid}, HTTPConn}
     free       :: Vector{HTTPConn}
     last_sweep :: Float64
+    stop_time  :: Float64   # when this worker noticed shutdown (0 = still running)
 end
 
 WorkerCtx() = WorkerCtx(ConnectionPool(), BufferPool(), PendingWrites(),
-                        Dict{Ptr{Cvoid}, HTTPConn}(), HTTPConn[], 0.0)
+                        Dict{Ptr{Cvoid}, HTTPConn}(), HTTPConn[], 0.0, 0.0)
 
 function _reset!(st::HTTPConn)
     st.fd = Cint(-1)
@@ -103,8 +104,9 @@ function _start_workers(server::Server, queue_depth::Int, nworkers::Int)
         status != 0 && error("[Thread $tid] failed to arm multishot accept")
 
         handler = event -> _handle_http_event(server, engine, event, accept_conn, ctx)
-        tick = () -> _sweep_expired!(server, engine, ctx)
-        return handler, tick
+        tick = () -> _worker_tick!(server, engine, ctx)
+        drain = () -> _drain_complete(ctx)
+        return handler, tick, drain
     end
 
     start_backend!(backend, factory, server.port; running=server._running)
@@ -472,7 +474,7 @@ function _on_write(server, engine, st::HTTPConn, n::Int, ctx::WorkerCtx)
     buf = pop_pending!(ctx.pending, st.fd)
     buf !== nothing && release!(ctx.buf_pool, buf)
 
-    if st.close_after || should_close!(ctx.pending, st.fd)
+    if st.close_after || should_close!(ctx.pending, st.fd) || !server._running[]
         _finalize!(server, st, ctx)
         return
     end
@@ -544,6 +546,31 @@ function _park_state(ctx::WorkerCtx, st::HTTPConn)
     return
 end
 
+"""Connection draining and deadline sweep, once per tick."""
+function _worker_tick!(server, engine, ctx::WorkerCtx)
+    if !server._running[]
+        ctx.stop_time == 0.0 && (ctx.stop_time = time())
+        _drain_connections!(server, engine, ctx)
+    end
+    _sweep_expired!(server, engine, ctx)
+    return
+end
+
+"""Close connections during shutdown so the worker can exit: in-flight writes
+are allowed to flush, everything else is retired. After `shutdown_timeout`
+even pending writes are dropped."""
+function _drain_connections!(server, engine, ctx::WorkerCtx)
+    forced = time() - ctx.stop_time > server.shutdown_timeout
+    for st in collect(values(ctx.states))
+        st.retired && continue
+        (forced || st.inflight != :write) && _retire!(server, st, ctx)
+    end
+    return
+end
+
+"""Drain predicate for the event loop: true once every connection is released."""
+_drain_complete(ctx::WorkerCtx)::Bool = isempty(ctx.states)
+
 """Close connections past their phase deadline (idle, headers or body timeout)."""
 function _sweep_expired!(server, engine, ctx::WorkerCtx)
     now = time()
@@ -563,40 +590,15 @@ function _sweep_expired!(server, engine, ctx::WorkerCtx)
     return
 end
 
-# ── Request Dispatch (type-stable via RouteResult) ──────────────────────────
+# ── Request Dispatch ────────────────────────────────────────────────────────
+# Delegates to the single Runtime pipeline (shared with Application/FakeTransport).
 
-@inline function _dispatch(server::Server, req::Request)::Response
-    method = Methods.from_string(req.method)
-    result = route(server.router, method, req.path)
+@inline _dispatch(server::Server, req::Request)::Response =
+    dispatch(server.router, server.executor, server.catcher, req)
 
-    if not_found(result)
-        return fail(404, "Not Found")
-    end
-
-    if method_not_allowed(result)
-        allow_str = Methods.allow_header(result.allowed)
-        return Response(405, ["Allow" => allow_str, "Content-Type" => "text/plain"],
-                        "Method Not Allowed")
-    end
-
-    ctx = RequestContext(req, result.params)
-    return _invoke_handler(server, result.handler, ctx)
-end
-
-# Internal migration adapter for parser-level tests and backend code.
-@inline function _dispatch(server::Server, req::PicoHTTPParser.Request)::Response
+# Internal adapter for parser-level tests and backend code.
+@inline _dispatch(server::Server, req::PicoHTTPParser.Request)::Response =
     _dispatch(server, Request(req))
-end
-
-"""Isolated handler invocation — @noinline keeps try/catch off the hot path."""
-@noinline function _invoke_handler(server::Server, endpoint, ctx::RequestContext)::Response
-    try
-        response = execute!(server.executor, endpoint, ctx)
-        return response isa Response ? response : text(string(response))
-    catch err
-        return intercept(server.catcher, err isa Exception ? err : ErrorException(string(err)), ctx.request)
-    end
-end
 
 # ── Connection close detection ──────────────────────────────────────────────
 

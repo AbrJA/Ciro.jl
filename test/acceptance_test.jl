@@ -397,6 +397,34 @@ end
                     _kill_server(limited)
                 end
             end
+
+            @testset "stop! drains and returns" begin
+                # Signal delivery into child processes is environment-specific
+                # (Julia's runtime swallows SIGTERM, and SIGINT can be blocked
+                # in forked children), so exercise the supported API directly:
+                # an in-process server with a raw-client keep-alive connection.
+                drain_port = port + 2
+                router = Trie()
+                get!(router, "/hello", _ -> text("hello"))
+                server = Server(; router, port=drain_port)
+                task = Threads.@spawn start!(server; nworkers=1)
+                c = nothing
+                try
+                    _wait_ready(drain_port)
+
+                    c = TestClient(drain_port)
+                    _send(c, "GET /hello HTTP/1.1\r\nHost: x\r\n\r\n")
+                    @test startswith(read_response(c), "HTTP/1.1 200")
+
+                    stop!(server)
+                    @test timedwait(() -> istaskdone(task), 8.0) == :ok
+                    @test read_response(c) === nothing   # drain closed the keep-alive
+                finally
+                    c !== nothing && _close(c)
+                    stop!(server)
+                    timedwait(() -> istaskdone(task), 5.0)
+                end
+            end
         finally
             _kill_server(proc)
         end

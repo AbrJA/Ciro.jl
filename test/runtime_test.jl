@@ -95,7 +95,7 @@ using PicoHTTPParser
         t = FakeTransport()
         @test transport_state(t) == :created
 
-        token = submit!(t, Request("GET", "/x"))
+        token = enqueue!(t, Request("GET", "/x"))
         @test token.owner == t.owner
         @test !isempty(t.pending)
 
@@ -112,20 +112,20 @@ using PicoHTTPParser
     @testset "FakeTransport ownership and lifecycle" begin
         t1 = FakeTransport()
         t2 = FakeTransport()
-        token = submit!(t1, Request("GET", "/x"))
+        token = enqueue!(t1, Request("GET", "/x"))
         @test_throws ArgumentError send_response!(t2, token, text("bad"))
         @test_throws ArgumentError close!(t2, token)
         send_response!(t1, token, text("ok"))
         @test_throws ArgumentError send_response!(t1, token, text("duplicate"))
         close!(t1, token)
-        token2 = submit!(t1, Request("GET", "/y"))
+        token2 = enqueue!(t1, Request("GET", "/y"))
         close!(t1, token2)
         @test_throws ArgumentError send_response!(t1, token2, text("late"))
     end
 
     @testset "run_once! skips closed tokens" begin
         t = FakeTransport()
-        token = submit!(t, Request("GET", "/x"))
+        token = enqueue!(t, Request("GET", "/x"))
         close!(t, token)
         router = Trie()
         get!(router, "/x", _ -> text("ok"))
@@ -140,8 +140,8 @@ using PicoHTTPParser
         get!(router, "/a", _ -> text("a"))
         get!(router, "/b", _ -> text("b"))
         app = Application(; router, transport=t)
-        t1 = submit!(t, Request("GET", "/a"))
-        t2 = submit!(t, Request("GET", "/b"))
+        t1 = enqueue!(t, Request("GET", "/a"))
+        t2 = enqueue!(t, Request("GET", "/b"))
         serve!(app)
         @test String(response_for(t, t1).body) == "a"
         @test String(response_for(t, t2).body) == "b"
@@ -161,9 +161,42 @@ using PicoHTTPParser
 
     @testset "Duplicate response rejected" begin
         t = FakeTransport()
-        token = submit!(t, Request("GET", "/x"))
+        token = enqueue!(t, Request("GET", "/x"))
         t.state = :running
         send_response!(t, token, text("first"))
         @test_throws ArgumentError send_response!(t, token, text("second"))
+    end
+
+    @testset "stop! is shared by Server and Application" begin
+        router = Trie()
+        get!(router, "/x", _ -> text("ok"))
+
+        app = Application(; router)
+        @test stop!(app) === app
+        @test !app.running
+
+        server = Server(; router)
+        @test stop!(server) === server
+        @test !server._running[]
+    end
+
+    @testset "Application and Server share one pipeline" begin
+        router = Trie()
+        get!(router, "/ok", _ -> text("fine"))
+        get!(router, "/users/:id::Int", ctx -> json("{\"id\":$(param(ctx, Int, :id))}"))
+        post!(router, "/only", _ -> text("posted"))
+
+        app = Application(; router)
+        server = Server(; router)
+
+        for (m, target) in [("GET", "/ok"), ("GET", "/users/7"), ("GET", "/missing"),
+                            ("GET", "/users/abc"), ("PUT", "/ok"), ("POST", "/only")]
+            req = Request(m, target)
+            a = dispatch(app, req)
+            b = Ciro.Core._dispatch(server, req)
+            @test a.status == b.status
+            @test String(a.body) == String(b.body)
+            @test header(a, "Allow") == header(b, "Allow")
+        end
     end
 end

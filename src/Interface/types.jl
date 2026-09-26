@@ -119,6 +119,15 @@ function execute! end
 
 export AbstractExecutor, SyncExecutor, execute!
 
+"""
+    stop!(component)
+
+Request a graceful stop of a running component (a `Server` or an `Application`).
+"""
+function stop! end
+
+export stop!
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Default Implementations
 # ══════════════════════════════════════════════════════════════════════════════
