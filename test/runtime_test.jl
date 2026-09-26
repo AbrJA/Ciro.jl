@@ -177,7 +177,7 @@ using PicoHTTPParser
 
         server = Server(; router)
         @test stop!(server) === server
-        @test !server._running[]
+        @test !server.runtime.running[]
     end
 
     @testset "Application and Server share one pipeline" begin

@@ -43,9 +43,9 @@ mutable struct UringIO{S <: Server} <: AbstractIO
 end
 
 function UringIO(server::S, engine::Engine) where {S <: Server}
-    cfg = HTTPConfig(server.max_header_bytes, server.max_body_size,
-                     server.header_timeout_ms, server.body_timeout_ms,
-                     server.idle_timeout_ms)
+    cfg = HTTPConfig(server.config.max_header_bytes, server.config.max_body_size,
+                     server.config.header_timeout_ms, server.config.body_timeout_ms,
+                     server.config.idle_timeout_ms)
     return UringIO{S}(server, engine, ConnectionPool(), BufferPool(), cfg,
                       Dict{Ptr{Cvoid}, HTTPConn{Connection}}(),
                       Dict{Ptr{Cvoid}, ConnEntry}(),
@@ -55,7 +55,7 @@ end
 # ── AbstractIO implementation ───────────────────────────────────────────────
 
 io_config(io::UringIO)          = io.cfg
-io_running(io::UringIO)::Bool   = io.server._running[]
+io_running(io::UringIO)::Bool   = io.server.runtime.running[]
 io_acquire_buffer(io::UringIO)  = acquire!(io.buf_pool)
 
 function io_read(io::UringIO, st::HTTPConn)::Int
@@ -120,7 +120,7 @@ end
 function io_release(io::UringIO, st::HTTPConn)
     delete!(io.states, st.handle.ptr)
     release!(io.conn_pool, st.handle)
-    Threads.atomic_sub!(io.server._conn_count, 1)
+    Threads.atomic_sub!(io.server.runtime.conn_count, 1)
     if length(io.free) < _MAX_POOLED_STATES
         _shrink_buffers!(st)
         push!(io.free, st)
@@ -154,7 +154,7 @@ end
 function _start_workers(server::Server, queue_depth::Int, nworkers::Int)
     log!(server.logger, Info, "io_uring backend with $nworkers worker(s)")
     backend = IOUringBackend(; queue_depth, nworkers,
-                             host=server.host, backlog=server.backlog)
+                             host=server.config.host, backlog=server.config.backlog)
 
     factory = function (engine, tid)
         log!(server.logger, Info, "[Thread $tid] io_uring engine ready")
@@ -169,7 +169,7 @@ function _start_workers(server::Server, queue_depth::Int, nworkers::Int)
         return handler, tick, drain
     end
 
-    start_backend!(backend, factory, server.port; running=server._running)
+    start_backend!(backend, factory, server.config.port; running=server.runtime.running)
 end
 
 # ── Event pump ──────────────────────────────────────────────────────────────
@@ -210,8 +210,8 @@ end
 end
 
 function _on_accept(io::UringIO, client_fd::Cint)
-    if Threads.atomic_add!(io.server._conn_count, 1) + 1 > io.server.max_connections
-        Threads.atomic_sub!(io.server._conn_count, 1)
+    if Threads.atomic_add!(io.server.runtime.conn_count, 1) + 1 > io.server.config.max_connections
+        Threads.atomic_sub!(io.server.runtime.conn_count, 1)
         close_fd!(client_fd)
         return
     end
@@ -236,7 +236,7 @@ end
 
 """Connection draining and deadline sweep, once per tick."""
 function _worker_tick!(io::UringIO)
-    if !io.server._running[]
+    if !io.server.runtime.running[]
         io.stop_time == 0.0 && (io.stop_time = time())
         _drain_connections!(io)
     end
@@ -248,7 +248,7 @@ end
 are allowed to flush, everything else is retired. After `shutdown_timeout`
 even pending writes are dropped."""
 function _drain_connections!(io::UringIO)
-    forced = time() - io.stop_time > io.server.shutdown_timeout
+    forced = time() - io.stop_time > io.server.config.shutdown_timeout
     for st in collect(values(io.states))
         st.retired && continue
         (forced || st.inflight != :write) && http_retire(io, st)

@@ -63,20 +63,20 @@ using PicoHTTPParser
 
         # Default parameters
         server = Server(; router)
-        @test server.host == "0.0.0.0"
-        @test server.port == 8080
-        @test server.backlog == 8192
-        @test server.max_body_size == 1_048_576
+        @test server.config.host == "0.0.0.0"
+        @test server.config.port == 8080
+        @test server.config.backlog == 8192
+        @test server.config.max_body_size == 1_048_576
         @test server.logger isa NullLogger
         @test server.catcher isa DefaultCatcher
         @test server.executor isa SyncExecutor
-        @test server._running[] == false
+        @test server.runtime.running[] == false
 
         # Custom parameters
         server2 = Server(; router, port=3000, host="127.0.0.1", max_body_size=5_000_000)
-        @test server2.port == 3000
-        @test server2.host == "127.0.0.1"
-        @test server2.max_body_size == 5_000_000
+        @test server2.config.port == 3000
+        @test server2.config.host == "127.0.0.1"
+        @test server2.config.max_body_size == 5_000_000
     end
 
     @testset "Custom executor" begin
@@ -295,9 +295,9 @@ using PicoHTTPParser
     @testset "Server stop! flag" begin
         router = Trie()
         server = Server(; router, port=19992)
-        @test server._running[] == false
+        @test server.runtime.running[] == false
         stop!(server)
-        @test server._running[] == false  # stop! sets it false; start! sets it true
+        @test server.runtime.running[] == false  # stop! sets it false; start! sets it true
     end
 
     @testset "Dispatch - HEAD auto-generated" begin
@@ -458,10 +458,10 @@ using PicoHTTPParser
             max_body_size=512,
             shutdown_timeout=1.0,
         )
-        @test server.host == "127.0.0.1"
-        @test server.port == 9999
-        @test server.backlog == 256
-        @test server.max_body_size == 512
-        @test server.shutdown_timeout == 1.0
+        @test server.config.host == "127.0.0.1"
+        @test server.config.port == 9999
+        @test server.config.backlog == 256
+        @test server.config.max_body_size == 512
+        @test server.config.shutdown_timeout == 1.0
     end
 end
