@@ -1,46 +1,51 @@
-# Ciro.jl
+# Ciro.jl ⚡
 
-High-performance HTTP/1.1 framework for Julia, built for low-latency REST APIs and
-high-concurrency ML serving.
+> **Blazing-fast HTTP/1.1 for Julia** — low-latency REST APIs and high-concurrency ML
+> model serving, with one tight request pipeline and a small, auditable native layer.
 
 [![Build Status](https://github.com/AbrJA/Ciro.jl/workflows/CI/badge.svg)](https://github.com/AbrJA/Ciro.jl/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](#-license)
+[![Julia 1.10+](https://img.shields.io/badge/Julia-1.10%2B-9558B2.svg)](#-requirements)
 
-## Why Ciro?
+---
 
-Ciro serves models and APIs directly from Julia with one tight request pipeline and a
-small, auditable native layer.
+## ✨ Why Ciro?
 
-- **io_uring backend** (Linux): thread-per-core, one ring per thread, `SO_REUSEPORT`,
-  async I/O with a zero-allocation steady state. See `backend=:uring` (default).
-- **Portable Sockets backend**: blocking sockets plus per-connection tasks, no native
-  dependency; runs anywhere Julia does. See `backend=:sockets`.
-- **One pipeline**: the io_uring server and the transport-free `Application` share
-  `Runtime.dispatch`, so fakes cannot drift from production.
-- **Zero-copy request views**: method, target, headers, and body are views into the
-  connection buffer; request construction measured ~480 B (was ~4 KB).
-- **Strict framing and limits**: header/body/idle timeouts, `max_header_bytes`,
-  `max_body_size`, `max_connections`; obs-fold, duplicate `Content-Length`, and CL+TE
-  are rejected; header injection is impossible through `Response`.
-- **Graceful shutdown**: `stop!` (or SIGINT) stops accepting, flushes in-flight writes,
-  closes idle connections, and drains within `shutdown_timeout`.
-- **Trie router** with typed params, groups, wildcards, and 405 + `Allow`.
+- 🚀 **io_uring backend** (Linux): thread-per-core, one ring per Julia thread,
+  `SO_REUSEPORT`, async I/O with a zero-allocation steady state.
+- 🔌 **Portable Sockets backend**: blocking sockets + per-connection tasks, no native
+  dependency — runs anywhere Julia does (`backend=:sockets`).
+- 🧠 **One pipeline**: the io_uring server and the transport-free `Application` share
+  `Runtime.dispatch`, so fakes can't drift from production.
+- 🪞 **Zero-copy request views**: method, target, headers, and body are views into the
+  connection buffer — request construction measured at **~480 B** (was ~4 KB).
+- 🛡️ **Strict framing & limits**: header/body/idle timeouts, size and connection caps;
+  obs-fold, duplicate `Content-Length`, and CL+TE are rejected; header injection is
+  impossible through `Response`.
+- 🌊 **Graceful shutdown**: `stop!` (or SIGINT) stops accepting, flushes in-flight
+  writes, closes idle connections, and drains within `shutdown_timeout`.
+- 🗺️ **Trie router** with typed params, groups, wildcards, and 405 + `Allow`.
+- 🧩 **Modular internals**: `Interface → Router → Runtime → HTTP → Backend → Core`.
 
-`ARCHITECTURE.md` is the design guide; `docs/DESIGN_REVIEW.md` is the audit and staged
-plan; `WORKLOG.md` tracks progress.
+> 📖 `ARCHITECTURE.md` is the design guide · `docs/DESIGN_REVIEW.md` the audit and
+> staged plan · `WORKLOG.md` the progress tracker.
 
-## Requirements
+---
 
-- Julia 1.10+
-- io_uring backend: Linux kernel 5.19+, liburing headers, a C compiler
-- Sockets backend: no native dependencies
+## 🧰 Requirements
 
-Ubuntu/Debian:
+- 🟣 Julia **1.10+**
+- 🐧 For the io_uring backend: Linux **5.19+**, liburing headers, a C compiler
+- 🍎🪟 The Sockets backend needs **no native dependencies**
 
 ```bash
+# Ubuntu/Debian
 sudo apt install liburing-dev
 ```
 
-## Installation
+---
+
+## 📦 Installation
 
 ```julia
 using Pkg
@@ -53,13 +58,15 @@ Build the native backend (needed for `backend=:uring`):
 cd lib && make
 ```
 
-## Quick start
+---
+
+## 🚀 Quick Start
 
 ```julia
 using Ciro
 
 router = Trie()
-get!(router, "/health", ctx -> json("""{"status":"healthy"}"""))
+get!(router, "/health",  ctx -> json("""{"status":"healthy"}"""))
 post!(router, "/predict", ctx -> json("""{"prediction":0.42}"""))
 
 # io_uring (default) on Linux; use backend=:sockets anywhere else
@@ -76,9 +83,11 @@ curl -X POST http://localhost:3001/api/v1/predict \
   -H 'Content-Type: application/json' -d '{"features":[1.0,2.0,3.0]}'
 ```
 
-## Configuration and limits
+---
 
-Everything is validated at construction, so configuration errors are startup errors:
+## ⚙️ Configuration & Limits
+
+Everything is validated at construction, so configuration errors are **startup errors**:
 
 ```julia
 Server(;
@@ -97,9 +106,11 @@ Server(;
 )
 ```
 
-## API highlights
+---
 
-### Routing
+## 📚 API Highlights
+
+### 🛣️ Routing
 
 ```julia
 router = Trie()
@@ -113,21 +124,21 @@ head!(router,    "/path", handler)
 options!(router, "/path", handler)
 ```
 
-### Typed params, wildcards, groups
+### 🧩 Typed Params, Wildcards & Groups
 
 ```julia
-get!(router, "/models/:name", ctx -> text(param(ctx, :name)))
-get!(router, "/models/:id::Int", ctx -> text("id=$(param(ctx, Int, :id))"))
-get!(router, "/scores/:n::Float64", ctx -> text("n=$(param(ctx, Float64, :n))"))
-get!(router, "/files/*", ctx -> text("serving: $(path(ctx))"))
+get!(router, "/models/:name",         ctx -> text(param(ctx, :name)))
+get!(router, "/models/:id::Int",      ctx -> text("id=$(param(ctx, Int, :id))"))
+get!(router, "/scores/:n::Float64",   ctx -> text("n=$(param(ctx, Float64, :n))"))
+get!(router, "/files/*",              ctx -> text("serving: $(path(ctx))"))
 
 group!(router, "/api/v1") do g
-    get!(g,  "/models", list_models)
-    post!(g, "/predict/:id", run_prediction)
+    get!(g,  "/models",       list_models)
+    post!(g, "/predict/:id",  run_prediction)
 end
 ```
 
-### Request and response helpers
+### 🧾 Request & Response Helpers
 
 ```julia
 # Request
@@ -139,11 +150,11 @@ text("Hello"); html("<h1>Hi</h1>"); json("""{"ok":true}""")
 redirect("/login"); fail(404, "Not Found")
 ```
 
-### Zero-copy views: the retention rule
+### 🪞 Zero-Copy Views — the Retention Rule
 
-Handlers receive views into the connection buffer. `ctx.request.path`,
+Handlers receive **views into the connection buffer**: `ctx.request.path`,
 `ctx.request.headers`, and the body are valid **only until the handler returns**,
-because the buffer is reused for the next request. Copy anything you need to keep:
+because the buffer is reused for the next request. Copy anything you keep:
 
 ```julia
 get!(router, "/audit", ctx -> begin
@@ -153,9 +164,10 @@ get!(router, "/audit", ctx -> begin
 end)
 ```
 
-`body(ctx)` and `rawbody(ctx)` already return owned copies. See `ARCHITECTURE.md` §4.4.
+> `body(ctx)` / `rawbody(ctx)` already return owned copies.
+> Lifetime rules: `ARCHITECTURE.md` §4.4.
 
-### Middleware pattern (callable struct)
+### 🧱 Middleware Pattern (Callable Struct)
 
 ```julia
 struct WithAuth{H}
@@ -171,7 +183,9 @@ end
 get!(router, "/admin", WithAuth(admin_handler, ENV["SECRET"]))
 ```
 
-## Architecture
+---
+
+## 🏗️ Architecture
 
 ```text
 Interface   contracts and value types (Request/Response/Context, traits)
@@ -188,21 +202,24 @@ Backend     AbstractIO adapters: UringIO (io_uring) and SocketsIO
 Core        Server: config + runtime state, workers, accept, drain
 ```
 
-The HTTP layer talks to a backend only through the `AbstractIO` seam, and both
-adapters pass the same wire acceptance suite. Details: `ARCHITECTURE.md`.
+The HTTP layer talks to a backend **only** through the `AbstractIO` seam, and both
+adapters pass the same wire acceptance suite.
 
-## Testing
+---
+
+## 🧪 Testing
 
 ```bash
-# required for the io_uring backend
-(cd lib && make)
+(cd lib && make)   # required for the io_uring backend
 julia --project=. -e 'using Pkg; Pkg.test()'
 ```
 
-The suite includes Aqua + JET, allocation budgets, and wire-level acceptance tests
-that run real servers over sockets for both backends.
+The suite includes **Aqua + JET**, allocation budgets, and **wire-level acceptance
+tests** that run real servers over sockets for both backends.
 
-## Benchmarks
+---
+
+## 📈 Benchmarks
 
 ```bash
 (cd benchmarks/khttp && cargo build --release)
@@ -211,30 +228,36 @@ julia --project=. benchmarks/ciro_bench.jl &
 ./benchmarks/run_bench.sh
 ```
 
-Requires oha (`cargo install oha`).
+Requires [oha](https://github.com/hatoo/oha) (`cargo install oha`).
 
-## Status and limitations
+---
 
-- io_uring is Linux-only; use `backend=:sockets` elsewhere. The Sockets backend uses a
-  single accept loop (ignores `nworkers`), blocking writes without a send timeout, and
-  IP-literal hosts only.
-- **SIGTERM cannot be intercepted by Julia code** (the runtime swallows it). Stop with
+## ⚠️ Status & Limitations
+
+- 🐧 io_uring is **Linux-only**; use `backend=:sockets` elsewhere. The Sockets backend
+  uses a single accept loop (ignores `nworkers`), blocking writes without a send
+  timeout, and IP-literal hosts only.
+- 🛑 **SIGTERM cannot be intercepted** by Julia code (the runtime swallows it). Stop with
   `stop!` from another task, or SIGINT: systemd `KillSignal=SIGINT`, Docker
   `docker stop --signal=SIGINT`.
-- HTTP/1.1 only; no TLS or HTTP/2 in the core (terminate TLS at a reverse proxy).
-- Routing still allocates a small params vector on parameterized routes; compiled
-  routing and the async executor are on the roadmap.
+- 🌐 HTTP/1.1 only; no TLS or HTTP/2 in the core (terminate TLS at a reverse proxy).
+- 📐 Parameterized routes still allocate a small params vector; compiled routing and the
+  async executor are on the roadmap.
 
-## Extensibility
+---
+
+## 🔌 Extensibility
 
 | Module | Role | Extension direction |
 |---|---|---|
-| `Interface` | Types and contracts | Custom `AbstractLogger`/`AbstractCatcher`/`AbstractExecutor` |
+| `Interface` | Types and contracts | Custom `AbstractLogger` / `AbstractCatcher` / `AbstractExecutor` |
 | `Router` | Trie dispatch | Implement another `AbstractRouter` |
 | `Runtime` | Transport-free pipeline | Custom executors; embed via `Application` |
 | `HTTP` | Protocol state machine | Shared by every backend |
-| `Backend`/`Core` | I/O adapters and server wiring | Implement `AbstractIO` (kqueue, IOCP, libhv, ...) |
+| `Backend` / `Core` | I/O adapters and server wiring | Implement `AbstractIO` (kqueue, IOCP, libhv, ...) |
 
-## License
+---
 
-MIT
+## 📄 License
+
+MIT — see [LICENSE](LICENSE).
