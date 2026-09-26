@@ -16,8 +16,9 @@ Run the io_uring completion loop. For each completion, calls:
     handler(event::CompletionEvent)
 
 Additionally, after every loop iteration (including timeouts), calls
-`on_tick()` if provided. `on_tick` enables deadline sweeps and heartbeats
-without a second task.
+`on_tick()` if provided, then submits any operations it queued. `on_tick`
+enables deadline sweeps, heartbeats, and cross-thread reply delivery without
+a second task.
 
 When `running[]` becomes false the loop exits immediately, unless a `drain`
 function is provided: then it keeps running until `drain()` returns true
@@ -47,6 +48,10 @@ function run_eventloop!(handler::H, engine::Engine;
         end
 
         on_tick === nothing || on_tick()
+
+        # `on_tick` may queue new operations (e.g. responses produced by worker
+        # threads); submit them even when no completion arrived this iteration.
+        submit!(engine)
 
         # Yield so the Julia scheduler can run other tasks (interrupts, GC,
         # test clients) on this thread. The 5ms wait timeout bounds latency.
