@@ -302,20 +302,20 @@ end
 function _build_request(st::HTTPConn)
     hb = st.hbuf
     buf = st.rbuf
-    method = String(request_method(hb, buf))
-    target = String(request_target(hb, buf))
+    method = request_method(hb, buf)   # views into `buf`; valid during dispatch
+    target = request_target(hb, buf)
     path, query = Interface._split_target(target)
 
     n = length(hb)
-    headers = Vector{Pair{String,String}}(undef, n)
+    headers = Vector{Pair{typeof(method),typeof(method)}}(undef, n)
     for i in 1:n
-        headers[i] = String(header_name(hb, i, buf)) => String(header_value(hb, i, buf))
+        headers[i] = header_name(hb, i, buf) => header_value(hb, i, buf)
     end
 
     body = if st.chunked
-        copy(view(st.body, 1:st.bodylen))
+        view(st.body, 1:st.bodylen)
     else
-        copy(view(buf, st.header_len + 1:st.header_len + st.body_need))
+        view(buf, st.header_len + 1:st.header_len + st.body_need)
     end
 
     return Request(method, target, path, query, headers, body,

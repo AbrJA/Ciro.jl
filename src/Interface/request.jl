@@ -60,14 +60,14 @@ export header, hasheader
 
 # ── Body Utilities ──────────────────────────────────────────────────────────
 
-"""Get request body as String (single allocation — String() copies once)."""
+"""Get request body as String (one owned copy, safe to retain)."""
 function body(req::Request)::String
-    String(req.body)
+    String(Vector{UInt8}(req.body))
 end
 
 body(req::PicoHTTPParser.Request)::String = body(Request(req))
 
-"""Get raw request body bytes."""
+"""Get raw request body bytes (one owned copy, safe to retain)."""
 function rawbody(req::Request)::Vector{UInt8}
     Vector{UInt8}(req.body)
 end
@@ -90,22 +90,13 @@ export body, rawbody, content_type
 
 # ── Path & Query ────────────────────────────────────────────────────────────
 
-"""Get the path portion (before ?) from a request."""
-@inline function path(req::Request)::SubString
-    p = req.path
-    len = ncodeunits(p)
-    for i in 1:len
-        @inbounds codeunit(p, i) == UInt8('?') && return SubString(String(p), 1, i - 1)
-    end
-    return SubString(String(p), 1, len)
-end
+"""Get the path portion (before `?`) from a request."""
+@inline path(req::Request) = req.path
 
-@inline path(req::PicoHTTPParser.Request)::SubString = path(Request(req))
+@inline path(req::PicoHTTPParser.Request) = path(Request(req))
 
-"""Get the query string (after ?) from a request."""
-@inline function query(req::Request)::String
-    req.query
-end
+"""Get the query string (after `?`) from a request."""
+@inline query(req::Request) = req.query
 
 @inline query(req::PicoHTTPParser.Request)::String = query(Request(req))
 

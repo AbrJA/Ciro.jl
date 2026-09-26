@@ -464,4 +464,21 @@ using PicoHTTPParser
         @test server.config.max_body_size == 512
         @test server.config.shutdown_timeout == 1.0
     end
+
+    @testset "zero-copy request construction (allocation budget)" begin
+        raw = Vector{UInt8}("GET /users/42 HTTP/1.1\r\nHost: x\r\nAccept: */*\r\n\r\n")
+        st = Ciro.HTTP.HTTPConn(nothing)
+        append!(st.rbuf, raw)
+        st.rlen = length(raw)
+        @test Ciro.HTTP.parse_request_head!(st.hbuf, st.rbuf) === :done
+        st.header_len = Ciro.HTTP.head_length(st.hbuf)
+
+        Ciro.HTTP._build_request(st)   # warmup
+        @test (@allocated Ciro.HTTP._build_request(st)) < 1500
+
+        req = Ciro.HTTP._build_request(st)
+        @test req.path == "/users/42"
+        @test header(req, "Host") == "x"
+        @test isempty(body(req))
+    end
 end

@@ -457,11 +457,11 @@ end
                     _wait_ready(sock_port)
 
                     @test startswith(roundtrip(sock_port,
-                        "GET /hello HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"),
+                        "GET /hello HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"; timeout=10.0),
                         "HTTP/1.1 200")
 
                     # keep-alive then a split-header request on the same connection
-                    c = TestClient(sock_port)
+                    c = TestClient(sock_port; timeout=10.0)
                     try
                         _send(c, "GET /hello HTTP/1.1\r\nHost: x\r\n\r\n")
                         @test startswith(read_response(c), "HTTP/1.1 200")
@@ -503,7 +503,7 @@ end
                 try
                     _wait_ready(drain_port)
 
-                    c = TestClient(drain_port)
+                    c = TestClient(drain_port; timeout=10.0)
                     _send(c, "GET /hello HTTP/1.1\r\nHost: x\r\n\r\n")
                     @test startswith(read_response(c), "HTTP/1.1 200")
 
