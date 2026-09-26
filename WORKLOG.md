@@ -112,6 +112,13 @@ State at pause:
   uses 503 shedding).
 - Static files (dotfile denial, traversal matrix), per-route streaming limits
   (chunk size / max stream duration), SSE keepalive comments.
+- Perf (evidence-gated, do not do speculatively): if a profile shows `Channel` lock
+  contention, evaluate replacing only the UringIO reply inbox with a lock-free queue
+  (ConcurrentCollections.jl `ConcurrentQueue`, or a bounded ring sized from
+  `max_pending`/`queue_depth`). Keep `Channel` for stream acks and
+  `SocketsEntry.reply`: blocking `take!` plus `close`-to-wake is load-bearing
+  (disconnect/shutdown must release workers), and `close(jobs)` is the executor
+  shutdown wakeup. ConcurrentCollections has no close/failure semantics.
 - Packaging: JLL artifact, untrack `lib/ciro.so`, docs build, Linux-only CI matrix.
 
 ### Gotchas from this session (don't relearn)
