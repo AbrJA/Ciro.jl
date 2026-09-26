@@ -4,9 +4,9 @@
 using Ciro
 
 # Handlers — same semantics as khttp/src/main.rs
-index(req)   = text("Welcome!")
-get_user(req) = text("User: $(param(:id))")
-post_user(req) = text("")
+index(_)       = text("Welcome!")
+get_user(ctx)  = text("User: $(param(ctx, :id))")
+post_user(_)   = text("")
 
 router = Trie()
 get!(router,  "/",          index)

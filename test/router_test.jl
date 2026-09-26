@@ -454,4 +454,18 @@ using PicoHTTPParser
         @test matched(route(r, Methods.HEAD, "/g/x"))
         @test matched(route(r, Methods.OPTIONS, "/g/x"))
     end
+
+    @testset "routing allocation budget and inference" begin
+        r = Trie()
+        get!(r, "/fixed", _ -> text("ok"))
+        get!(r, "/users/:id::Int", _ -> text("u"))
+        freeze!(r)
+
+        route(r, Methods.GET, "/fixed")     # warmup
+        route(r, Methods.GET, "/users/42")
+
+        @test (@allocated route(r, Methods.GET, "/fixed")) <= 64
+        @test (@allocated route(r, Methods.GET, "/users/42")) <= 256
+        @test @inferred(route(r, Methods.GET, "/fixed")) isa RouteResult
+    end
 end
