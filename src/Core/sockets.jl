@@ -12,7 +12,7 @@ mutable struct SocketsEntry
     sock     :: Sockets.TCPSocket
     wrote    :: Int          # bytes of the last response written synchronously
     released :: Bool
-    reply    :: Channel{Response}  # async executor replies; closed to wake the task
+    reply    :: Channel{_Outbound}  # async replies/chunks; closed to wake the task
 end
 
 mutable struct SocketsIO{S <: Server} <: AbstractIO
@@ -71,7 +71,12 @@ function _sockets_close(io::SocketsIO, st::HTTPConn)
     entry = get(io.entries, objectid(st.handle), nothing)
     entry === nothing && return
     isopen(entry.sock) && close(entry.sock)
-    isopen(entry.reply) && close(entry.reply)   # wake a task waiting for a reply
+    # Fail queued stream handshakes so workers blocked on a flush wake up,
+    # then close the channel to wake the connection task itself.
+    while isready(entry.reply)
+        _close_ack(take!(entry.reply))
+    end
+    isopen(entry.reply) && close(entry.reply)
     return
 end
 
@@ -98,12 +103,35 @@ only this connection task touches `st`, so no state is shared."""
 function io_dispatch_async(io::SocketsIO, st::HTTPConn, req::Request)::Bool
     if isasync(io.server.executor)
         entry = io.entries[objectid(st.handle)]
+        gen = st.gen
+        reply = payload -> begin
+            if payload isa Stream
+                _run_stream(entry.reply, st, gen, payload)
+            else
+                put!(entry.reply, _Reply(st, gen, payload))
+            end
+        end
         dispatch_async(io.server.router, io.server.executor, io.server.catcher,
-                       req, r -> put!(entry.reply, r))
+                       req, reply)
         return true
     end
     http_deliver_response(io, st, io_dispatch(io, req))
     return false
+end
+
+"""Handle one worker→loop message for a connection under this task's control."""
+function _sockets_deliver(io::SocketsIO, st::HTTPConn, msg::_Outbound)
+    st.gen == msg.gen || (_close_ack(msg); return)
+    if msg isa _Reply
+        http_deliver_response(io, st, msg.payload)
+    elseif msg isa _StreamBegin
+        http_stream_begin(io, st, msg.stream, msg.ack)
+    elseif msg isa _StreamChunk
+        http_stream_chunk(io, st, msg.bytes, msg.ack)
+    else
+        http_stream_end(io, st)
+    end
+    return
 end
 
 # ── Per-connection task ─────────────────────────────────────────────────────
@@ -112,7 +140,11 @@ function _sockets_connection(io::SocketsIO, st::HTTPConn, entry::SocketsEntry)
     id = objectid(st.handle)
     try
         while !st.retired && io.server.runtime.running[]
-            if st.phase != :awaiting
+            if st.phase == :streaming
+                # Consume the next head/chunk/terminal message; the write below
+                # completes it and acks the worker.
+                _sockets_deliver(io, st, take!(entry.reply))
+            elseif st.phase != :awaiting
                 data = try
                     readavailable(entry.sock)
                 catch
@@ -127,7 +159,7 @@ function _sockets_connection(io::SocketsIO, st::HTTPConn, entry::SocketsEntry)
             # A handler may run on a worker thread; wait for its reply before
             # touching this connection's state again.
             if st.phase == :awaiting && !st.retired
-                http_deliver_response(io, st, take!(entry.reply))
+                _sockets_deliver(io, st, take!(entry.reply))
             end
 
             # Drain synchronous write completions, including pipelined responses.
@@ -171,7 +203,7 @@ function _sockets_accept_loop(io::SocketsIO)
         st.inflight = :read
 
         id = objectid(sock)
-        entry = SocketsEntry(sock, 0, false, Channel{Response}(1))
+        entry = SocketsEntry(sock, 0, false, Channel{_Outbound}(1))
         io.states[id] = st
         io.entries[id] = entry
         @async _sockets_connection(io, st, entry)
@@ -194,11 +226,11 @@ function _sockets_drain_loop(io::SocketsIO)
     io.stop_time = time()
     deadline = io.stop_time + io.server.config.shutdown_timeout
 
-    # Retire everything except handlers still running on an async executor;
-    # those get until the deadline to report back.
+    # Retire everything except handlers/streams still running on an async
+    # executor; those get until the deadline to report back.
     while !isempty(io.states) && time() < deadline
         for (_, st) in collect(io.states)
-            (st.retired || st.phase == :awaiting) && continue
+            (st.retired || st.phase == :awaiting || st.phase == :streaming) && continue
             http_retire(io, st)
         end
         sleep(0.05)

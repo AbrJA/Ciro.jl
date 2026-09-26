@@ -23,6 +23,94 @@ mutable struct ConnEntry
     pending :: Union{Nothing, PendingWrite}
 end
 
+# ── Async outbound messages (worker → event loop) ───────────────────────────
+# Workers may not touch connection state directly: every response, stream head,
+# chunk and terminal event crosses through an adapter-owned thread-safe queue
+# and is delivered on the event-loop thread.
+
+abstract type _Outbound end
+
+struct _Reply <: _Outbound
+    st      :: HTTPConn
+    gen     :: UInt64
+    payload :: Response
+end
+
+struct _StreamBegin <: _Outbound
+    st     :: HTTPConn
+    gen    :: UInt64
+    stream :: Stream
+    ack    :: Channel{Bool}
+end
+
+struct _StreamChunk <: _Outbound
+    st    :: HTTPConn
+    gen   :: UInt64
+    bytes :: Vector{UInt8}
+    ack   :: Channel{Bool}
+end
+
+struct _StreamEnd <: _Outbound
+    st  :: HTTPConn
+    gen :: UInt64
+end
+
+@inline function _close_ack(msg::_Outbound)
+    if msg isa _StreamBegin || msg isa _StreamChunk
+        isopen(msg.ack) && close(msg.ack)
+    end
+    return
+end
+
+"""
+    _run_stream(outbound, st, gen, stream)
+
+Run a stream body on this worker thread, marshalling the head and every chunk
+to the event loop and blocking for each flush (backpressure). Returns when the
+body ends or the connection is gone; the event loop fails the handshake by
+closing `ack`.
+"""
+function _run_stream(outbound::Channel, st::HTTPConn, gen::UInt64, stream::Stream)
+    ack = Channel{Bool}(1)
+    put!(outbound, _StreamBegin(st, gen, stream, ack))
+    started = try
+        take!(ack)
+    catch
+        false
+    end
+    started || return
+
+    send = bytes -> begin
+        ok = try
+            put!(outbound, _StreamChunk(st, gen, bytes, ack))
+            true
+        catch
+            false
+        end
+        ok || return false
+        return try
+            take!(ack)
+        catch
+            false
+        end
+    end
+    finish = () -> begin
+        try
+            put!(outbound, _StreamEnd(st, gen))
+        catch
+        end
+        return nothing
+    end
+
+    w = StreamWriter(send, finish, :open)
+    try
+        stream.body(w)
+    finally
+        close(w)
+    end
+    return
+end
+
 """
     UringIO <: AbstractIO
 
@@ -40,7 +128,7 @@ mutable struct UringIO{S <: Server} <: AbstractIO
     free      :: Vector{HTTPConn{Connection}}
     last_sweep:: Float64
     stop_time :: Float64
-    replies   :: Channel{Tuple{HTTPConn{Connection},UInt64,Response}}
+    replies   :: Channel{_Outbound}
 end
 
 function UringIO(server::S, engine::Engine) where {S <: Server}
@@ -51,7 +139,7 @@ function UringIO(server::S, engine::Engine) where {S <: Server}
                       Dict{Ptr{Cvoid}, HTTPConn{Connection}}(),
                       Dict{Ptr{Cvoid}, ConnEntry}(),
                       HTTPConn{Connection}[], 0.0, 0.0,
-                      Channel{Tuple{HTTPConn{Connection},UInt64,Response}}(Inf))
+                      Channel{_Outbound}(Inf))
 end
 
 # ── AbstractIO implementation ───────────────────────────────────────────────
@@ -136,14 +224,21 @@ end
 
 io_isasync(io::UringIO)::Bool = isasync(io.server.executor)
 
-"""Async handlers run away from this thread; their replies are posted to
-`io.replies` and delivered from `_worker_tick!` (generation-checked, so a
-reply for a recycled connection is dropped)."""
+"""Async handlers run away from this thread; their responses and stream chunks
+are posted to `io.replies` and delivered from `_worker_tick!`
+(generation-checked, so messages for a recycled connection are dropped)."""
 function io_dispatch_async(io::UringIO, st::HTTPConn, req::Request)::Bool
     if isasync(io.server.executor)
         gen = st.gen
+        reply = payload -> begin
+            if payload isa Stream
+                _run_stream(io.replies, st, gen, payload)
+            else
+                put!(io.replies, _Reply(st, gen, payload))
+            end
+        end
         dispatch_async(io.server.router, io.server.executor, io.server.catcher,
-                       req, r -> put!(io.replies, (st, gen, r)))
+                       req, reply)
         return true
     end
     http_deliver_response(io, st, io_dispatch(io, req))
@@ -270,25 +365,43 @@ function _worker_tick!(io::UringIO)
     return
 end
 
-"""Deliver responses produced by async executors on the event-loop thread."""
+"""Deliver responses and stream chunks produced by async executors on the
+event-loop thread. Messages for retired or recycled connections are dropped,
+failing their stream handshake so the worker does not block forever."""
 function _drain_replies!(io::UringIO)
     while isready(io.replies)
-        st, gen, response = take!(io.replies)
-        get(io.states, st.handle.ptr, nothing) === st || continue
-        st.gen == gen || continue
-        http_deliver_response(io, st, response)
+        msg = take!(io.replies)
+        st = msg.st
+        live = !st.retired &&
+               get(io.states, st.handle.ptr, nothing) === st &&
+               st.gen == msg.gen
+        if !live
+            _close_ack(msg)
+            continue
+        end
+
+        if msg isa _Reply
+            http_deliver_response(io, st, msg.payload)
+        elseif msg isa _StreamBegin
+            http_stream_begin(io, st, msg.stream, msg.ack)
+        elseif msg isa _StreamChunk
+            http_stream_chunk(io, st, msg.bytes, msg.ack)
+        else
+            http_stream_end(io, st)
+        end
     end
     return
 end
 
-"""Close connections during shutdown so the worker can exit: in-flight writes
-and in-flight async handlers are allowed to finish, everything else is
-retired. After `shutdown_timeout` even those are dropped."""
+"""Close connections during shutdown so the worker can exit: in-flight writes,
+async handlers and streams are allowed to finish, everything else is retired.
+After `shutdown_timeout` even those are dropped."""
 function _drain_connections!(io::UringIO)
     forced = time() - io.stop_time > io.server.config.shutdown_timeout
     for st in collect(values(io.states))
         st.retired && continue
-        (forced || (st.inflight != :write && st.phase != :awaiting)) && http_retire(io, st)
+        busy = st.inflight == :write || st.phase == :awaiting || st.phase == :streaming
+        (forced || !busy) && http_retire(io, st)
     end
     return
 end

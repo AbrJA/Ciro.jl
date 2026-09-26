@@ -100,6 +100,114 @@ function serialize_response!(buf::Vector{UInt8}, response::Response)::Int
     return cursor - 1  # bytes written
 end
 
+# ── Streaming serialization ─────────────────────────────────────────────────
+
+"""
+    serialize_head!(buf, code, headers, chunked, close) -> Int
+
+Serialize a status line and header section only (no body, no Content-Length),
+adding `Transfer-Encoding: chunked` when `chunked` and `Connection: close` when
+`close` (and not already present). Used to open a streaming response.
+"""
+function serialize_head!(buf::Vector{UInt8}, code::Int,
+                         headers::Vector{Pair{String,String}},
+                         chunked::Bool, close::Bool)::Int
+    sl = status(code)
+    sl_len = sizeof(sl)
+
+    headers_len = 0
+    for (k, v) in headers
+        headers_len += sizeof(k) + 2 + sizeof(v) + 2
+    end
+
+    has_date = false
+    has_connection = false
+    for (k, _) in headers
+        k == "Date" && (has_date = true)
+        k == "Connection" && (has_connection = true)
+    end
+    date_str = has_date ? "" : _http_date()
+
+    if chunked
+        headers_len += 18 + 2   # "Transfer-Encoding: chunked\r\n"
+    end
+    if close && !has_connection
+        headers_len += 10 + 5 + 2   # "Connection: close\r\n"
+    end
+    if !has_date
+        headers_len += 6 + sizeof(date_str) + 2
+    end
+    headers_len += 2
+
+    total = sl_len + headers_len
+    length(buf) < total && resize!(buf, total)
+
+    cursor = 1
+    cursor = _write_str!(buf, cursor, sl)
+
+    for (k, v) in headers
+        cursor = _write_str!(buf, cursor, k)
+        cursor = _write_lit!(buf, cursor, ": ")
+        cursor = _write_str!(buf, cursor, v)
+        cursor = _write_lit!(buf, cursor, "\r\n")
+    end
+
+    if chunked
+        cursor = _write_lit!(buf, cursor, "Transfer-Encoding: chunked\r\n")
+    end
+    if close && !has_connection
+        cursor = _write_lit!(buf, cursor, "Connection: close\r\n")
+    end
+    if !has_date
+        cursor = _write_lit!(buf, cursor, "Date: ")
+        cursor = _write_str!(buf, cursor, date_str)
+        cursor = _write_lit!(buf, cursor, "\r\n")
+    end
+    cursor = _write_lit!(buf, cursor, "\r\n")
+
+    return cursor - 1
+end
+
+"""
+    serialize_chunk!(buf, data) -> Int
+
+Frame `data` as one HTTP/1.1 chunk: `<hex-size>\\r\\n<data>\\r\\n`.
+"""
+function serialize_chunk!(buf::Vector{UInt8}, data::Vector{UInt8})::Int
+    n = length(data)
+    total = _hexdigits(n) + 2 + n + 2
+    length(buf) < total && resize!(buf, total)
+    cursor = _write_hex!(buf, 1, n)
+    cursor = _write_lit!(buf, cursor, "\r\n")
+    if n > 0
+        GC.@preserve data unsafe_copyto!(pointer(buf, cursor), pointer(data), n)
+        cursor += n
+    end
+    cursor = _write_lit!(buf, cursor, "\r\n")
+    return cursor - 1
+end
+
+"""Write the terminating zero-length chunk (`0\\r\\n\\r\\n`)."""
+function serialize_last_chunk!(buf::Vector{UInt8})::Int
+    length(buf) < 5 && resize!(buf, 5)
+    @inbounds begin
+        buf[1] = UInt8('0')
+        buf[2] = UInt8('\r')
+        buf[3] = UInt8('\n')
+        buf[4] = UInt8('\r')
+        buf[5] = UInt8('\n')
+    end
+    return 5
+end
+
+"""Copy `data` for a raw streaming write (user supplied `Content-Length`)."""
+function serialize_raw!(buf::Vector{UInt8}, data::Vector{UInt8})::Int
+    n = length(data)
+    length(buf) < n && resize!(buf, n)
+    GC.@preserve data unsafe_copyto!(pointer(buf), pointer(data), n)
+    return n
+end
+
 # ── Zero-copy write helpers ─────────────────────────────────────────────────
 
 @inline function _write_str!(buf::Vector{UInt8}, cursor::Int, s::String)::Int
@@ -138,4 +246,28 @@ end
         d += 1
     end
     return d
+end
+
+@inline function _hexdigits(n::Int)::Int
+    d = 1
+    v = n
+    while v >= 16
+        v >>= 4
+        d += 1
+    end
+    return d
+end
+
+"""Write `n` as lowercase hex digits (chunk-size encoding)."""
+@inline function _write_hex!(buf::Vector{UInt8}, cursor::Int, n::Int)::Int
+    d = _hexdigits(n)
+    pos = cursor + d - 1
+    v = n
+    @inbounds for _ in 1:d
+        digit = v & 0xf
+        buf[pos] = digit < 10 ? (UInt8('0') + digit) : (UInt8('a') + digit - 10)
+        v >>= 4
+        pos -= 1
+    end
+    return cursor + d
 end

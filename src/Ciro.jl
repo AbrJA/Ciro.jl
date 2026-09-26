@@ -42,6 +42,7 @@ export RequestContext, Context, Request, Response, Endpoint, RouteResult, Method
 
 # Response builders
 export text, html, json, redirect, fail
+export Stream, StreamWriter, StreamClosedError, stream, sse
 
 # Request access
 export header, hasheader, body, rawbody, content_type

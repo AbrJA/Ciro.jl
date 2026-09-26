@@ -191,11 +191,18 @@ Everything in §3.3 is implemented, plus the `HTTP`/`Backend` extraction:
   user code via `invokelatest` so handlers registered across `start!` cycles are
   visible (world-age safety); `run_eventloop!` submits after `on_tick`, so replies
   queued from worker threads are flushed even when no completion arrives.
-- Gates: `Pkg.test()` → 722 passed, 0 failed; acceptance 70/70, also under
+- **Streaming/SSE**: handlers return `Stream` (`stream`/`sse` builders); the body
+  runs on an executor worker with a `StreamWriter <: IO`. The HTTP layer frames
+  `Transfer-Encoding: chunked` (raw when the user supplies `Content-Length`; body
+  suppressed for HEAD), keeps exactly one flush in flight and acks the worker per
+  chunk for backpressure, and `_finish_stream` resumes keep-alive/pipelining.
+  Retirement (client disconnect, forced shutdown) fails the handshake and releases
+  the worker; streaming requires `AsyncExecutor`.
+- Gates: `Pkg.test()` → 775 passed, 0 failed; acceptance 97/97, also under
   `--check-bounds=yes`.
 
 Still open: params allocation on parameterized routes, compiled routing, `@inferred`
-guards, streaming/SSE (see §4.2 and §9).
+guards, HTTP/2/TLS (see §4.2 and §9).
 
 ---
 
@@ -448,7 +455,7 @@ Questions I'd most like a maintainer decision on:
 | 3 (partial) ✅ | Zero-copy `Request` views, lazy `Headers`, copy-free routing, `copy(ctx)` escape hatch, allocation budget (~480 B). Pending: params allocation, compiled routing, `@inferred` guards. |
 | 3.5 | Per-route limits, access log/metrics. |
 | 4 | JLL packaging for the native lib, docs build, CI matrix. |
-| v1.5 (partial) ✅ | Async executor (bounded, 503 shedding, copy-on-escape, both backends). Pending: streaming/SSE, reusing the executor's request-ownership boundary. |
+| v1.5 ✅ | Async executor (bounded, 503 shedding, copy-on-escape, both backends) and streaming/SSE on the same ownership boundary (chunked, backpressure, disconnect-safe). |
 | v2 | Sockets backend ✅ (proves the seam), then Reseau/native alternatives only if benchmarks demand them. |
 
 Rationale: every stage must leave the test suite green and must not require moving

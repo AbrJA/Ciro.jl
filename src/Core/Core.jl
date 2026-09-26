@@ -20,7 +20,8 @@ import ..HTTP: io_config, io_running, io_read, io_acquire_buffer, io_write,
                io_isasync, io_dispatch_async
 using ..HTTP: HTTPConfig, HTTPConn, http_reset!, http_on_read, http_on_write,
               http_retire, http_finalize, http_expired,
-              http_deliver_response, _wants_close, serialize_response!, _http_date
+              http_deliver_response, http_stream_begin, http_stream_chunk,
+              http_stream_end, _wants_close, serialize_response!, _http_date
 import PicoHTTPParser
 using Sockets
 using Base.Threads: @threads, nthreads

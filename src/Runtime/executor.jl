@@ -85,7 +85,8 @@ function _async_worker(ex::AsyncExecutor, jobs::Channel)
             # Workers live across many `start!`/`stop!` cycles, so run user
             # code in the latest world instead of the one captured at spawn.
             r = Base.invokelatest(handler, ctx)
-            r isa Response ? r : text(string(r))
+            # `Stream` is handed to the adapter, which frames chunks.
+            r isa Stream ? r : (r isa Response ? r : text(string(r)))
         catch err
             Base.invokelatest(intercept, catcher,
                               err isa Exception ? err : ErrorException(string(err)),

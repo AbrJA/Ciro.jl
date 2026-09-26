@@ -124,6 +124,42 @@ function read_response(c::TestClient; expect_body::Bool=true)
     return head_str * String(copy(body))
 end
 
+"""Read one CRLF-terminated line (without the CRLF)."""
+function _recv_line(c::TestClient)
+    buf = UInt8[]
+    while length(buf) < 8192
+        ch = _recv(c, 1)
+        isempty(ch) && break
+        push!(buf, ch[1])
+        if length(buf) >= 2 && buf[end-1] == UInt8('\r') && buf[end] == UInt8('\n')
+            return String(copy(buf[1:end-2]))
+        end
+    end
+    return String(copy(buf))
+end
+
+"""Read a chunked response body (headers must already be consumed)."""
+function _read_chunked_body(c::TestClient)
+    body = UInt8[]
+    while true
+        line = _recv_line(c)
+        isempty(line) && break
+        n = try
+            parse(Int, split(line, ";")[1], base=16)
+        catch
+            break
+        end
+        if n == 0
+            while !isempty(_recv_line(c))   # trailers
+            end
+            break
+        end
+        append!(body, _recv(c, n))
+        _recv(c, 2)   # CRLF after chunk data
+    end
+    return String(copy(body))
+end
+
 """Send a full request on a fresh connection and read one response."""
 function roundtrip(port::Integer, data::AbstractString; timeout::Float64=2.0, expect_body::Bool=true)
     c = TestClient(port; timeout)
@@ -163,6 +199,25 @@ post!(router, "/echo", ctx -> text(body(ctx)))
 get!(router, "/inject", _ -> redirect("/x\r\nX-Injected: yes"))
 get!(router, "/slow", _ -> (sleep(0.3); text("slow")))
 get!(router, "/hold", _ -> (sleep(0.6); text("held")))
+get!(router, "/stream", _ -> stream() do w
+    for i in 1:3
+        println(w, "chunk", i)
+        sleep(0.05)
+    end
+end)
+get!(router, "/events", _ -> sse() do send
+    send("one"; event="tick", id="1")
+    send("two\nlines"; event="tick", id="2")
+end)
+get!(router, "/stream-cl", _ -> stream(; headers=["Content-Length" => "5"]) do w
+    write(w, "hello")
+end)
+get!(router, "/forever", _ -> stream() do w
+    while true
+        write(w, "tick")
+        sleep(0.05)
+    end
+end)
 start!(Server(; router, port=PORT EXTRA); nworkers=2)
 """
 
@@ -205,6 +260,9 @@ end
                 @test startswith(resp405, "HTTP/1.1 405")
                 @test occursin("Allow:", resp405)
                 @test occursin("GET", resp405)
+                # streaming needs AsyncExecutor; the sync server answers 500
+                @test startswith(roundtrip(port, "GET /stream HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"),
+                                 "HTTP/1.1 500")
             end
 
             @testset "keep-alive" begin
@@ -539,6 +597,56 @@ end
                         finally
                             _close(c)
                         end
+
+                        # Chunked streaming: incremental body, chunked framing.
+                        c = TestClient(async_port; timeout=10.0)
+                        try
+                            _send(c, "GET /stream HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                            hs = String(copy(_recv_until_headers(c)))
+                            @test startswith(hs, "HTTP/1.1 200")
+                            @test occursin("Transfer-Encoding: chunked", hs)
+                            @test _read_chunked_body(c) == "chunk1\nchunk2\nchunk3\n"
+                        finally
+                            _close(c)
+                        end
+
+                        # Server-Sent Events.
+                        c = TestClient(async_port; timeout=10.0)
+                        try
+                            _send(c, "GET /events HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                            hs = String(copy(_recv_until_headers(c)))
+                            @test occursin("Content-Type: text/event-stream", hs)
+                            body = _read_chunked_body(c)
+                            @test occursin("id: 1\nevent: tick\ndata: one\n\n", body)
+                            @test occursin("data: two\ndata: lines\n\n", body)
+                        finally
+                            _close(c)
+                        end
+
+                        # A user-supplied Content-Length switches off chunking.
+                        c = TestClient(async_port; timeout=10.0)
+                        try
+                            _send(c, "GET /stream-cl HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                            hs = String(copy(_recv_until_headers(c)))
+                            @test occursin("Content-Length: 5", hs)
+                            @test !occursin("chunked", hs)
+                            @test String(copy(_recv(c, 5))) == "hello"
+                        finally
+                            _close(c)
+                        end
+
+                        # A pipelined request is answered after the stream ends.
+                        c = TestClient(async_port; timeout=10.0)
+                        try
+                            _send(c, "GET /stream HTTP/1.1\r\nHost: x\r\n\r\n" *
+                                     "GET /hello HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                            _recv_until_headers(c)
+                            @test _read_chunked_body(c) == "chunk1\nchunk2\nchunk3\n"
+                            r = read_response(c)
+                            @test startswith(r, "HTTP/1.1 200") && endswith(r, "hello")
+                        finally
+                            _close(c)
+                        end
                     finally
                         _kill_server(ap)
                     end
@@ -567,6 +675,22 @@ end
                             _close(c1)
                             _close(c2)
                         end
+
+                        # A client that vanishes mid-stream releases its worker:
+                        # with max_pending=1 the next request would be shed if
+                        # the interrupted stream still held the only slot.
+                        c = TestClient(shed_port; timeout=10.0)
+                        try
+                            _send(c, "GET /forever HTTP/1.1\r\nHost: x\r\n\r\n")
+                            hs = String(copy(_recv_until_headers(c)))
+                            @test startswith(hs, "HTTP/1.1 200")
+                        finally
+                            _close(c)
+                        end
+                        sleep(0.5)
+                        @test startswith(roundtrip(shed_port,
+                            "GET /hello HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"; timeout=10.0),
+                            "HTTP/1.1 200")
                     finally
                         _kill_server(sp)
                     end

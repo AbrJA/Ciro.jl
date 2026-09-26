@@ -75,6 +75,26 @@ function http_on_write(io::AbstractIO, st::HTTPConn, n::Int)
         return
     end
 
+    if st.phase == :streaming
+        # Release the worker waiting on this chunk; a terminal chunk ends the
+        # response and returns the connection to request handling.
+        _put_ack!(st.stream_ack, true)
+        st.stream_ack = nothing
+        st.stream_final && _resume_connection(io, st)
+        return
+    end
+
+    _resume_connection(io, st)
+    return
+end
+
+"""Return the connection to request handling after a response is complete."""
+function _resume_connection(io::AbstractIO, st::HTTPConn)
+    st.stream_ack = nothing
+    st.stream_final = false
+    st.stream_chunked = false
+    st.stream_head = false
+
     if st.close_after || !io_running(io)
         http_finalize(io, st)
         return
@@ -115,6 +135,112 @@ function io_dispatch_async(io::AbstractIO, st::HTTPConn, req::Request)::Bool
     return false
 end
 
+# ── Streaming ───────────────────────────────────────────────────────────────
+
+"""Release a worker blocked on a stream handshake (`false` if it already left)."""
+@inline function _put_ack!(ack::Union{Nothing, Channel{Bool}}, ok::Bool)
+    ack === nothing && return
+    isopen(ack) || return
+    try
+        put!(ack, ok)
+    catch
+    end
+    return
+end
+
+"""Fail the stream handshake held by this connection, unblocking its worker."""
+function _fail_stream!(st::HTTPConn)
+    ack = st.stream_ack
+    st.stream_ack = nothing
+    ack !== nothing && isopen(ack) && close(ack)
+    return
+end
+
+@inline function _has_header(headers::Vector{Pair{String,String}}, name::String)::Bool
+    for (k, _) in headers
+        hdr_key_eq_ci(k, name) && return true
+    end
+    return false
+end
+
+"""
+    http_stream_begin(io, st, stream, ack)
+
+Open a streaming response: serialize status line and headers (chunked when the
+length is unknown and the protocol allows it) and queue the head write. The
+worker is acked once the head is flushed.
+"""
+function http_stream_begin(io::AbstractIO, st::HTTPConn, stream::Stream,
+                           ack::Channel{Bool})
+    st.stream_ack = ack
+    st.stream_final = false
+    # Frame ourselves only when the body length is unknown and the user did not
+    # already provide framing headers.
+    st.stream_chunked = st.http11 && !st.stream_head &&
+                        !_has_header(stream.headers, "Content-Length") &&
+                        !_has_header(stream.headers, "Transfer-Encoding")
+    st.http11 || (st.close_after = true)
+    st.deadline = 0.0
+    st.phase = :streaming
+
+    out = io_acquire_buffer(io)
+    n = serialize_head!(out, stream.status, stream.headers,
+                        st.stream_chunked, st.close_after)
+    if io_write(io, st, out, n) != 0
+        http_finalize(io, st)
+    end
+    return
+end
+
+"""
+    http_stream_chunk(io, st, bytes, ack)
+
+Frame and queue one body chunk; `ack` receives `true` when it is flushed, or
+`false` when the stream is gone (retired, already terminal, or HEAD).
+"""
+function http_stream_chunk(io::AbstractIO, st::HTTPConn, bytes::Vector{UInt8},
+                           ack::Channel{Bool})
+    if st.retired || st.phase != :streaming || st.stream_final
+        _put_ack!(ack, false)
+        return
+    end
+    if isempty(bytes) || st.stream_head
+        _put_ack!(ack, true)
+        return
+    end
+    st.stream_ack = ack
+    out = io_acquire_buffer(io)
+    n = st.stream_chunked ? serialize_chunk!(out, bytes) : serialize_raw!(out, bytes)
+    if io_write(io, st, out, n) != 0
+        http_finalize(io, st)
+    end
+    return
+end
+
+"""
+    http_stream_end(io, st)
+
+Terminate a streaming response: queue the last chunk (or finish immediately for
+HEAD/`Content-Length` streams) and resume request handling.
+"""
+function http_stream_end(io::AbstractIO, st::HTTPConn)
+    st.retired && return
+    st.phase == :streaming || return
+    st.stream_final = true
+
+    if st.stream_chunked && !st.stream_head
+        out = io_acquire_buffer(io)
+        n = serialize_last_chunk!(out)
+        if io_write(io, st, out, n) != 0
+            http_finalize(io, st)
+        end
+        return
+    end
+
+    st.inflight == :none && _resume_connection(io, st)
+    return
+end
+
 """Close immediately if idle; otherwise shut the socket down (which wakes the
 in-flight operation and FINs the peer) and wait for the completion before
 recycling the connection state."""
@@ -130,6 +256,7 @@ end
 
 function http_finalize(io::AbstractIO, st::HTTPConn)
     st.retired = true   # guards in-flight dispatch against the recycled state
+    _fail_stream!(st)
     io_close(io, st)
     io_release(io, st)
     return
@@ -294,6 +421,11 @@ end
 function _complete_request(io::AbstractIO, st::HTTPConn)
     req = _build_request(st)
     st.close_after = wants_close(req)
+    st.http11 = req.minor_version >= 1
+    st.stream_head = req.method == "HEAD"
+    st.stream_chunked = false
+    st.stream_final = false
+    st.stream_ack = nothing
 
     # An async executor retains the request past this call, and the views die
     # at the next buffer advance: hand it an owned copy (copy-on-escape).

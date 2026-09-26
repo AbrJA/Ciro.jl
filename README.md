@@ -22,6 +22,8 @@
 - ⏱️ **Async executor**: slow handlers (model inference, blocking I/O) run on a bounded
   worker pool with automatic copy-on-escape and `503` shedding — the event loop never
   blocks.
+- 🌊 **Streaming & SSE**: chunked responses and `text/event-stream` with backpressure;
+  a disconnected client releases its worker instead of leaking it.
 - 🛡️ **Strict framing & limits**: header/body/idle timeouts, size and connection caps;
   obs-fold, duplicate `Content-Length`, and CL+TE are rejected; header injection is
   impossible through `Response`.
@@ -186,6 +188,36 @@ Run Julia with more threads than event-loop workers (e.g. `julia --threads=6` fo
 `nworkers=2` + `worker_threads=4`) so handlers get real parallelism. Defaults are
 safe; tune `worker_threads`/`max_pending` to your workload.
 
+### 🌊 Streaming & Server-Sent Events
+
+Stream a body incrementally: the handler runs on an async worker and every write
+is flushed with backpressure (`close(w)` ends early; the stream ends when the body
+returns):
+
+```julia
+server = Server(; router, executor = AsyncExecutor())
+
+get!(router, "/ticks", ctx -> stream() do w
+    for i in 1:10
+        println(w, "tick ", i)
+        sleep(0.5)
+    end
+end)                                  # Transfer-Encoding: chunked
+
+get!(router, "/events", ctx -> sse() do send
+    send("connected"; event="open")
+    while true
+        send("tick"; event="heartbeat")
+        sleep(1)
+    end
+end)                                  # Content-Type: text/event-stream
+```
+
+Streaming requires `AsyncExecutor` (a synchronous handler would block the event
+loop for the whole body). If the client disconnects, the next write throws
+`StreamClosedError` and the worker is released. Supplying a `Content-Length`
+header switches chunking off and sends bytes raw.
+
 ### 🧱 Middleware Pattern (Callable Struct)
 
 ```julia
@@ -260,9 +292,9 @@ Requires [oha](https://github.com/hatoo/oha) (`cargo install oha`).
   `stop!` from another task, or SIGINT: systemd `KillSignal=SIGINT`, Docker
   `docker stop --signal=SIGINT`.
 - 🌐 HTTP/1.1 only; no TLS or HTTP/2 in the core (terminate TLS at a reverse proxy).
-- 📐 Parameterized routes still allocate a small params vector; compiled routing and
-  streaming/SSE are on the roadmap. Async handlers hold their connection until the
-  handler returns (no mid-response streaming yet).
+- 📐 Parameterized routes still allocate a small params vector; compiled routing is on
+  the roadmap. Streaming/SSE requires `AsyncExecutor` and occupies a worker for the
+  lifetime of each open stream (HTTP/1.1 only; no HTTP/2).
 
 ---
 

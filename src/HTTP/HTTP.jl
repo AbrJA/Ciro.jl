@@ -21,7 +21,8 @@ export AbstractIO,
        io_config, io_running, io_read, io_acquire_buffer, io_write, io_on_write,
        io_shutdown, io_close, io_release, io_dispatch,
        io_isasync, io_dispatch_async
-export serialize_response!, http_deliver_response
+export serialize_response!, serialize_head!, http_deliver_response,
+       http_stream_begin, http_stream_chunk, http_stream_end
 
 include("config.jl")
 include("io.jl")

@@ -179,6 +179,8 @@ dispatch_async(router::AbstractRouter, executor::AbstractExecutor,
                            endpoint, ctx::RequestContext)::Response
     try
         response = execute!(executor, endpoint, ctx)
+        response isa Stream &&
+            throw(ArgumentError("streaming responses require AsyncExecutor"))
         return response isa Response ? response : text(string(response))
     catch err
         return intercept(catcher,

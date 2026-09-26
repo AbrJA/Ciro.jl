@@ -9,12 +9,12 @@ See `docs/DESIGN_LESSONS.md` for the engineering standards and
 ## RESUME — next session
 
 State at pause:
-- `dev`: Stages 0–2.5 and Stage 3a/3b committed. `Pkg.test()` → **722 passed,
-  0 failed**; acceptance 70/70 (both backends, including 20 async wire assertions);
-  PicoHTTPParser `0.3.0` resolves from General.
-- Uncommitted (this session): v1.5 async executor — `Runtime/executor.jl`,
-  `dispatch_async`, the `:awaiting` HTTP phase, both adapters, server lifecycle,
-  and tests.
+- `dev`: Stages 0–2.5, Stage 3a/3b, and the async executor (`bacca8b`, `625c2bb`)
+  committed. `Pkg.test()` → **775 passed, 0 failed**; acceptance 97/97 (both
+  backends); PicoHTTPParser `0.3.0` resolves from General.
+- Uncommitted (this session): v1.5 streaming/SSE — `Interface/stream.jl`, HTTP
+  chunk framing + `:streaming` phase, adapter outbound messages, tests, docs.
+- PR for the async-executor work is open (pushed by the maintainer).
 
 ### v1.5 — Async executor (uncommitted, this session)
 - `AsyncExecutor(worker_threads=2, max_pending=256)`: unbounded job `Channel` gated
@@ -38,9 +38,29 @@ State at pause:
 - Event-loop fix: `run_eventloop!` submits after `on_tick`; without it, writes queued
   by reply delivery were never flushed when no completion arrived.
 
+### v1.5 — Streaming/SSE (uncommitted, this session)
+- `Interface/stream.jl`: `Stream` + `stream(body)` / `sse(body)` builders, a
+  `StreamWriter <: IO` (print/println/write; `close` ends the response) and an
+  `SSESender` (id/event/retry/data framing). Sync executors reject `Stream` with
+  a 500 (a sync body would block the event loop).
+- HTTP: `:streaming` phase; `serialize_head!` (TE: chunked unless the user
+  supplied `Content-Length`, raw for HEAD/HTTP1.0), `serialize_chunk!`,
+  `serialize_last_chunk!`; one flush in flight, acked per chunk for backpressure;
+  `_finish_stream` resumes keep-alive/pipelining; `http_finalize` fails the
+  handshake so a disconnected client releases its worker.
+- Core: `_Outbound` messages (`_Reply`/`_StreamBegin`/`_StreamChunk`/`_StreamEnd`)
+  marshalled from workers; `_run_stream` runs the body and blocks on acks. UringIO
+  drains the inbox in `on_tick` (generation-checked); SocketsIO consumes the
+  per-connection channel in the connection task. Shutdown lets streams finish
+  until `shutdown_timeout`.
+- Tests: `test/stream_test.jl` (30: builders, SSE framing, worker protocol,
+  disconnect, framing helpers) + 23 wire assertions on both backends (chunked,
+  SSE, Content-Length raw, pipelining after stream, sync 500, disconnect with
+  `max_pending=1`). `Pkg.test()` 775; acceptance 97/97.
+
 ### Next
-- Streaming/SSE on top of the async ownership boundary; routing params allocation;
-  compiled routing; `@inferred` guards; push `dev` and open the master PR for CI.
+- Routing params allocation; compiled routing; `@inferred` guards; static files;
+  JLL packaging (Stage 4).
 
 ### Stage 2 — DONE (one pipeline, graceful shutdown)
 - Single dispatch pipeline: `Runtime.dispatch(router, executor, catcher, request)` is
@@ -90,8 +110,8 @@ State at pause:
 - Access logging + metrics (count exceptions as 5xx too). `max_connections` currently
   sheds by closing silently; consider 503 + `Retry-After` (the async executor already
   uses 503 shedding).
-- SSE/streaming responses (v1.5 architecture) and static files (dotfile denial,
-  traversal matrix).
+- Static files (dotfile denial, traversal matrix), per-route streaming limits
+  (chunk size / max stream duration), SSE keepalive comments.
 - Packaging: JLL artifact, untrack `lib/ciro.so`, docs build, Linux-only CI matrix.
 
 ### Gotchas from this session (don't relearn)
@@ -112,6 +132,14 @@ State at pause:
   that can be swallowed by the worker's error path.
 - Queuing I/O from `on_tick` requires a `submit!` after the tick; otherwise SQEs sit
   unsubmitted until the next unrelated completion.
+- Streaming serializes chunk flushes through a single `stream_ack` slot: never
+  process a second chunk event for the same connection before the first ack.
+- A zero-length chunk is the HTTP terminator — `http_stream_chunk` acks empty
+  writes without serializing them.
+- `_complete_request` must dispatch **before** advancing `rbuf`; advancing first
+  corrupts the request views (symptom: pipelined/keep-alive requests route as 404).
+- `println(io, x)` issues two writes (data, then newline), so a chunk per write
+  means a chunk per argument.
 
 ### Resume commands
 ```sh

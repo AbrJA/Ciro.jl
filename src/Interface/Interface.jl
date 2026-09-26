@@ -17,6 +17,7 @@ include("context.jl")
 include("endpoint.jl")
 include("methods.jl")
 include("response.jl")
+include("stream.jl")
 include("types.jl")
 include("request.jl")
 

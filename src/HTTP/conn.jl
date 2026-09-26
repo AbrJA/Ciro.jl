@@ -31,13 +31,19 @@ mutable struct HTTPConn{H}
     inflight    :: Symbol         # :none | :read | :write
     retired     :: Bool
     gen         :: UInt64         # bumped on reuse; stale async replies are dropped
+    http11      :: Bool           # request minor_version >= 1
+    stream_head :: Bool           # HEAD: stream body is suppressed
+    stream_chunked :: Bool        # frame chunks (no Content-Length, HTTP/1.1)
+    stream_final   :: Bool        # terminal chunk queued; finish on completion
+    stream_ack     :: Union{Nothing, Channel{Bool}}
 end
 
 HTTPConn(handle::H) where {H} =
     HTTPConn{H}(handle, Vector{UInt8}(undef, 0), 0, 0,
                 HeaderBuffer(64), ChunkedDecoder(), Vector{UInt8}(undef, 0), 0, 0,
                 Vector{UInt8}(undef, 0), 0, Vector{UInt8}(undef, 0), 0,
-                :headers, 0, 0, false, false, 0.0, :none, false, 0)
+                :headers, 0, 0, false, false, 0.0, :none, false, 0,
+                false, false, false, false, nothing)
 
 """Reset every field for a new connection, reusing the allocated buffers."""
 function http_reset!(st::HTTPConn)
@@ -60,6 +66,11 @@ function http_reset!(st::HTTPConn)
     st.deadline = 0.0
     st.inflight = :none
     st.retired = false
+    st.http11 = false
+    st.stream_head = false
+    st.stream_chunked = false
+    st.stream_final = false
+    st.stream_ack = nothing
     d = st.decoder
     d.bytes_left_in_chunk = 0
     d.consume_trailer = 1
