@@ -42,10 +42,12 @@ using PicoHTTPParser
         @test resp.status == 200
         @test param(ctx, :id) == "42"
 
-        # Multiple params
+        # Multiple params (captures resolve against the routed path)
         result2 = route(r, Methods.GET, "/users/7/posts/99")
         @test matched(result2)
-        ctx2 = Context(req, result2.params)
+        raw2 = Vector{UInt8}("GET /users/7/posts/99 HTTP/1.1\r\nHost: x\r\n\r\n")
+        req2 = PicoHTTPParser.parse_request(raw2)
+        ctx2 = Context(req2, result2.params)
         resp2 = result2.handler(ctx2)
         @test param(ctx2, :id) == "7"
         @test param(ctx2, :post_id) == "99"
@@ -467,5 +469,43 @@ using PicoHTTPParser
         @test (@allocated route(r, Methods.GET, "/fixed")) <= 64
         @test (@allocated route(r, Methods.GET, "/users/42")) <= 256
         @test @inferred(route(r, Methods.GET, "/fixed")) isa RouteResult
+    end
+
+    @testset "scratch route! is zero-allocation" begin
+        r = Trie()
+        get!(r, "/fixed", _ -> text("ok"))
+        get!(r, "/users/:id::Int", _ -> text("u"))
+        freeze!(r)
+
+        captures = Pair{Symbol,UnitRange{Int}}[]
+        route!(r, Methods.GET, "/fixed", captures)      # warm capacity
+        route!(r, Methods.GET, "/users/42", captures)
+
+        static!() = route!(r, Methods.GET, "/fixed", captures)
+        param!()  = route!(r, Methods.GET, "/users/42", captures)
+        static!(); param!()
+
+        @test (@allocated static!()) == 0
+        @test (@allocated param!()) == 0
+        @test @inferred(param!()) isa RouteResult
+
+        # The served result aliases the scratch; ranges resolve against the
+        # routed path via the context and `copy(ctx)` materializes strings.
+        result = param!()
+        @test result.params === captures
+        req = Request("GET", "/users/42")
+        ctx = RequestContext(req, result.params)
+        @test param(ctx, :id) == "42"
+        @test param(ctx, Int, :id) == 42
+        @test copy(ctx).params == ["id" => "42"]
+        @test @inferred(param(ctx, :id)) isa String
+        @test @inferred(dispatch(r, SyncExecutor(), DefaultCatcher(), req, captures)) isa Response
+
+        # Public `route` params are owned strings, independent of any request.
+        owned = route(r, Methods.GET, "/users/42")
+        @test owned.params == [:id => "42"]
+        other = RequestContext(Request("GET", "/other/x"), owned.params)
+        @test param(other, :id) == "42"
+        @test isempty(route(r, Methods.GET, "/fixed").params)
     end
 end

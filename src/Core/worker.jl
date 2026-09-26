@@ -222,6 +222,11 @@ function io_dispatch(io::UringIO, req::Request)::Response
     return dispatch(io.server.router, io.server.executor, io.server.catcher, req)
 end
 
+function io_dispatch(io::UringIO, req::Request,
+                     captures::Vector{Pair{Symbol,UnitRange{Int}}})::Response
+    return dispatch(io.server.router, io.server.executor, io.server.catcher, req, captures)
+end
+
 io_isasync(io::UringIO)::Bool = isasync(io.server.executor)
 
 """Async handlers run away from this thread; their responses and stream chunks
@@ -238,10 +243,10 @@ function io_dispatch_async(io::UringIO, st::HTTPConn, req::Request)::Bool
             end
         end
         dispatch_async(io.server.router, io.server.executor, io.server.catcher,
-                       req, reply)
+                       req, reply, st.captures)
         return true
     end
-    http_deliver_response(io, st, io_dispatch(io, req))
+    http_deliver_response(io, st, io_dispatch(io, req, st.captures))
     return false
 end
 

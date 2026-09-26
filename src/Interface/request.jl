@@ -124,10 +124,16 @@ export path, query, queryparams
 
 # ── Route Parameter Access ──────────────────────────────────────────────────
 
+# Trie captures are byte ranges into `ctx.request.path`; custom routers and
+# manual contexts may supply strings or views directly.
+@inline _capture(::RequestContext, value) = value
+@inline _capture(ctx::RequestContext, range::UnitRange{Int}) =
+    SubString(path(ctx.request), first(range), last(range))
+
 """Get a route parameter by name as `String`. Returns `default` if not present."""
 @inline function param(ctx::RequestContext, name::Symbol, default::String="")::String
     for (k, v) in ctx.params
-        k === name && return v
+        k === name && return String(_capture(ctx, v))
     end
     return default
 end
@@ -136,9 +142,16 @@ end
 @inline function param(ctx::RequestContext, ::Type{T}, name::Symbol)::Union{T,Nothing} where T
     for (k, v) in ctx.params
         k === name || continue
-        return tryparse(T, v)
+        return tryparse(T, _capture(ctx, v))
     end
     return nothing
+end
+
+"""Owned `name => value` pairs, used by `copy(ctx)` to retain values."""
+function _materialize_params(ctx::RequestContext)
+    return Pair{String,String}[
+        String(k) => String(_capture(ctx, v)) for (k, v) in ctx.params
+    ]
 end
 
 export param

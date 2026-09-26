@@ -28,10 +28,11 @@ end
     copy(context::RequestContext) -> RequestContext
 
 Owned copy of the request and its params. The context a handler receives
-holds views into the connection buffer that are only valid until the handler
-returns; use this to retain or hand them to another task.
+holds views into the connection buffer (and, for route params, ranges into the
+request path) that are only valid until the handler returns; use this to
+retain or hand them to another task.
 """
-Base.copy(ctx::RequestContext) = RequestContext(copy(ctx.request), copy(ctx.params))
+Base.copy(ctx::RequestContext) = RequestContext(copy(ctx.request), _materialize_params(ctx))
 
 """Construct a `RequestContext` with no route parameters."""
 RequestContext(request::Request) = RequestContext(request, ())

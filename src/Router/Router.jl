@@ -2,7 +2,8 @@ module Router
 
 using ..Interface
 using ..Interface: Request, Response, Methods, AbstractRouter, RouteResult,
-                   Endpoint, matched, not_found, method_not_allowed, text, fail
+                   route!, Endpoint, matched, not_found,
+                   method_not_allowed, text, fail
 
 export Trie, get!, post!, put!, delete!, patch!, head!, options!, group!, freeze!
 
@@ -25,7 +26,7 @@ end
     return ParamSpec(name, type)
 end
 
-@inline function _validate_param(value::String, spec::ParamSpec)::Bool
+@inline function _validate_param(value::AbstractString, spec::ParamSpec)::Bool
     spec.type === :String && return true
     spec.type === :Int && return _is_integer(value)
     spec.type === :Float64 && return _is_number(value)
@@ -33,7 +34,7 @@ end
     return true
 end
 
-@inline function _is_integer(s::String)::Bool
+@inline function _is_integer(s::AbstractString)::Bool
     isempty(s) && return false
     start = @inbounds(codeunit(s, 1)) == UInt8('-') ? 2 : 1
     start > ncodeunits(s) && return false
@@ -44,7 +45,7 @@ end
     return true
 end
 
-@inline function _is_number(s::String)::Bool
+@inline function _is_number(s::AbstractString)::Bool
     isempty(s) && return false
     dot_seen = false
     start = @inbounds(codeunit(s, 1)) == UInt8('-') ? 2 : 1
@@ -216,13 +217,23 @@ export group!
 # ══════════════════════════════════════════════════════════════════════════════
 
 function Interface.route(trie::Trie, method::UInt8, path::AbstractString)::RouteResult
-    len = ncodeunits(path)
-    captured = Pair{Symbol,String}[]
+    # Owned string captures: the result is self-contained and safe to keep.
+    return Interface.route!(trie, method, path, Pair{Symbol,String}[])
+end
 
-    handler = _match_path(trie.root, path, 1, len, method, captured)
+function Interface.route!(trie::Trie, method::UInt8, path::AbstractString,
+                          captures::C)::RouteResult where {C <: AbstractVector}
+    empty!(captures)
+    len = ncodeunits(path)
+
+    handler = _match_path(trie.root, path, 1, len, method, captures)
 
     if handler !== nothing
-        return RouteResult(handler, captured)
+        # No captures: shared empty params, never the scratch (a later request
+        # would overwrite it). A range scratch resolves against `ctx.request.path`;
+        # a string scratch is already self-contained.
+        return isempty(captures) ? RouteResult(handler, ()) :
+                                   RouteResult(handler, captures)
     end
 
     # No handler found — check if path exists with other methods (→ 405)
@@ -239,8 +250,13 @@ end
 # Internal: Zero-alloc Trie Matching (inline segment iteration)
 # ══════════════════════════════════════════════════════════════════════════════
 
+# Captured values: ranges (zero-alloc scratch) or owned strings (public route).
+@inline _capture_value(::AbstractVector{Pair{Symbol,UnitRange{Int}}}, path, span) = span
+@inline _capture_value(::AbstractVector{Pair{Symbol,String}}, path, span) =
+    String(SubString(path, first(span), last(span)))
+
 function _match_path(node::TrieNode, path::AbstractString, pos::Int, len::Int,
-                     method::UInt8, captured::Vector{Pair{Symbol,String}})
+                     method::UInt8, captured::C) where {C <: AbstractVector}
     # Skip leading slashes
     while pos <= len && @inbounds(codeunit(path, pos)) == UInt8('/')
         pos += 1
@@ -268,9 +284,9 @@ function _match_path(node::TrieNode, path::AbstractString, pos::Int, len::Int,
     # Priority 2: typed parameter
     if node.param_child !== nothing
         (spec, pchild) = node.param_child
-        seg_str = String(seg)
-        if _validate_param(seg_str, spec)
-            push!(captured, spec.name => seg_str)
+        if _validate_param(seg, spec)
+            span = seg_start:(pos - 1)
+            push!(captured, spec.name => _capture_value(captured, path, span))
             result = _match_path(pchild, path, pos, len, method, captured)
             result !== nothing && return result
             pop!(captured)

@@ -8,18 +8,32 @@
 Interface for HTTP request dispatching.
 
 Required: `route(router, method::UInt8, path::AbstractString) -> RouteResult`
-Optional: `register!(router, method::UInt8, pattern::String, handler)`
+Optional: `register!(router, method::UInt8, pattern::String, handler)`,
+`route!(router, method, path, captures) -> RouteResult`
 """
 abstract type AbstractRouter end
 
 function route end
 function register! end
 
+"""
+    route!(router, method::UInt8, path, captures) -> RouteResult
+
+Like [`route`](@ref), but captures path parameters into the caller-provided
+`captures` scratch. The served path passes a reused
+`Vector{Pair{Symbol,UnitRange{Int}}}` (ranges into `path`), so routing does not
+allocate; `route` itself passes a string vector to return owned, self-contained
+params. The default implementation ignores `captures` and delegates to `route`;
+`Trie` implements it natively.
+"""
+route!(router::AbstractRouter, method::UInt8, path::AbstractString, captures) =
+    route(router, method, path)
+
 """Freeze a component before serving; mutable implementations may override it."""
 function freeze! end
 freeze!(::AbstractRouter) = nothing
 
-export AbstractRouter, route, register!, freeze!
+export AbstractRouter, route, route!, register!, freeze!
 
 """
     AbstractLogger
@@ -85,17 +99,24 @@ type instability:
 
 The `allowed` field is a bitmask of method IDs that DO exist for the path.
 This enables generating the `Allow` header without allocation.
+
+`params` is `()` when nothing was captured; otherwise it is an iterable of
+`name => value` pairs — `name => UnitRange` byte ranges into the routed path
+for a Trie match, or the values a custom router supplied. Always read values
+through [`param`](@ref), which resolves ranges against `ctx.request.path`.
 """
 struct RouteResult
-    handler :: Any                          # callable or nothing
-    params  :: Vector{Pair{Symbol,String}}  # captured path parameters
-    allowed :: UInt8                        # method bitmask (0 = no path match)
+    handler :: Any          # callable or nothing
+    params  :: Any          # () | name => value pairs
+    allowed :: UInt8        # method bitmask (0 = no path match)
 end
 
+const _NO_PARAMS = ()
+
 # Constructors for each outcome
-@inline RouteResult() = RouteResult(nothing, Pair{Symbol,String}[], 0x00)
-@inline RouteResult(allowed::UInt8) = RouteResult(nothing, Pair{Symbol,String}[], allowed)
-@inline RouteResult(handler, params::Vector{Pair{Symbol,String}}) = RouteResult(handler, params, 0x00)
+@inline RouteResult() = RouteResult(nothing, _NO_PARAMS, 0x00)
+@inline RouteResult(allowed::UInt8) = RouteResult(nothing, _NO_PARAMS, allowed)
+@inline RouteResult(handler, params) = RouteResult(handler, params, 0x00)
 
 # Status predicates — branch-free, inlinable
 @inline matched(r::RouteResult)::Bool = r.handler !== nothing

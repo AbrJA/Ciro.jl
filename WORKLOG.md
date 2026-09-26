@@ -9,14 +9,31 @@ See `docs/DESIGN_LESSONS.md` for the engineering standards and
 ## RESUME — next session
 
 State at pause:
-- `dev`: Stages 0–2.5, Stage 3a/3b, and the async executor (`bacca8b`, `625c2bb`)
-  committed. `Pkg.test()` → **775 passed, 0 failed**; acceptance 97/97 (both
-  backends); PicoHTTPParser `0.3.0` resolves from General.
-- Uncommitted (this session): v1.5 streaming/SSE — `Interface/stream.jl`, HTTP
-  chunk framing + `:streaming` phase, adapter outbound messages, tests, docs.
-- PR for the async-executor work is open (pushed by the maintainer).
+- `dev`: Stages 0–2.5, async executor (`bacca8b`, `625c2bb`), streaming/SSE
+  (`095058e`), and the lock-free-queue note (`0969dab`) committed and pushed.
+  `Pkg.test()` → **789 passed, 0 failed**; acceptance 97/97 (both backends);
+  PicoHTTPParser `0.3.0` resolves from General.
+- Uncommitted (this session): Stage 3 completion — zero-allocation route params
+  (`route!` + per-connection scratch), `@inferred` guards, docs.
 
-### v1.5 — Async executor (uncommitted, this session)
+### Stage 3 — zero-allocation route params (uncommitted, this session)
+- `RouteResult.params` values for Trie matches are now
+  `Pair{Symbol,UnitRange{Int}}` byte ranges into the routed path; `param` resolves
+  them to views on demand (`SubString(path(ctx.request), ...)`) and `copy(ctx)`
+  materializes owned strings.
+- `Interface.route!(router, method, path, captures)`: optional router method that
+  fills a caller-provided scratch. `Trie` implements it; the default delegates to
+  `route`, so custom routers are unaffected. `Runtime.dispatch`/`dispatch_async`
+  gained a scratch argument; `HTTPConn` owns the reused scratch and the adapters
+  pass it through the 3-arg `io_dispatch`.
+- Public `route` still returns owned strings (self-contained results); only the
+  served path uses ranges. Bench: `route! static/param = 0 B`, public `route`
+  unchanged (32/144 B).
+- `@inferred` guards for `route`, `route!`, `dispatch`, and `param`; scratch tests
+  cover aliasing, resolution, `copy(ctx)`, and `isempty` for static routes.
+  `Pkg.test()` 789; acceptance 97/97.
+
+### v1.5 — Async executor (committed: `bacca8b`, `625c2bb`)
 - `AsyncExecutor(worker_threads=2, max_pending=256)`: unbounded job `Channel` gated
   by an atomic `pending` counter, `503` + `Retry-After: 1` on overload, `shed_count`/
   `pending_count` for metrics/tests. `stop_executor!` does not join hung workers
@@ -38,7 +55,7 @@ State at pause:
 - Event-loop fix: `run_eventloop!` submits after `on_tick`; without it, writes queued
   by reply delivery were never flushed when no completion arrived.
 
-### v1.5 — Streaming/SSE (uncommitted, this session)
+### v1.5 — Streaming/SSE (committed: `095058e`)
 - `Interface/stream.jl`: `Stream` + `stream(body)` / `sse(body)` builders, a
   `StreamWriter <: IO` (print/println/write; `close` ends the response) and an
   `SSESender` (id/event/retry/data framing). Sync executors reject `Stream` with
@@ -59,8 +76,9 @@ State at pause:
   `max_pending=1`). `Pkg.test()` 775; acceptance 97/97.
 
 ### Next
-- Routing params allocation; compiled routing; `@inferred` guards; static files;
-  JLL packaging (Stage 4).
+- Compiled routing (dispatch table at `freeze!`); Stage 3.5 (per-route limits,
+  access log/metrics); Stage 4 packaging (untrack `lib/ciro.so`, JLL, docs build,
+  CI matrix); static files.
 
 ### Stage 2 — DONE (one pipeline, graceful shutdown)
 - Single dispatch pipeline: `Runtime.dispatch(router, executor, catcher, request)` is
@@ -147,6 +165,12 @@ State at pause:
   corrupts the request views (symptom: pipelined/keep-alive requests route as 404).
 - `println(io, x)` issues two writes (data, then newline), so a chunk per write
   means a chunk per argument.
+- Served route params alias the connection scratch and ranges resolve against
+  `ctx.request.path`: build manual contexts from the same path that was routed
+  (public `route` returns owned strings precisely so its result is self-contained).
+- `@allocated` at the REPL top level can report a phantom 32 B box for any
+  non-isbits struct returned by a dynamic call. Measure inside a compiled function
+  (single-call wrapper) before concluding there is a real allocation.
 
 ### Resume commands
 ```sh

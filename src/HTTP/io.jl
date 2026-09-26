@@ -30,7 +30,10 @@ Required methods:
 - `io_shutdown(io, st)` — wake a pending operation and FIN the peer.
 - `io_close(io, st)` — release the socket and any queued buffer.
 - `io_release(io, st)` — detach the connection state and recycle it.
-- `io_dispatch(io, request) -> Response` — run the application pipeline.
+- `io_dispatch(io, request) -> Response` — run the application pipeline. A
+  backend may instead implement `io_dispatch(io, request, captures)`, receiving
+  the connection's reusable route-capture scratch so routing does not allocate
+  (the default 3-argument method forwards to the 2-argument one).
 
 Optional capabilities (multishot accept, provided buffers, batching) are
 reported through separate predicates, never required methods, so a plain
@@ -63,3 +66,6 @@ function io_dispatch_async end
 
 "Backends without deferred dispatch are synchronous."
 io_isasync(::AbstractIO)::Bool = false
+
+"Backends that do not use the connection's route-capture scratch."
+io_dispatch(io::AbstractIO, req::Request, captures) = io_dispatch(io, req)

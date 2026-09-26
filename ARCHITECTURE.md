@@ -178,6 +178,11 @@ Everything in §3.3 is implemented, plus the `HTTP`/`Backend` extraction:
 - Zero-copy request views: `Headers` is a lazy view, routing does not copy the path,
   and `_build_request` allocates ~480 B (from ~4 KB) under an allocation-budget test.
   `copy(req)`/`copy(ctx)` is the documented retention escape hatch.
+- **Zero-allocation route params on the served path**: `route!` fills a reusable
+  per-connection scratch with `Pair{Symbol,UnitRange{Int}}` ranges into the routed
+  path (0 B for static and param routes under the allocation bench); `param` resolves
+  them to views on demand and `copy(ctx)` materializes owned strings. The public
+  `route` still returns owned strings so results are self-contained for manual use.
 - `ServerConfig`/`ServerRuntime` split; one `stop!`; one dispatch pipeline shared with
   `Application` (parity-tested); `stop!`/SIGINT drain gracefully.
 - **Async executor (v1.5)**: `AsyncExecutor(worker_threads, max_pending)` runs handlers
@@ -198,11 +203,10 @@ Everything in §3.3 is implemented, plus the `HTTP`/`Backend` extraction:
   chunk for backpressure, and `_finish_stream` resumes keep-alive/pipelining.
   Retirement (client disconnect, forced shutdown) fails the handshake and releases
   the worker; streaming requires `AsyncExecutor`.
-- Gates: `Pkg.test()` → 775 passed, 0 failed; acceptance 97/97, also under
+- Gates: `Pkg.test()` → 789 passed, 0 failed; acceptance 97/97, also under
   `--check-bounds=yes`.
 
-Still open: params allocation on parameterized routes, compiled routing, `@inferred`
-guards, HTTP/2/TLS (see §4.2 and §9).
+Still open: compiled routing, HTTP/2/TLS (see §4.2 and §9).
 
 ---
 
@@ -335,7 +339,7 @@ don't have to read this whole document to add a router or a backend.
 
 | Trait | Status | Required methods | Notes |
 |---|---|---|---|
-| `AbstractRouter` | **implemented** | `route(router, method::UInt8, path) -> RouteResult`; optionally `register!` | `Trie` is the only implementation today. |
+| `AbstractRouter` | **implemented** | `route(router, method::UInt8, path) -> RouteResult`; optionally `register!` and `route!(router, method, path, captures)` | `Trie` implements `route!` (zero-alloc served path via the connection scratch); the default `route!` delegates to `route`, so custom routers keep working unchanged. |
 | `AbstractLogger` | **implemented** | `log!(logger, level::Severity, msg::String)` | System-level only — not per-request. |
 | `AbstractCatcher` | **implemented** | `intercept(catcher, err::Exception, req) -> Response` | Must never leak internals by default (`DefaultCatcher` returns a generic 500). |
 | `AbstractBackend` | **implemented, minimal** | `start_backend!(backend, handler_factory, port; kwargs...)`, `stop_backend!(backend)` | Today this is really "how to boot an io_uring engine," not a byte-level seam — see `AbstractIO` below, which will absorb the real per-connection contract. |
@@ -405,7 +409,7 @@ overstated things).
 | ID | Decision | Recommendation |
 |---|---|---|
 | A1 | `RouteResult.handler::Any` — last `Any` on the hot path | Parametric `RouteResult{H}` + function barrier; measure before adding `FunctionWrappers.jl` |
-| A2 | `params::Vector{Pair{Symbol,String}}` allocates | Target: per-connection captured tuple or small fixed-capacity view structure (needs a router change, Stage 3) |
+| A2 | ~~`params::Vector{Pair{Symbol,String}}` allocates~~ | **Resolved (Stage 3)**: `route!` captures `Pair{Symbol,UnitRange{Int}}` into a per-connection scratch; `param` resolves views lazily, `copy(ctx)` materializes. Public `route` still returns owned strings for self-contained results. |
 | D1 | Write contract shape (completion vs readiness) | Minimal completion-style contract (§4.2); readiness backends adapt by nonblocking-write-until-`EAGAIN` |
 | E1 | Buffer ownership (double-copy today) | Julia owns read buffers; C reads into a caller pointer (§4.4) |
 | E2 | `PendingWrites` fd-indexed, fragile across fd reuse | Attach to per-connection state owned by `HTTP` |
@@ -452,7 +456,7 @@ Questions I'd most like a maintainer decision on:
 |---|---|
 | 0–2 ✅ | Parametric server, trie router, fused worker loop, connection/buffer pooling, thread-per-core event loop — verified in §3. |
 | **2.5** ✅ | Closed the §3.3 gap with wire tests, extracted `HTTP` from `worker.jl`, froze the `AbstractIO` seam, added the portable Sockets adapter, split config from runtime state. |
-| 3 (partial) ✅ | Zero-copy `Request` views, lazy `Headers`, copy-free routing, `copy(ctx)` escape hatch, allocation budget (~480 B). Pending: params allocation, compiled routing, `@inferred` guards. |
+| 3 ✅ | Zero-copy `Request` views, lazy `Headers`, copy-free routing, `copy(ctx)` escape hatch, request build ~480 B. Zero-allocation route params on the served path (`route!` + connection scratch; `route! static/param = 0 B`), `@inferred` guards. Pending: compiled routing (dispatch-table at `freeze!`). |
 | 3.5 | Per-route limits, access log/metrics. |
 | 4 | JLL packaging for the native lib, docs build, CI matrix. |
 | v1.5 ✅ | Async executor (bounded, 503 shedding, copy-on-escape, both backends) and streaming/SSE on the same ownership boundary (chunked, backpressure, disconnect-safe). |

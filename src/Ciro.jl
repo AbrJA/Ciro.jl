@@ -49,7 +49,7 @@ export header, hasheader, body, rawbody, content_type
 export path, query, queryparams, param
 
 # Routing
-export Trie, register!, route, freeze!
+export Trie, register!, route, route!, freeze!
 export matched, not_found, method_not_allowed
 export get!, post!, put!, delete!, patch!, head!, options!, group!
 

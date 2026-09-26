@@ -292,9 +292,10 @@ Requires [oha](https://github.com/hatoo/oha) (`cargo install oha`).
   `stop!` from another task, or SIGINT: systemd `KillSignal=SIGINT`, Docker
   `docker stop --signal=SIGINT`.
 - 🌐 HTTP/1.1 only; no TLS or HTTP/2 in the core (terminate TLS at a reverse proxy).
-- 📐 Parameterized routes still allocate a small params vector; compiled routing is on
-  the roadmap. Streaming/SSE requires `AsyncExecutor` and occupies a worker for the
-  lifetime of each open stream (HTTP/1.1 only; no HTTP/2).
+- 📐 Route params are **zero-allocation on the served path** (ranges into the request
+  path, resolved by `param`; `copy(ctx)` to retain). The public `route` helper still
+  returns owned strings; compiled routing is on the roadmap. Streaming/SSE requires
+  `AsyncExecutor` and occupies a worker per open stream (HTTP/1.1 only; no HTTP/2).
 
 ---
 

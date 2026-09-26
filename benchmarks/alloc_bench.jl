@@ -26,6 +26,11 @@ freeze!(router)
 check("route static", 64, () -> route(router, Methods.GET, "/fixed"))
 check("route param", 256, () -> route(router, Methods.GET, "/users/42"))
 
+# The served path reuses a per-connection scratch: no allocation at all.
+const _CAPTURES = Pair{Symbol,UnitRange{Int}}[]
+check("route! static", 16, () -> route!(router, Methods.GET, "/fixed", _CAPTURES))
+check("route! param", 16, () -> route!(router, Methods.GET, "/users/42", _CAPTURES))
+
 # ── Request construction (zero-copy views) ──────────────────────────────────
 
 raw = Vector{UInt8}(

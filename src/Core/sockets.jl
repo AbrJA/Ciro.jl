@@ -96,6 +96,10 @@ end
 io_dispatch(io::SocketsIO, req::Request)::Response =
     dispatch(io.server.router, io.server.executor, io.server.catcher, req)
 
+io_dispatch(io::SocketsIO, req::Request,
+            captures::Vector{Pair{Symbol,UnitRange{Int}}})::Response =
+    dispatch(io.server.router, io.server.executor, io.server.catcher, req, captures)
+
 io_isasync(io::SocketsIO)::Bool = isasync(io.server.executor)
 
 """Async handlers reply from another thread through the connection's channel;
@@ -112,10 +116,10 @@ function io_dispatch_async(io::SocketsIO, st::HTTPConn, req::Request)::Bool
             end
         end
         dispatch_async(io.server.router, io.server.executor, io.server.catcher,
-                       req, reply)
+                       req, reply, st.captures)
         return true
     end
-    http_deliver_response(io, st, io_dispatch(io, req))
+    http_deliver_response(io, st, io_dispatch(io, req, st.captures))
     return false
 end
 

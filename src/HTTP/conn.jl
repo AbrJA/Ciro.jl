@@ -36,6 +36,7 @@ mutable struct HTTPConn{H}
     stream_chunked :: Bool        # frame chunks (no Content-Length, HTTP/1.1)
     stream_final   :: Bool        # terminal chunk queued; finish on completion
     stream_ack     :: Union{Nothing, Channel{Bool}}
+    captures       :: Vector{Pair{Symbol,UnitRange{Int}}}  # route-param scratch
 end
 
 HTTPConn(handle::H) where {H} =
@@ -43,7 +44,8 @@ HTTPConn(handle::H) where {H} =
                 HeaderBuffer(64), ChunkedDecoder(), Vector{UInt8}(undef, 0), 0, 0,
                 Vector{UInt8}(undef, 0), 0, Vector{UInt8}(undef, 0), 0,
                 :headers, 0, 0, false, false, 0.0, :none, false, 0,
-                false, false, false, false, nothing)
+                false, false, false, false, nothing,
+                Pair{Symbol,UnitRange{Int}}[])
 
 """Reset every field for a new connection, reusing the allocated buffers."""
 function http_reset!(st::HTTPConn)
@@ -71,6 +73,7 @@ function http_reset!(st::HTTPConn)
     st.stream_chunked = false
     st.stream_final = false
     st.stream_ack = nothing
+    empty!(st.captures)
     d = st.decoder
     d.bytes_left_in_chunk = 0
     d.consume_trailer = 1

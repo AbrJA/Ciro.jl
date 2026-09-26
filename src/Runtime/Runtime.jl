@@ -9,7 +9,7 @@ module Runtime
 using ..Interface
 using ..Interface: Request, RequestContext, Response, Endpoint, RouteResult,
                    matched, not_found, method_not_allowed, Methods, text, fail,
-                   route, register!, freeze!, execute!, log!, intercept
+                   route, route!, register!, freeze!, execute!, log!, intercept
 import ..Interface: stop!, execute!, isasync, start_executor!, stop_executor!
 import PicoHTTPParser
 
@@ -96,11 +96,22 @@ The single request→response pipeline: route lookup, executor invocation and
 error interception. No I/O happens here. `Application` and the io_uring
 `Server` both go through this function, so the transport-free test surface and
 the production path can never drift apart.
+
+The 5-argument form accepts a reusable route-capture scratch
+(`Vector{Pair{Symbol,UnitRange{Int}}}`); backends pass their per-connection
+scratch so routing does not allocate.
 """
 function dispatch(router::AbstractRouter, executor::AbstractExecutor,
                   catcher::AbstractCatcher, request::Request)::Response
+    return dispatch(router, executor, catcher, request,
+                    Pair{Symbol,UnitRange{Int}}[])
+end
+
+function dispatch(router::AbstractRouter, executor::AbstractExecutor,
+                  catcher::AbstractCatcher, request::Request,
+                  captures::Vector{Pair{Symbol,UnitRange{Int}}})::Response
     method = Methods.from_string(request.method)
-    result = route(router, method, request.path)
+    result = route!(router, method, request.path, captures)
 
     not_found(result) && return fail(404, "Not Found")
 
@@ -143,13 +154,20 @@ once either way.
 """
 function dispatch_async(router::AbstractRouter, executor::AbstractExecutor,
                         catcher::AbstractCatcher, request::Request, reply)::Bool
+    return dispatch_async(router, executor, catcher, request, reply,
+                          Pair{Symbol,UnitRange{Int}}[])
+end
+
+function dispatch_async(router::AbstractRouter, executor::AbstractExecutor,
+                        catcher::AbstractCatcher, request::Request, reply,
+                        captures::Vector{Pair{Symbol,UnitRange{Int}}})::Bool
     if !isasync(executor)
-        reply(dispatch(router, executor, catcher, request))
+        reply(dispatch(router, executor, catcher, request, captures))
         return false
     end
 
     method = Methods.from_string(request.method)
-    result = route(router, method, request.path)
+    result = route!(router, method, request.path, captures)
 
     if not_found(result)
         reply(fail(404, "Not Found"))

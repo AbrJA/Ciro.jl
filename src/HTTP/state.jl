@@ -131,7 +131,7 @@ end
 # Default async dispatch: backends without deferred execution answer inline.
 # Async backends override this; see `AbstractIO` in io.jl.
 function io_dispatch_async(io::AbstractIO, st::HTTPConn, req::Request)::Bool
-    http_deliver_response(io, st, io_dispatch(io, req))
+    http_deliver_response(io, st, io_dispatch(io, req, st.captures))
     return false
 end
 
