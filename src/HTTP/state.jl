@@ -1,0 +1,427 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# HTTP connection state machine
+#
+# Entry points called by an adapter (via the AbstractIO seam):
+#   http_on_read(io, st, src, n)
+#   http_on_write(io, st, n)
+#   http_retire(io, st) / http_finalize(io, st) / http_expired(st, now)
+#
+# The machine only touches the outside world through `io_*` methods; it has no
+# knowledge of fds, rings, or pools.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Entry points ────────────────────────────────────────────────────────────
+
+"""Bytes `n`..end of a completed read are at `src` (adapter-owned memory)."""
+function http_on_read(io::AbstractIO, st::HTTPConn, src::Ptr{UInt8}, n::Int)
+    if n <= 0
+        http_retire(io, st)
+        return
+    end
+    _append_read!(st, src, n)
+    _set_deadline!(io, st)
+    _pump(io, st)
+    return
+end
+
+"""Append `n` bytes. `rbuf` length always equals `rlen` (capacity reserved with
+`sizehint!`), so the parser and stored header offsets never move under them."""
+function _append_read!(st::HTTPConn, src::Ptr{UInt8}, n::Int)
+    need = st.rlen + n
+    if need > length(st.rbuf)
+        sizehint!(st.rbuf, max(need, 2 * st.rlen, _INITIAL_RBUF))
+        resize!(st.rbuf, need)
+    end
+    GC.@preserve st unsafe_copyto!(pointer(st.rbuf, st.rlen + 1), src, n)
+    st.rlen = need
+    return
+end
+
+"""Queue another read while the request is incomplete; retire on failure."""
+function _pump(io::AbstractIO, st::HTTPConn)
+    result = _process(io, st)
+    if result === :need_more && !st.retired && st.inflight == :none
+        _set_deadline!(io, st)
+        io_read(io, st) != 0 && http_retire(io, st)
+    end
+    return
+end
+
+function _set_deadline!(io::AbstractIO, st::HTTPConn)
+    cfg = io_config(io)
+    if st.phase == :body
+        st.deadline = time() + cfg.body_timeout_ms / 1000
+    elseif st.rlen == 0
+        st.deadline = time() + cfg.idle_timeout_ms / 1000
+    else
+        st.deadline = time() + cfg.header_timeout_ms / 1000
+    end
+    return
+end
+
+"""Whether the connection is past its phase deadline and must be retired."""
+@inline http_expired(st::HTTPConn, now::Float64)::Bool =
+    !st.retired && st.deadline != 0.0 && now > st.deadline
+
+"""A completed write. Returns nothing; may retire or finalize the connection."""
+function http_on_write(io::AbstractIO, st::HTTPConn, n::Int)
+    result = io_on_write(io, st, n)
+
+    if result === :error
+        http_retire(io, st)
+        return
+    elseif result === :partial
+        return
+    end
+
+    if st.close_after || !io_running(io)
+        http_finalize(io, st)
+        return
+    end
+
+    st.phase = :headers
+    st.hdr_scanned = 0
+    if st.rlen > 0
+        _pump(io, st)   # pipelined request(s)
+    else
+        _set_deadline!(io, st)
+        io_read(io, st) != 0 && http_retire(io, st)
+    end
+    return
+end
+
+"""Close immediately if idle; otherwise shut the socket down (which wakes the
+in-flight operation and FINs the peer) and wait for the completion before
+recycling the connection state."""
+function http_retire(io::AbstractIO, st::HTTPConn)
+    if st.inflight == :none
+        http_finalize(io, st)
+        return
+    end
+    st.retired = true
+    io_shutdown(io, st)
+    return
+end
+
+function http_finalize(io::AbstractIO, st::HTTPConn)
+    io_close(io, st)
+    io_release(io, st)
+    return
+end
+
+# ── Parsing state machine ───────────────────────────────────────────────────
+
+"""Returns `:need_more` when more input is required, `:done` otherwise."""
+function _process(io::AbstractIO, st::HTTPConn)
+    if st.phase == :headers
+        status = parse_request_head!(st.hbuf, st.rbuf, st.hdr_scanned)
+        if status === :partial
+            if st.rlen > io_config(io).max_header_bytes
+                _respond_and_close(io, st, fail(431, "Request Header Fields Too Large"))
+                return :done
+            end
+            st.hdr_scanned = st.rlen
+            return :need_more
+        elseif status === :error
+            _respond_and_close(io, st, fail(400, "Bad Request"))
+            return :done
+        end
+        st.header_len = head_length(st.hbuf)
+        _prepare_body(io, st) || return :done
+        st.phase = :body
+    end
+
+    if st.phase == :body
+        if st.chunked
+            decoded = _feed_chunked!(io, st)
+            decoded === :error && return :done
+            decoded === :partial && return :need_more
+        elseif st.rlen < st.header_len + st.body_need
+            return :need_more
+        end
+        st.phase = :writing
+    end
+
+    if st.phase == :writing
+        _complete_request(io, st)
+    end
+    return :done
+end
+
+"""Parse framing headers. Returns `false` (and answers) on an invalid request."""
+function _prepare_body(io::AbstractIO, st::HTTPConn)
+    # Obs-fold continuation lines surface as empty header names (picohttpparser
+    # reports them with a NULL name). RFC 9112 allows only reject or replace;
+    # reject rather than implicitly re-frame the message.
+    for i in 1:length(st.hbuf)
+        if isempty(header_name(st.hbuf, i, st.rbuf))
+            _respond_and_close(io, st, fail(400, "Bad Request"))
+            return false
+        end
+    end
+
+    te = PicoHTTPParser.header(st.hbuf, st.rbuf, "transfer-encoding")
+    cl = try
+        content_length(st.hbuf, st.rbuf)
+    catch err
+        err isa HTTPParseError || rethrow(err)
+        _respond_and_close(io, st, fail(400, "Bad Request"))
+        return false
+    end
+
+    if te !== nothing && cl !== nothing
+        # RFC 9112 smuggling defense: never accept both.
+        _respond_and_close(io, st, fail(400, "Bad Request"))
+        return false
+    end
+
+    if te !== nothing
+        if contains_token_ci(te, "chunked")
+            st.chunked = true
+            st.body_need = 0
+            st.bodylen = 0
+            st.chunklen = 0
+            st.fed = st.header_len
+            return true
+        end
+        _respond_and_close(io, st, fail(501, "Not Implemented"))
+        return false
+    end
+
+    if cl !== nothing
+        if cl > io_config(io).max_body_size
+            _respond_and_close(io, st, fail(413, "Content Too Large"))
+            return false
+        end
+        st.body_need = cl
+    else
+        st.body_need = 0
+    end
+    return true
+end
+
+"""Feed newly arrived raw bytes to the chunked decoder.
+Returns `:partial`, `:done` or `:error` (error already answered)."""
+function _feed_chunked!(io::AbstractIO, st::HTTPConn)
+    if st.rlen > st.fed
+        n = st.rlen - st.fed
+        old = st.chunklen
+        st.chunklen += n
+        length(st.chunkbuf) < st.chunklen &&
+            resize!(st.chunkbuf, max(st.chunklen, 2 * length(st.chunkbuf), 1024))
+        GC.@preserve st begin
+            unsafe_copyto!(pointer(st.chunkbuf, old + 1), pointer(st.rbuf, st.fed + 1), n)
+        end
+        st.fed = st.rlen
+    end
+
+    resize!(st.chunkbuf, st.chunklen)
+    result = decode_chunked!(st.decoder, st.chunkbuf)
+
+    if result.status === :error
+        _respond_and_close(io, st, fail(400, "Bad Request"))
+        return :error
+    end
+
+    if result.decoded_len > 0
+        old = st.bodylen
+        st.bodylen += result.decoded_len
+        length(st.body) < st.bodylen &&
+            resize!(st.body, max(st.bodylen, 2 * length(st.body), 1024))
+        GC.@preserve st begin
+            unsafe_copyto!(pointer(st.body, old + 1), pointer(st.chunkbuf), result.decoded_len)
+        end
+    end
+
+    if st.bodylen > io_config(io).max_body_size
+        _respond_and_close(io, st, fail(413, "Content Too Large"))
+        return :error
+    end
+
+    if result.status === :partial
+        st.chunklen = 0
+        resize!(st.chunkbuf, 0)
+        return :partial
+    end
+
+    # :done — leftover bytes are the start of the next (pipelined) request.
+    # Keep them in `carry`, not `rbuf`: the request head still has to be read
+    # from `rbuf` by `_complete_request`, and overwriting it here would corrupt
+    # the method/target views.
+    leftover = result.leftover
+    st.carrylen = leftover
+    if leftover > 0
+        length(st.carry) < leftover &&
+            resize!(st.carry, max(leftover, 2 * length(st.carry), _INITIAL_RBUF))
+        GC.@preserve st begin
+            unsafe_copyto!(pointer(st.carry), pointer(st.chunkbuf, result.decoded_len + 1), leftover)
+        end
+    end
+    st.hdr_scanned = 0
+    st.chunklen = 0
+    resize!(st.chunkbuf, 0)
+    return :done
+end
+
+# ── Request completion and response ─────────────────────────────────────────
+
+function _complete_request(io::AbstractIO, st::HTTPConn)
+    req = _build_request(st)
+    response = io_dispatch(io, req)
+    close_after = wants_close(req)
+    close_after && set_connection_close!(response.headers)
+
+    if st.chunked
+        # The head was materialized above; now make the stream start with the
+        # carried bytes of the next (pipelined) request.
+        n = st.carrylen
+        st.carrylen = 0
+        if n > 0
+            length(st.rbuf) < n && resize!(st.rbuf, max(n, _INITIAL_RBUF))
+            GC.@preserve st unsafe_copyto!(pointer(st.rbuf), pointer(st.carry), n)
+        end
+        st.rlen = n
+    else
+        consumed = st.header_len + st.body_need
+        leftover = st.rlen - consumed
+        leftover > 0 && copyto!(st.rbuf, 1, st.rbuf, consumed + 1, leftover)
+        st.rlen = max(leftover, 0)
+    end
+
+    st.hdr_scanned = 0
+    st.header_len = 0
+    st.body_need = 0
+    st.chunked = false
+    st.close_after = close_after
+    st.phase = :writing
+
+    _queue_response(io, st, response)
+    return
+end
+
+function _build_request(st::HTTPConn)
+    hb = st.hbuf
+    buf = st.rbuf
+    method = String(request_method(hb, buf))
+    target = String(request_target(hb, buf))
+    path, query = Interface._split_target(target)
+
+    n = length(hb)
+    headers = Vector{Pair{String,String}}(undef, n)
+    for i in 1:n
+        headers[i] = String(header_name(hb, i, buf)) => String(header_value(hb, i, buf))
+    end
+
+    body = if st.chunked
+        copy(view(st.body, 1:st.bodylen))
+    else
+        copy(view(buf, st.header_len + 1:st.header_len + st.body_need))
+    end
+
+    return Request(method, target, path, query, headers, body,
+                   UInt8(minor_version(hb)))
+end
+
+"""Serialize and queue a response. Returns `false` if it could not be queued."""
+function _queue_response(io::AbstractIO, st::HTTPConn, response::Response)
+    out_buf = io_acquire_buffer(io)
+    nbytes = serialize_response!(out_buf, response)
+
+    if io_write(io, st, out_buf, nbytes) != 0
+        http_finalize(io, st)
+        return false
+    end
+    return true
+end
+
+function _respond_and_close(io::AbstractIO, st::HTTPConn, response::Response)
+    st.close_after = true
+    st.phase = :writing
+    _queue_response(io, st, response)
+    return
+end
+
+# ── Connection close detection ──────────────────────────────────────────────
+
+@inline wants_close(req::PicoHTTPParser.Request)::Bool = wants_close(Request(req))
+@inline wants_close(::Nothing)::Bool = true
+
+@inline function wants_close(req::Request)::Bool
+    http11_or_newer = req.minor_version >= 1
+
+    conn_val = nothing
+    for (k, v) in req.headers
+        ncodeunits(k) != 10 && continue
+        hdr_key_eq_ci(k, "connection") || continue
+        conn_val = v
+        break
+    end
+
+    conn_val === nothing && return !http11_or_newer
+    contains_token_ci(conn_val, "close") && return true
+    !http11_or_newer && !contains_token_ci(conn_val, "keep-alive") && return true
+    return false
+end
+
+@inline function set_connection_close!(headers::Vector{Pair{String,String}})
+    for i in eachindex(headers)
+        hdr_key_eq_ci(headers[i].first, "connection") || continue
+        headers[i] = "Connection" => "close"
+        return
+    end
+    push!(headers, "Connection" => "close")
+    return
+end
+
+"""Zero-allocation case-insensitive ASCII string comparison."""
+@inline function hdr_key_eq_ci(a, b::String)::Bool
+    ncodeunits(a) != ncodeunits(b) && return false
+    for i in 1:ncodeunits(b)
+        ca = @inbounds codeunit(a, i)
+        cb = @inbounds codeunit(b, i)
+        ca_lower = (UInt8('A') <= ca <= UInt8('Z')) ? (ca | 0x20) : ca
+        cb_lower = (UInt8('A') <= cb <= UInt8('Z')) ? (cb | 0x20) : cb
+        ca_lower != cb_lower && return false
+    end
+    return true
+end
+
+"""ASCII token match for comma-separated header values (no allocations)."""
+@inline function contains_token_ci(v, token::String)::Bool
+    n = ncodeunits(v)
+    tlen = ncodeunits(token)
+    i = 1
+    while i <= n
+        while i <= n
+            c = @inbounds codeunit(v, i)
+            ((c == UInt8(',')) | (c == UInt8(' ')) | (c == UInt8('\t'))) || break
+            i += 1
+        end
+        start = i
+        while i <= n
+            c = @inbounds codeunit(v, i)
+            ((c == UInt8(',')) | (c == UInt8(' ')) | (c == UInt8('\t'))) && break
+            i += 1
+        end
+        seglen = i - start
+        if seglen == tlen
+            matched = true
+            @inbounds for j in 1:tlen
+                ca = codeunit(v, start + j - 1)
+                cb = codeunit(token, j)
+                ca_lower = (UInt8('A') <= ca <= UInt8('Z')) ? (ca | 0x20) : ca
+                cb_lower = (UInt8('A') <= cb <= UInt8('Z')) ? (cb | 0x20) : cb
+                if ca_lower != cb_lower
+                    matched = false
+                    break
+                end
+            end
+            matched && return true
+        end
+    end
+    return false
+end
+
+# Source-level aliases while Core/tests migrate to the unprefixed names.
+const _wants_close = wants_close
+const _set_connection_close! = set_connection_close!
