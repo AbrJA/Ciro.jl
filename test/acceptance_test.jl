@@ -246,6 +246,50 @@ end
                     "HTTP/1.1 400")
             end
 
+            @testset "chunked request bodies" begin
+                # Complete chunked body in one segment.
+                resp = roundtrip(port,
+                    "POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n" *
+                    "5\r\nhello\r\n0\r\n\r\n")
+                @test startswith(resp, "HTTP/1.1 200")
+                @test endswith(resp, "hello")
+
+                # Chunks split across writes.
+                c = TestClient(port)
+                try
+                    _send(c, "POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n")
+                    _send(c, "5\r\nhel")
+                    sleep(0.1)
+                    _send(c, "lo\r\n0\r\n\r\n")
+                    resp = read_response(c)
+                    @test startswith(resp, "HTTP/1.1 200")
+                    @test endswith(resp, "hello")
+                finally
+                    _close(c)
+                end
+
+                # Trailer section is consumed, body is complete.
+                resp = roundtrip(port,
+                    "POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n" *
+                    "3\r\nabc\r\n0\r\nX-Trailer: v\r\n\r\n")
+                @test startswith(resp, "HTTP/1.1 200")
+                @test endswith(resp, "abc")
+
+                # A pipelined request follows the chunked message in the same buffer.
+                c = TestClient(port)
+                try
+                    _send(c, "POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n" *
+                             "2\r\nhi\r\n0\r\n\r\n" *
+                             "GET /hello HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                    r1 = read_response(c)
+                    r2 = read_response(c)
+                    @test startswith(r1, "HTTP/1.1 200") && endswith(r1, "hi")
+                    @test startswith(r2, "HTTP/1.1 200") && occursin("hello", r2)
+                finally
+                    _close(c)
+                end
+            end
+
             @testset "split headers (P0: must buffer incrementally)" begin
                 c = TestClient(port)
                 try
@@ -352,6 +396,14 @@ end
                         @test startswith(roundtrip(limited_port,
                             "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n"),
                             "HTTP/1.1 413")
+                    end
+
+                    @testset "413 chunked body limit" begin
+                        chunk = repeat("a", 50)   # 0x32 bytes; two chunks exceed max_body_size=64
+                        resp = roundtrip(limited_port,
+                            "POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n" *
+                            "32\r\n" * chunk * "\r\n32\r\n" * chunk * "\r\n0\r\n\r\n")
+                        @test startswith(resp, "HTTP/1.1 413")
                     end
 
                     @testset "header timeout" begin

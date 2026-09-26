@@ -31,6 +31,8 @@ mutable struct HTTPConn
     fed         :: Int            # rbuf bytes already handed to the chunk decoder
     body        :: Vector{UInt8}  # decoded chunked body accumulator
     bodylen     :: Int
+    carry       :: Vector{UInt8}  # bytes after a chunked message (next request)
+    carrylen    :: Int
     phase       :: Symbol         # :headers | :body | :writing
     header_len  :: Int
     body_need   :: Int
@@ -44,8 +46,8 @@ end
 HTTPConn(conn::Connection) =
     HTTPConn(conn, Cint(-1), false, Vector{UInt8}(undef, 0), 0, 0,
              HeaderBuffer(64), ChunkedDecoder(), Vector{UInt8}(undef, 0), 0, 0,
-             Vector{UInt8}(undef, 0), 0, :headers, 0, 0, false, false, 0.0,
-             :none, false)
+             Vector{UInt8}(undef, 0), 0, Vector{UInt8}(undef, 0), 0,
+             :headers, 0, 0, false, false, 0.0, :none, false)
 
 mutable struct WorkerCtx
     conn_pool  :: ConnectionPool
@@ -68,9 +70,11 @@ function _reset!(st::HTTPConn)
     st.chunklen = 0
     st.fed = 0
     st.bodylen = 0
+    st.carrylen = 0
     resize!(st.rbuf, 0)
     resize!(st.chunkbuf, 0)
     resize!(st.body, 0)
+    resize!(st.carry, 0)
     st.phase = :headers
     st.header_len = 0
     st.body_need = 0
@@ -363,14 +367,18 @@ function _feed_chunked!(server, engine, st::HTTPConn, ctx::WorkerCtx)
     end
 
     # :done — leftover bytes are the start of the next (pipelined) request.
+    # Keep them in `carry`, not `rbuf`: the request head still has to be read
+    # from `rbuf` by `_complete_request`, and overwriting it here would corrupt
+    # the method/target views.
     leftover = result.leftover
+    st.carrylen = leftover
     if leftover > 0
-        length(st.rbuf) < leftover && resize!(st.rbuf, max(leftover, _INITIAL_RBUF))
+        length(st.carry) < leftover &&
+            resize!(st.carry, max(leftover, 2 * length(st.carry), _INITIAL_RBUF))
         GC.@preserve st begin
-            unsafe_copyto!(pointer(st.rbuf), pointer(st.chunkbuf, result.decoded_len + 1), leftover)
+            unsafe_copyto!(pointer(st.carry), pointer(st.chunkbuf, result.decoded_len + 1), leftover)
         end
     end
-    st.rlen = leftover
     st.hdr_scanned = 0
     st.chunklen = 0
     resize!(st.chunkbuf, 0)
@@ -385,7 +393,17 @@ function _complete_request(server, engine, st::HTTPConn, ctx::WorkerCtx)
     close_after = _wants_close(req)
     close_after && _set_connection_close!(response.headers)
 
-    if !st.chunked
+    if st.chunked
+        # The head was materialized above; now make the stream start with the
+        # carried bytes of the next (pipelined) request.
+        n = st.carrylen
+        st.carrylen = 0
+        if n > 0
+            length(st.rbuf) < n && resize!(st.rbuf, max(n, _INITIAL_RBUF))
+            GC.@preserve st unsafe_copyto!(pointer(st.rbuf), pointer(st.carry), n)
+        end
+        st.rlen = n
+    else
         consumed = st.header_len + st.body_need
         leftover = st.rlen - consumed
         leftover > 0 && copyto!(st.rbuf, 1, st.rbuf, consumed + 1, leftover)
@@ -534,13 +552,16 @@ function _park_state(ctx::WorkerCtx, st::HTTPConn)
         length(st.rbuf) > 65_536 && (st.rbuf = Vector{UInt8}(undef, 0))
         length(st.body) > 65_536 && (st.body = Vector{UInt8}(undef, 0))
         length(st.chunkbuf) > 65_536 && (st.chunkbuf = Vector{UInt8}(undef, 0))
+        length(st.carry) > 65_536 && (st.carry = Vector{UInt8}(undef, 0))
         resize!(st.rbuf, 0)
         resize!(st.body, 0)
         resize!(st.chunkbuf, 0)
+        resize!(st.carry, 0)
         st.rlen = 0
         st.bodylen = 0
         st.chunklen = 0
         st.fed = 0
+        st.carrylen = 0
         push!(ctx.free, st)
     end
     return
