@@ -36,6 +36,11 @@ Required methods:
   (the default 3-argument method forwards to the 2-argument one).
 - `io_telemetry(io) -> AbstractTelemetry` — per-request observer (metrics,
   access log); defaults to `NullTelemetry()`.
+- `io_route(io, method::UInt8, path, captures) -> Union{Nothing,RouteResult}` —
+  optional early route lookup, used to apply per-route limits before the body
+  is read. The default returns `nothing` (limits stay server-wide) and dispatch
+  routes normally; a backend that implements it passes the result back through
+  the 4-argument `io_dispatch` so routing happens once.
 
 Optional capabilities (multishot accept, provided buffers, batching) are
 reported through separate predicates, never required methods, so a plain
@@ -66,12 +71,20 @@ function io_dispatch end
 function io_isasync end
 function io_dispatch_async end
 function io_telemetry end
+function io_route end
 
 "Backends without deferred dispatch are synchronous."
 io_isasync(::AbstractIO)::Bool = false
 
 "Backends that do not use the connection's route-capture scratch."
 io_dispatch(io::AbstractIO, req::Request, captures) = io_dispatch(io, req)
+
+"Backends that do not use an early route result."
+io_dispatch(io::AbstractIO, req::Request, captures, route_result) =
+    io_dispatch(io, req, captures)
+
+"Backends without early routing leave limits server-wide."
+io_route(::AbstractIO, ::UInt8, path, captures) = nothing
 
 "Backends without an observer are unobserved."
 io_telemetry(::AbstractIO) = NullTelemetry()

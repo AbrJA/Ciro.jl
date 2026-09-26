@@ -238,6 +238,9 @@ get!(router, "/forever", _ -> stream() do w
         sleep(0.05)
     end
 end)
+post!(router, "/tiny", ctx -> text(body(ctx)); limits=RouteLimits(max_body_size=8))
+post!(router, "/big", ctx -> text(body(ctx)); limits=RouteLimits(max_body_size=1024))
+post!(router, "/quick", ctx -> text(body(ctx)); limits=RouteLimits(body_timeout_ms=150))
 start!(Server(; router, port=PORT EXTRA); nworkers=2)
 """
 
@@ -486,6 +489,39 @@ end
                         @test startswith(resp, "HTTP/1.1 413")
                     end
 
+                    @testset "per-route body limit" begin
+                        # Stricter than the server-wide 64: rejected early.
+                        @test startswith(roundtrip(limited_port,
+                            "POST /tiny HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nConnection: close\r\n\r\n12345"),
+                            "HTTP/1.1 200")
+                        @test startswith(roundtrip(limited_port,
+                            "POST /tiny HTTP/1.1\r\nHost: x\r\nContent-Length: 9\r\nConnection: close\r\n\r\n123456789"),
+                            "HTTP/1.1 413")
+                        chunk = repeat("a", 32)
+                        @test startswith(roundtrip(limited_port,
+                            "POST /tiny HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n" *
+                            "20\r\n" * chunk * "\r\n0\r\n\r\n"),
+                            "HTTP/1.1 413")
+                        # Looser than the server-wide 64: accepted for this route.
+                        @test startswith(roundtrip(limited_port,
+                            "POST /big HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\nConnection: close\r\n\r\n" *
+                            repeat("b", 100)),
+                            "HTTP/1.1 200")
+                    end
+
+                    @testset "per-route body timeout" begin
+                        c = TestClient(limited_port; timeout=3.0)
+                        try
+                            _send(c, "POST /quick HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\n12345")
+                            t0 = time()
+                            resp = read_response(c)
+                            @test resp === nothing
+                            @test time() - t0 < 0.35   # route timeout 150ms vs server 400ms
+                        finally
+                            _close(c)
+                        end
+                    end
+
                     @testset "header timeout" begin
                         c = TestClient(limited_port; timeout=3.0)
                         try
@@ -564,6 +600,11 @@ end
                     @test startswith(roundtrip(sock_port,
                         "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 1\r\nContent-Length: 1\r\nConnection: close\r\n\r\na"),
                         "HTTP/1.1 400")
+
+                    # ... and so do per-route limits
+                    @test startswith(roundtrip(sock_port,
+                        "POST /tiny HTTP/1.1\r\nHost: x\r\nContent-Length: 9\r\nConnection: close\r\n\r\n123456789"),
+                        "HTTP/1.1 413")
                 finally
                     _kill_server(sp)
                 end

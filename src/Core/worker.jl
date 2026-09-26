@@ -227,12 +227,22 @@ end
 
 function io_dispatch(io::UringIO, req::Request,
                      captures::Vector{Pair{Symbol,UnitRange{Int}}})::Response
-    return dispatch(io.server.router, io.server.executor, _catcher(io), req, captures)
+    return io_dispatch(io, req, captures, nothing)
+end
+
+function io_dispatch(io::UringIO, req::Request,
+                     captures::Vector{Pair{Symbol,UnitRange{Int}}},
+                     route_result::Union{Nothing,RouteResult})::Response
+    return dispatch(io.server.router, io.server.executor, _catcher(io),
+                    req, captures, route_result)
 end
 
 io_isasync(io::UringIO)::Bool = isasync(io.server.executor)
 
 io_telemetry(io::UringIO) = io.server.telemetry
+
+io_route(io::UringIO, method::UInt8, path::AbstractString, captures) =
+    route!(io.server.router, method, path, captures)
 
 """Async handlers run away from this thread; their responses and stream chunks
 are posted to `io.replies` and delivered from `_worker_tick!`
@@ -248,10 +258,10 @@ function io_dispatch_async(io::UringIO, st::HTTPConn, req::Request)::Bool
             end
         end
         dispatch_async(io.server.router, io.server.executor, _catcher(io),
-                       req, reply, st.captures)
+                       req, reply, st.captures, st.route)
         return true
     end
-    http_deliver_response(io, st, io_dispatch(io, req, st.captures))
+    http_deliver_response(io, st, io_dispatch(io, req, st.captures, st.route))
     return false
 end
 

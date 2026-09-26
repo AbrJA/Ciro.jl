@@ -10,11 +10,12 @@ See `docs/DESIGN_LESSONS.md` for the engineering standards and
 
 State at pause:
 - `dev`: Stages 0–2.5, async executor (`bacca8b`, `625c2bb`), streaming/SSE
-  (`095058e`), zero-alloc route params (`a7690ab`), and the lock-free-queue note
-  (`0969dab`) committed and pushed. `Pkg.test()` → **825 passed, 0 failed**;
-  acceptance 111/111 (both backends); PicoHTTPParser `0.3.0` resolves from General.
-- Uncommitted (this session): Stage 3.5 observability — `AbstractTelemetry`,
-  `ServerMetrics`, `AccessLog`, HTTP instrumentation, adapter catcher wrapper.
+  (`095058e`), zero-alloc route params (`a7690ab`), telemetry (`5b74dae`), and the
+  lock-free-queue note (`0969dab`) committed; Stage 3.5 per-route limits
+  uncommitted. `Pkg.test()` → **843 passed, 0 failed**; acceptance 118/118 (both
+  backends); PicoHTTPParser `0.3.0` resolves from General.
+- Uncommitted (this session): per-route limits — `RouteLimits` on `Endpoint`,
+  early `io_route`, dispatch result reuse.
 
 ### Stage 3.5 — observability (uncommitted, this session)
 - `Interface/telemetry.jl`: `AbstractTelemetry` with no-op defaults for
@@ -35,6 +36,21 @@ State at pause:
 - Tests: `test/telemetry_test.jl` (20 unit) + 14 in-process sockets acceptance
   assertions (metrics counters incl. 400/404/500 + exceptions + bytes; AccessLog
   line for a real request). `Pkg.test()` 825; acceptance 111/111.
+
+### Stage 3.5 — per-route limits (uncommitted, this session)
+- `RouteLimits(; max_body_size=-1, body_timeout_ms=-1)` on `Endpoint` (new
+  `limits` field); registration accepts `limits=` (all verbs + group proxy), and
+  the auto-generated HEAD inherits it. `route_limits(handler)` accessor.
+- Early routing: after the head is parsed, HTTP calls the optional
+  `io_route(io, method, path, captures)` seam and stores the `RouteResult` on the
+  connection; `_prepare_body`/`_feed_chunked!` use the route's body limit and
+  `_set_deadline!` the route's body timeout. `dispatch`/`dispatch_async` gained a
+  `result` argument so routing happens once; backends without `io_route` keep
+  server-wide limits (default returns `nothing`).
+- Tests: 11 router assertions (limits on Endpoint, HEAD inheritance, group proxy,
+  validation) + 7 wire assertions (stricter/looser than the server limit, chunked
+  413, per-route body timeout, sockets backend). `Pkg.test()` 843; acceptance
+  118/118.
 
 ### Stage 3 — zero-allocation route params (committed: `a7690ab`)
 - `RouteResult.params` values for Trie matches are now
@@ -96,10 +112,8 @@ State at pause:
   `max_pending=1`). `Pkg.test()` 775; acceptance 97/97.
 
 ### Next
-- Stage 3.5 remainder: per-route limits (body size, timeouts) — needs routing
-  before body accumulation. Then compiled routing (dispatch table at `freeze!`);
-  Stage 4 packaging (untrack `lib/ciro.so`, JLL, docs build, CI matrix); static
-  files.
+- Compiled routing (dispatch table at `freeze!`); `Expect: 100-continue`; Stage 4
+  packaging (untrack `lib/ciro.so`, JLL, docs build, CI matrix); static files.
 
 ### Stage 2 — DONE (one pipeline, graceful shutdown)
 - Single dispatch pipeline: `Runtime.dispatch(router, executor, catcher, request)` is
@@ -196,6 +210,9 @@ State at pause:
   `minor_version` returns `Int`, while `Request.minor_version` is `UInt8`);
   convert at the boundary. A `MethodError` showing an extra hidden argument is a
   world-age display, but here it was just a type mismatch.
+- New optional `io_*` seam methods must be added to Core's `import ..HTTP: ...`
+  list, or `io_foo(io::UringIO) = ...` silently defines a *new* `Core.io_foo`
+  that HTTP never calls (this bit twice: `io_telemetry`, `io_route`).
 
 ### Resume commands
 ```sh

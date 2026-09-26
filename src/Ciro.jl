@@ -39,6 +39,7 @@ import PicoHTTPParser
 # ── Public API ──────────────────────────────────────────────────────────────
 # Types
 export RequestContext, Context, Request, Response, Endpoint, RouteResult, Methods
+export RouteLimits, route_limits
 
 # Response builders
 export text, html, json, redirect, fail

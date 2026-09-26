@@ -17,7 +17,7 @@ using ..Runtime: dispatch, dispatch_async
 using ..HTTP
 import ..HTTP: io_config, io_running, io_read, io_acquire_buffer, io_write,
                io_on_write, io_shutdown, io_close, io_release, io_dispatch,
-               io_isasync, io_dispatch_async, io_telemetry
+               io_isasync, io_dispatch_async, io_telemetry, io_route
 using ..HTTP: HTTPConfig, HTTPConn, http_reset!, http_on_read, http_on_write,
               http_retire, http_finalize, http_expired,
               http_deliver_response, http_stream_begin, http_stream_chunk,

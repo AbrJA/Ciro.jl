@@ -210,11 +210,17 @@ Everything in §3.3 is implemented, plus the `HTTP`/`Backend` extraction:
   choke point (streams at end/abort; protocol errors included), and bytes read; the
   adapter's `_TelemetryCatcher` wrapper counts intercepted exceptions. `Server`
   gained a telemetry type parameter (`Server{R,L,C,E,T}`).
-- Gates: `Pkg.test()` → 825 passed, 0 failed; acceptance 111/111, also under
+- **Per-route limits**: `RouteLimits(max_body_size, body_timeout_ms)` attached at
+  registration (`get!(router, path, handler; limits=...)`), stored on the
+  `Endpoint` and inherited by the auto-generated HEAD. After the head is parsed the
+  HTTP layer routes early through the optional `io_route` seam and applies the
+  route's limits before reading the body (413 from `Content-Length`, or as soon as a
+  chunked body passes the limit); dispatch reuses the early `RouteResult`, so
+  routing still happens once. Backends without `io_route` keep server-wide limits.
+- Gates: `Pkg.test()` → 843 passed, 0 failed; acceptance 118/118, also under
   `--check-bounds=yes`.
 
-Still open: per-route limits (Stage 3.5), compiled routing, HTTP/2/TLS (see §4.2
-and §9).
+Still open: compiled routing, HTTP/2/TLS (see §4.2 and §9).
 
 ---
 
@@ -282,11 +288,12 @@ Backend: read completion → bytes + connection handle
    ▼
 HTTP: append to rbuf
    ├─ headers incomplete?  → check max_header_bytes/timeout → rearm read
-   ├─ headers done         → framing: CL / chunked / none
+   ├─ headers done         → early route (io_route) → per-route limits
    │                          ├─ CL > max_body → 413 (+ close after flush)
    │                          ├─ CL+TE, duplicate CL, obs-fold → 400
    │                          └─ body incomplete → rearm read (body deadline)
    └─ message complete     → build Request (views) → Runtime.dispatch
+                              (reusing the early RouteResult)
                                 │
                                 ▼
                          Response (validated)
@@ -466,7 +473,7 @@ Questions I'd most like a maintainer decision on:
 | 0–2 ✅ | Parametric server, trie router, fused worker loop, connection/buffer pooling, thread-per-core event loop — verified in §3. |
 | **2.5** ✅ | Closed the §3.3 gap with wire tests, extracted `HTTP` from `worker.jl`, froze the `AbstractIO` seam, added the portable Sockets adapter, split config from runtime state. |
 | 3 ✅ | Zero-copy `Request` views, lazy `Headers`, copy-free routing, `copy(ctx)` escape hatch, request build ~480 B. Zero-allocation route params on the served path (`route!` + connection scratch; `route! static/param = 0 B`), `@inferred` guards. Pending: compiled routing (dispatch-table at `freeze!`). |
-| 3.5 (partial) ✅ | Observability: `AbstractTelemetry` seam, `ServerMetrics` counters, `AccessLog`, exception counting. Pending: per-route limits (body size, timeouts). |
+| 3.5 ✅ | Observability (`AbstractTelemetry`, `ServerMetrics`, `AccessLog`) and per-route limits (`RouteLimits` + early `io_route`, enforced before the body is read). |
 | 4 | JLL packaging for the native lib, docs build, CI matrix. |
 | v1.5 ✅ | Async executor (bounded, 503 shedding, copy-on-escape, both backends) and streaming/SSE on the same ownership boundary (chunked, backpressure, disconnect-safe). |
 | v2 | Sockets backend ✅ (proves the seam), then Reseau/native alternatives only if benchmarks demand them. |

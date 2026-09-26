@@ -508,4 +508,36 @@ using PicoHTTPParser
         @test param(other, :id) == "42"
         @test isempty(route(r, Methods.GET, "/fixed").params)
     end
+
+    @testset "per-route limits" begin
+        r = Trie()
+        get!(r, "/small", _ -> text("s");
+             limits=RouteLimits(max_body_size=16, body_timeout_ms=250))
+        post!(r, "/plain", _ -> text("p"))
+        group!(r, "/api") do g
+            post!(g, "/up", _ -> text("u"); limits=RouteLimits(max_body_size=4))
+        end
+
+        result = route(r, Methods.GET, "/small")
+        @test result.handler isa Endpoint
+        @test route_limits(result.handler) == RouteLimits(max_body_size=16, body_timeout_ms=250)
+
+        # Auto-HEAD inherits the GET route's limits.
+        head_result = route(r, Methods.HEAD, "/small")
+        @test route_limits(head_result.handler) == RouteLimits(max_body_size=16, body_timeout_ms=250)
+
+        # Group proxy routes carry their limits.
+        @test route_limits(route(r, Methods.POST, "/api/up").handler) ==
+              RouteLimits(max_body_size=4)
+
+        # Routes without limits inherit the server configuration.
+        @test route_limits(route(r, Methods.POST, "/plain").handler) === nothing
+        @test route_limits(nothing) === nothing
+        @test route_limits(_ -> text("x")) === nothing
+
+        @test_throws ArgumentError RouteLimits(max_body_size=-2)
+        @test_throws ArgumentError RouteLimits(body_timeout_ms=-2)
+        @test RouteLimits().max_body_size == -1
+        @test RouteLimits().body_timeout_ms == -1
+    end
 end

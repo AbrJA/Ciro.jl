@@ -90,9 +90,10 @@ Trie() = Trie(TrieNode(), false)
 # Route Registration
 # ══════════════════════════════════════════════════════════════════════════════
 
-function Interface.register!(trie::Trie, method::UInt8, pattern::String, handler)
+function Interface.register!(trie::Trie, method::UInt8, pattern::String, handler;
+                             limits::Union{Nothing,RouteLimits}=nothing)
     trie.frozen && throw(ArgumentError("cannot register routes on a frozen router"))
-    endpoint = handler isa Endpoint ? handler : Endpoint(handler)
+    endpoint = handler isa Endpoint ? handler : Endpoint(handler; limits=limits)
     segments = _split_path(pattern)
     node = trie.root
 
@@ -125,7 +126,7 @@ function Interface.register!(trie::Trie, method::UInt8, pattern::String, handler
             headers = copy(resp.headers)
             _set_content_length!(headers, length(resp.body))
             return Response(resp.status, headers, UInt8[])
-        end; metadata=endpoint.metadata)
+        end; metadata=endpoint.metadata, limits=endpoint.limits)
     end
 
     return trie
@@ -161,13 +162,13 @@ end
 
 # ── Convenience registration ────────────────────────────────────────────────
 
-Base.get!(r::Trie, p::String, h)     = (register!(r, Methods.GET, p, h); r)
-post!(r::Trie, p::String, h)    = (register!(r, Methods.POST, p, h); r)
-Base.put!(r::Trie, p::String, h)     = (register!(r, Methods.PUT, p, h); r)
-Base.delete!(r::Trie, p::String, h)  = (register!(r, Methods.DELETE, p, h); r)
-patch!(r::Trie, p::String, h)   = (register!(r, Methods.PATCH, p, h); r)
-head!(r::Trie, p::String, h)    = (register!(r, Methods.HEAD, p, h); r)
-options!(r::Trie, p::String, h) = (register!(r, Methods.OPTIONS, p, h); r)
+Base.get!(r::Trie, p::String, h; limits=nothing)     = (register!(r, Methods.GET, p, h; limits); r)
+post!(r::Trie, p::String, h; limits=nothing)    = (register!(r, Methods.POST, p, h; limits); r)
+Base.put!(r::Trie, p::String, h; limits=nothing)     = (register!(r, Methods.PUT, p, h; limits); r)
+Base.delete!(r::Trie, p::String, h; limits=nothing)  = (register!(r, Methods.DELETE, p, h; limits); r)
+patch!(r::Trie, p::String, h; limits=nothing)   = (register!(r, Methods.PATCH, p, h; limits); r)
+head!(r::Trie, p::String, h; limits=nothing)    = (register!(r, Methods.HEAD, p, h; limits); r)
+options!(r::Trie, p::String, h; limits=nothing) = (register!(r, Methods.OPTIONS, p, h; limits); r)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Route Groups — prefix-based organization
@@ -193,13 +194,13 @@ struct _GroupProxy
     prefix :: String
 end
 
-Base.get!(g::_GroupProxy, p::String, h)     = (register!(g.trie, Methods.GET, g.prefix * p, h); g.trie)
-post!(g::_GroupProxy, p::String, h)    = (register!(g.trie, Methods.POST, g.prefix * p, h); g.trie)
-Base.put!(g::_GroupProxy, p::String, h)     = (register!(g.trie, Methods.PUT, g.prefix * p, h); g.trie)
-Base.delete!(g::_GroupProxy, p::String, h)  = (register!(g.trie, Methods.DELETE, g.prefix * p, h); g.trie)
-patch!(g::_GroupProxy, p::String, h)   = (register!(g.trie, Methods.PATCH, g.prefix * p, h); g.trie)
-head!(g::_GroupProxy, p::String, h)    = (register!(g.trie, Methods.HEAD, g.prefix * p, h); g.trie)
-options!(g::_GroupProxy, p::String, h) = (register!(g.trie, Methods.OPTIONS, g.prefix * p, h); g.trie)
+Base.get!(g::_GroupProxy, p::String, h; limits=nothing)     = (register!(g.trie, Methods.GET, g.prefix * p, h; limits); g.trie)
+post!(g::_GroupProxy, p::String, h; limits=nothing)    = (register!(g.trie, Methods.POST, g.prefix * p, h; limits); g.trie)
+Base.put!(g::_GroupProxy, p::String, h; limits=nothing)     = (register!(g.trie, Methods.PUT, g.prefix * p, h; limits); g.trie)
+Base.delete!(g::_GroupProxy, p::String, h; limits=nothing)  = (register!(g.trie, Methods.DELETE, g.prefix * p, h; limits); g.trie)
+patch!(g::_GroupProxy, p::String, h; limits=nothing)   = (register!(g.trie, Methods.PATCH, g.prefix * p, h; limits); g.trie)
+head!(g::_GroupProxy, p::String, h; limits=nothing)    = (register!(g.trie, Methods.HEAD, g.prefix * p, h; limits); g.trie)
+options!(g::_GroupProxy, p::String, h; limits=nothing) = (register!(g.trie, Methods.OPTIONS, g.prefix * p, h; limits); g.trie)
 
 # Nested groups
 group!(f::Function, g::_GroupProxy, prefix::String) = group!(f, g.trie, g.prefix * _normalize_prefix(prefix))

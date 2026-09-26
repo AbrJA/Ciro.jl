@@ -101,11 +101,21 @@ io_dispatch(io::SocketsIO, req::Request)::Response =
 
 io_dispatch(io::SocketsIO, req::Request,
             captures::Vector{Pair{Symbol,UnitRange{Int}}})::Response =
-    dispatch(io.server.router, io.server.executor, _catcher(io), req, captures)
+    io_dispatch(io, req, captures, nothing)
+
+function io_dispatch(io::SocketsIO, req::Request,
+                     captures::Vector{Pair{Symbol,UnitRange{Int}}},
+                     route_result::Union{Nothing,RouteResult})::Response
+    return dispatch(io.server.router, io.server.executor, _catcher(io),
+                    req, captures, route_result)
+end
 
 io_isasync(io::SocketsIO)::Bool = isasync(io.server.executor)
 
 io_telemetry(io::SocketsIO) = io.server.telemetry
+
+io_route(io::SocketsIO, method::UInt8, path::AbstractString, captures) =
+    route!(io.server.router, method, path, captures)
 
 """Async handlers reply from another thread through the connection's channel;
 only this connection task touches `st`, so no state is shared."""
@@ -121,10 +131,10 @@ function io_dispatch_async(io::SocketsIO, st::HTTPConn, req::Request)::Bool
             end
         end
         dispatch_async(io.server.router, io.server.executor, _catcher(io),
-                       req, reply, st.captures)
+                       req, reply, st.captures, st.route)
         return true
     end
-    http_deliver_response(io, st, io_dispatch(io, req, st.captures))
+    http_deliver_response(io, st, io_dispatch(io, req, st.captures, st.route))
     return false
 end
 

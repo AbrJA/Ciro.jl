@@ -56,13 +56,44 @@ end
 function _set_deadline!(io::AbstractIO, st::HTTPConn)
     cfg = io_config(io)
     if st.phase == :body
-        st.deadline = time() + cfg.body_timeout_ms / 1000
+        st.deadline = time() + _effective_body_timeout(io, st) / 1000
     elseif st.rlen == 0
         st.deadline = time() + cfg.idle_timeout_ms / 1000
     else
         st.deadline = time() + cfg.header_timeout_ms / 1000
     end
     return
+end
+
+# ── Per-route limits (early routing) ────────────────────────────────────────
+
+"""Route the request as soon as its head is parsed, so per-route limits apply
+before the body is read. The result is reused by dispatch (routing once)."""
+@inline function _early_route(io::AbstractIO, st::HTTPConn)
+    method = Methods.from_string(request_method(st.hbuf, st.rbuf))
+    target = request_target(st.hbuf, st.rbuf)
+    path, _ = Interface._split_target(target)
+    return io_route(io, method, path, st.captures)
+end
+
+@inline function _route_limits(io::AbstractIO, st::HTTPConn)::Union{Nothing,RouteLimits}
+    result = st.route
+    result === nothing && return nothing
+    return route_limits(result.handler)
+end
+
+@inline function _effective_max_body(io::AbstractIO, st::HTTPConn)::Int
+    limits = _route_limits(io, st)
+    cfg = io_config(io)
+    return (limits === nothing || limits.max_body_size < 0) ?
+           cfg.max_body_size : limits.max_body_size
+end
+
+@inline function _effective_body_timeout(io::AbstractIO, st::HTTPConn)::Int
+    limits = _route_limits(io, st)
+    cfg = io_config(io)
+    return (limits === nothing || limits.body_timeout_ms < 0) ?
+           cfg.body_timeout_ms : limits.body_timeout_ms
 end
 
 """Whether the connection is past its phase deadline and must be retired."""
@@ -164,7 +195,7 @@ end
 # Default async dispatch: backends without deferred execution answer inline.
 # Async backends override this; see `AbstractIO` in io.jl.
 function io_dispatch_async(io::AbstractIO, st::HTTPConn, req::Request)::Bool
-    http_deliver_response(io, st, io_dispatch(io, req, st.captures))
+    http_deliver_response(io, st, io_dispatch(io, req, st.captures, st.route))
     return false
 end
 
@@ -327,6 +358,7 @@ function _process(io::AbstractIO, st::HTTPConn)
             return :done
         end
         st.header_len = head_length(st.hbuf)
+        st.route = _early_route(io, st)
         _telemetry_begin(io, st)
         _prepare_body(io, st) || return :done
         st.phase = :body
@@ -390,7 +422,7 @@ function _prepare_body(io::AbstractIO, st::HTTPConn)
     end
 
     if cl !== nothing
-        if cl > io_config(io).max_body_size
+        if cl > _effective_max_body(io, st)
             _respond_and_close(io, st, fail(413, "Content Too Large"))
             return false
         end
@@ -434,7 +466,7 @@ function _feed_chunked!(io::AbstractIO, st::HTTPConn)
         end
     end
 
-    if st.bodylen > io_config(io).max_body_size
+    if st.bodylen > _effective_max_body(io, st)
         _respond_and_close(io, st, fail(413, "Content Too Large"))
         return :error
     end

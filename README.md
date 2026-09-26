@@ -113,6 +113,19 @@ Server(;
 )
 ```
 
+### 🎯 Per-Route Limits
+
+Override the body size or body timeout for individual routes. Body limits are
+enforced from the framing headers — before the body is read — so an oversized
+upload is rejected with `413` immediately:
+
+```julia
+post!(router, "/upload", upload_handler; limits=RouteLimits(max_body_size=8_000_000))
+get!(router,  "/report", report_handler; limits=RouteLimits(body_timeout_ms=120_000))
+```
+
+Routes without limits inherit the server configuration; `-1` means inherit.
+
 ---
 
 ## 📚 API Highlights

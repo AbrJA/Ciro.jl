@@ -110,8 +110,17 @@ end
 function dispatch(router::AbstractRouter, executor::AbstractExecutor,
                   catcher::AbstractCatcher, request::Request,
                   captures::Vector{Pair{Symbol,UnitRange{Int}}})::Response
-    method = Methods.from_string(request.method)
-    result = route!(router, method, request.path, captures)
+    return dispatch(router, executor, catcher, request, captures, nothing)
+end
+
+function dispatch(router::AbstractRouter, executor::AbstractExecutor,
+                  catcher::AbstractCatcher, request::Request,
+                  captures::Vector{Pair{Symbol,UnitRange{Int}}},
+                  result::Union{Nothing,RouteResult})::Response
+    if result === nothing
+        method = Methods.from_string(request.method)
+        result = route!(router, method, request.path, captures)
+    end
 
     not_found(result) && return fail(404, "Not Found")
 
@@ -161,13 +170,22 @@ end
 function dispatch_async(router::AbstractRouter, executor::AbstractExecutor,
                         catcher::AbstractCatcher, request::Request, reply,
                         captures::Vector{Pair{Symbol,UnitRange{Int}}})::Bool
+    return dispatch_async(router, executor, catcher, request, reply, captures, nothing)
+end
+
+function dispatch_async(router::AbstractRouter, executor::AbstractExecutor,
+                        catcher::AbstractCatcher, request::Request, reply,
+                        captures::Vector{Pair{Symbol,UnitRange{Int}}},
+                        result::Union{Nothing,RouteResult})::Bool
     if !isasync(executor)
-        reply(dispatch(router, executor, catcher, request, captures))
+        reply(dispatch(router, executor, catcher, request, captures, result))
         return false
     end
 
-    method = Methods.from_string(request.method)
-    result = route!(router, method, request.path, captures)
+    if result === nothing
+        method = Methods.from_string(request.method)
+        result = route!(router, method, request.path, captures)
+    end
 
     if not_found(result)
         reply(fail(404, "Not Found"))
