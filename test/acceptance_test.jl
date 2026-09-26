@@ -450,6 +450,45 @@ end
                 end
             end
 
+            @testset "sockets backend (portable seam proof)" begin
+                sock_port = port + 3
+                sp = _start_server(sock_port; extra=", backend=:sockets")
+                try
+                    _wait_ready(sock_port)
+
+                    @test startswith(roundtrip(sock_port,
+                        "GET /hello HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"),
+                        "HTTP/1.1 200")
+
+                    # keep-alive then a split-header request on the same connection
+                    c = TestClient(sock_port)
+                    try
+                        _send(c, "GET /hello HTTP/1.1\r\nHost: x\r\n\r\n")
+                        @test startswith(read_response(c), "HTTP/1.1 200")
+                        _send(c, "GET /head HTTP/1.1\r\nHo")
+                        sleep(0.1)
+                        _send(c, "st: x\r\nConnection: close\r\n\r\n")
+                        @test startswith(read_response(c), "HTTP/1.1 200")
+                    finally
+                        _close(c)
+                    end
+
+                    # chunked body
+                    resp = roundtrip(sock_port,
+                        "POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n" *
+                        "5\r\nhello\r\n0\r\n\r\n")
+                    @test startswith(resp, "HTTP/1.1 200")
+                    @test endswith(resp, "hello")
+
+                    # framing defenses hold on this backend too
+                    @test startswith(roundtrip(sock_port,
+                        "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 1\r\nContent-Length: 1\r\nConnection: close\r\n\r\na"),
+                        "HTTP/1.1 400")
+                finally
+                    _kill_server(sp)
+                end
+            end
+
             @testset "stop! drains and returns" begin
                 # Signal delivery into child processes is environment-specific
                 # (Julia's runtime swallows SIGTERM, and SIGINT can be blocked

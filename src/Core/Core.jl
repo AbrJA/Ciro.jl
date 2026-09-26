@@ -21,10 +21,12 @@ using ..HTTP: HTTPConfig, HTTPConn, http_reset!, http_on_read, http_on_write,
               http_retire, http_finalize, http_expired,
               _wants_close, serialize_response!, _http_date
 import PicoHTTPParser
+using Sockets
 using Base.Threads: @threads, nthreads
 
 include("server.jl")
 include("worker.jl")
+include("sockets.jl")
 
 export Server, start!, stop!
 

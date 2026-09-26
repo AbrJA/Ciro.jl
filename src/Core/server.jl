@@ -10,6 +10,7 @@ limits, deadlines, and shutdown budget. Validated at construction, so config
 errors are startup errors.
 """
 struct ServerConfig
+    backend           :: Symbol
     host              :: String
     port              :: Int
     backlog           :: Int
@@ -23,6 +24,7 @@ struct ServerConfig
 end
 
 function ServerConfig(;
+    backend::Symbol             = :uring,
     host::AbstractString        = "0.0.0.0",
     port::Int                   = 8080,
     backlog::Int                = 8192,
@@ -35,6 +37,8 @@ function ServerConfig(;
     shutdown_timeout::Float64   = 5.0,
 )
     host_str = String(host)
+    backend in (:uring, :sockets) ||
+        throw(ArgumentError("backend must be :uring or :sockets, got :$backend"))
     isempty(host_str) && throw(ArgumentError("host must not be empty"))
     1 <= port <= 65535 || throw(ArgumentError("port must be in 1:65535, got $port"))
     backlog > 0 || throw(ArgumentError("backlog must be positive, got $backlog"))
@@ -45,7 +49,7 @@ function ServerConfig(;
     idle_timeout_ms > 0 || throw(ArgumentError("idle_timeout_ms must be positive, got $idle_timeout_ms"))
     max_connections > 0 || throw(ArgumentError("max_connections must be positive, got $max_connections"))
     shutdown_timeout >= 0 || throw(ArgumentError("shutdown_timeout must be >= 0, got $shutdown_timeout"))
-    return ServerConfig(host_str, port, backlog, max_body_size, max_header_bytes,
+    return ServerConfig(backend, host_str, port, backlog, max_body_size, max_header_bytes,
                         header_timeout_ms, body_timeout_ms, idle_timeout_ms,
                         max_connections, shutdown_timeout)
 end
@@ -78,6 +82,7 @@ function Server(;
     logger::AbstractLogger      = NullLogger(),
     catcher::AbstractCatcher    = DefaultCatcher(),
     executor::AbstractExecutor  = SyncExecutor(),
+    backend::Symbol             = :uring,
     host::AbstractString        = "0.0.0.0",
     port::Int                   = 8080,
     backlog::Int                = 8192,
@@ -89,7 +94,7 @@ function Server(;
     max_connections::Int        = 1024,
     shutdown_timeout::Float64   = 5.0,
 )
-    config = ServerConfig(; host, port, backlog, max_body_size, max_header_bytes,
+    config = ServerConfig(; backend, host, port, backlog, max_body_size, max_header_bytes,
                           header_timeout_ms, body_timeout_ms, idle_timeout_ms,
                           max_connections, shutdown_timeout)
     return Server(router, logger, catcher, executor, config, ServerRuntime())

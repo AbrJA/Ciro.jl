@@ -152,6 +152,13 @@ end
 # ── Worker startup ──────────────────────────────────────────────────────────
 
 function _start_workers(server::Server, queue_depth::Int, nworkers::Int)
+    if server.config.backend === :sockets
+        return _start_sockets_workers(server, nworkers)
+    end
+    return _start_uring_workers(server, queue_depth, nworkers)
+end
+
+function _start_uring_workers(server::Server, queue_depth::Int, nworkers::Int)
     log!(server.logger, Info, "io_uring backend with $nworkers worker(s)")
     backend = IOUringBackend(; queue_depth, nworkers,
                              host=server.config.host, backlog=server.config.backlog)
