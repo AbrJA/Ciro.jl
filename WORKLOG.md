@@ -11,11 +11,10 @@ See `docs/DESIGN_LESSONS.md` for the engineering standards and
 State at pause:
 - `dev`: Stages 0–2.5, async executor, streaming/SSE, zero-alloc route params,
   telemetry, per-route limits, audit fixes, 503 shedding, `Expect:
-  100-continue`, and the examples committed. `Pkg.test()` → **959 passed,
+  100-continue`, and the examples committed. `Pkg.test()` → **964 passed,
   0 failed on both Julia 1.10.12 and 1.13.0**; acceptance 167/167 (both
   backends); PicoHTTPParser `0.3.0` resolves from General.
-- Uncommitted (this session): the `ai_chat` example (SSE fan-out, async
-  inference, chunked transcript, import limits) and its test.
+- Uncommitted (this session): the ai_chat SSE framing fix + `sse_comment`.
 
 ### Examples + fixes (uncommitted, this session)
 - `examples/ml_dashboard`: re-themed as a production-style **ops console**
@@ -304,6 +303,10 @@ State at pause:
 - Example tests include each example inside its own `Module()`: the examples
   share helper names (`RequireToken`, `serve_static`, `main`, ...) and direct
   includes collide in `Main`.
+- `sse()`'s sender formats **each call** as one event. Never pass preformatted
+  `event:`/`data:` frames to it: every line gets a `data: ` prefix and browsers
+  silently parse one malformed message (the UI only updates on history fetch).
+  Substring-based tests hid this; assert `event: X\ndata: ` and no `data: event:`.
 
 ### Test gaps (audit 2026-09-28; updated)
 Closed: `max_connections` shedding, `Expect: 100-continue`, telemetry

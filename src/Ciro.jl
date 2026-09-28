@@ -43,7 +43,7 @@ export RouteLimits, route_limits
 
 # Response builders
 export text, html, json, redirect, fail
-export Stream, StreamWriter, StreamClosedError, stream, sse
+export Stream, StreamWriter, StreamClosedError, stream, sse, sse_comment
 
 # Request access
 export header, hasheader, body, rawbody, content_type

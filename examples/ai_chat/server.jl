@@ -32,14 +32,15 @@ struct Message
     at     :: Float64
 end
 
-"""One SSE subscriber: an unbounded channel plus a queue-depth counter, so
-broadcast never blocks and a stalled client is dropped instead of buffered."""
+"""One SSE subscriber: an unbounded `(event, data)` channel plus a queue-depth
+counter, so broadcast never blocks and a stalled client is dropped instead of
+buffered."""
 mutable struct Subscriber
-    ch      :: Channel{String}
+    ch      :: Channel{Tuple{String,String}}
     pending :: Threads.Atomic{Int}
 end
 
-Subscriber() = Subscriber(Channel{String}(Inf), Threads.Atomic{Int}(0))
+Subscriber() = Subscriber(Channel{Tuple{String,String}}(Inf), Threads.Atomic{Int}(0))
 
 const SUB_QUEUE_MAX = 64
 
@@ -86,15 +87,16 @@ message_json(m::Message) =
     "\"kind\":\"$(m.kind)\",\"text\":\"$(json_escape(m.text))\"," *
     "\"at\":$(round(m.at; digits = 3))}"
 
-message_frame(m::Message) = "event: message\ndata: $(message_json(m))\n\n"
-typing_frame(author::AbstractString) =
-    "event: typing\ndata: {\"author\":\"$(json_escape(author))\"}\n\n"
+# Each event is an (event-name, data) pair; `sse`'s sender does the framing.
+message_data(m::Message) = ("message", message_json(m))
+typing_data(author::AbstractString) =
+    ("typing", "{\"author\":\"$(json_escape(author))\"}")
 
-function presence_frame(state::ChatState, room_id::Int)
+function presence_data(state::ChatState, room_id::Int)
     n = lock(state.lock) do
         length(state.rooms[room_id].subs)
     end
-    return "event: presence\ndata: {\"room\":$room_id,\"users\":$n}\n\n"
+    return ("presence", "{\"room\":$room_id,\"users\":$n}")
 end
 
 function rooms_json(state::ChatState)
@@ -152,9 +154,9 @@ function remove_subscriber!(state::ChatState, room_id::Int, sub::Subscriber)
     end
 end
 
-"""Fan-out one frame to a room. Broadcast never blocks; a subscriber whose
+"""Fan-out one event to a room. Broadcast never blocks; a subscriber whose
 queue passed `SUB_QUEUE_MAX` is dropped (its SSE loop then ends)."""
-function broadcast!(state::ChatState, room_id::Int, frame::String)
+function broadcast!(state::ChatState, room_id::Int, event::String, data::String)
     lock(state.lock) do
         for sub in state.rooms[room_id].subs
             isopen(sub.ch) || continue
@@ -163,7 +165,7 @@ function broadcast!(state::ChatState, room_id::Int, frame::String)
                 close(sub.ch)                       # slow client: disconnect
             else
                 try
-                    put!(sub.ch, frame)             # unbounded: never blocks
+                    put!(sub.ch, (event, data))     # unbounded: never blocks
                 catch
                     Threads.atomic_sub!(sub.pending, 1)
                 end
@@ -231,7 +233,7 @@ function post_message(ctx::Context, state::ChatState, think_s::Float64)
 
     user = _user(ctx)
     msg = store_message!(state, room_id, user, text, :user)
-    broadcast!(state, room_id, message_frame(msg))
+    broadcast!(state, room_id, message_data(msg)...)
 
     # Retention rule: copy the request before handing it to another task.
     saved = copy(ctx)
@@ -242,10 +244,10 @@ function post_message(ctx::Context, state::ChatState, think_s::Float64)
     end
 
     # Simulated inference on the async worker; everyone sees it live via SSE.
-    broadcast!(state, room_id, typing_frame(SERVICE.name))
+    broadcast!(state, room_id, typing_data(SERVICE.name)...)
     sleep(think_s)
     reply = store_message!(state, room_id, SERVICE.name, assistant_reply(text), :assistant)
-    broadcast!(state, room_id, message_frame(reply))
+    broadcast!(state, room_id, message_data(reply)...)
 
     return json("{\"message\":$(message_json(msg)),\"reply\":$(message_json(reply))}")
 end
@@ -257,24 +259,23 @@ function events_handler(ctx::Context, state::ChatState)
     return sse() do send
         sub = add_subscriber!(state, room_id)
         ch = sub.ch
-        broadcast!(state, room_id, presence_frame(state, room_id))
+        broadcast!(state, room_id, presence_data(state, room_id)...)
         try
             while isopen(ch)
-                frame = if timedwait(() -> isready(ch), 15.0) == :ok
-                    f = take!(ch)
+                if timedwait(() -> isready(ch), 15.0) == :ok
+                    event, data = take!(ch)
                     Threads.atomic_sub!(sub.pending, 1)
-                    f
+                    send(data; event = event)
                 else
-                    ": keepalive\n\n"
+                    sse_comment(send, "keepalive")
                 end
-                send(frame)
             end
         catch err
             err isa StreamClosedError || rethrow(err)
         finally
             remove_subscriber!(state, room_id, sub)
             close(ch)
-            broadcast!(state, room_id, presence_frame(state, room_id))
+            broadcast!(state, room_id, presence_data(state, room_id)...)
         end
     end
 end
@@ -297,7 +298,7 @@ function import_handler(ctx::Context, state::ChatState)
     _valid_room(state, room_id) || return fail(404, "Unknown room")
     lines = countlines(IOBuffer(body(ctx)))
     msg = store_message!(state, room_id, "system", "imported $lines lines", :system)
-    broadcast!(state, room_id, message_frame(msg))
+    broadcast!(state, room_id, message_data(msg)...)
     return json("{\"imported\":$lines}")
 end
 

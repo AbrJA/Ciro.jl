@@ -77,17 +77,26 @@ end
             @test startswith(head, "HTTP/1.1 200")
             @test occursin("text/event-stream", head)
             # The first presence event confirms the subscriber is registered
-            # (headers are written before the stream body runs).
-            @test occursin("event: presence", _read_until(sse, "event: presence"))
+            # (headers are written before the stream body runs) and is
+            # well-formed: `event: presence` followed by `data: `, never a
+            # double-prefixed `data: event:` line.
+            pres = _read_until(sse, "event: presence\ndata: ")
+            @test occursin("event: presence\ndata: ", pres)
+            @test !occursin("data: event:", pres)
 
             r = _chat_request(port,
                 "POST /api/v1/rooms/1/messages?as=test HTTP/1.1\r\nHost: x\r\n" *
                 "Content-Length: 11\r\nConnection: close\r\n\r\nhello there", full = true)
             @test startswith(r, "HTTP/1.1 200") && occursin("\"reply\"", r)
 
-            @test occursin("event: message", _read_until(sse, "event: message"))
+            msg = _read_until(sse, "event: message\ndata: ")
+            @test occursin("event: message\ndata: ", msg)
+            @test !occursin("data: event:", msg)
             @test occursin("hello there", _read_until(sse, "hello there"))
-            @test occursin("event: typing", _read_until(sse, "event: typing"))
+            @test occursin("event: typing\ndata: ", _read_until(sse, "event: typing\ndata: "))
+            reply = _read_until(sse, "event: message\ndata: ")
+            @test occursin("event: message\ndata: ", reply)
+            @test !occursin("data: event:", reply)
             @test occursin("How can I help", _read_until(sse, "How can I help"))
         finally
             close(sse)

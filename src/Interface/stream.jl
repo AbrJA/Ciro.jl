@@ -132,7 +132,8 @@ end
     sse(body; status=200, headers=...) -> Stream
 
 Build a Server-Sent Events response (`Content-Type: text/event-stream`).
-`body` receives an [`SSESender`](@ref):
+`body` receives an [`SSESender`](@ref); **each call to the sender emits one
+event** — do not include SSE framing (`event:`/`data:` lines) yourself:
 
 ```julia
 get!(router, "/events", ctx -> sse() do send
@@ -143,6 +144,8 @@ get!(router, "/events", ctx -> sse() do send
     end
 end)
 ```
+
+Use [`sse_comment`](@ref) for keepalive comments.
 """
 function sse(body::F; status::Int=200,
              headers::AbstractVector{<:Pair}=Pair{String,String}[]) where {F}
@@ -157,4 +160,15 @@ function sse(body::F; status::Int=200,
     return Stream(status, hs, framed)
 end
 
-export Stream, StreamWriter, StreamClosedError, stream, sse, SSESender
+"""
+    sse_comment(s::SSESender, text)
+
+Write an SSE comment line (`: text`) — useful as a keepalive so proxies and
+clients see traffic while no events are flowing.
+"""
+function sse_comment(s::SSESender, text::AbstractString)
+    write(s.io, ": " * text * "\n\n")
+    return nothing
+end
+
+export Stream, StreamWriter, StreamClosedError, stream, sse, SSESender, sse_comment
