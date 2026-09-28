@@ -106,9 +106,12 @@ end
             @test ready
         end
 
-        # Page, assets, traversal guard
-        r = _req(aport, "GET", "/"; full = true)
-        @test startswith(r, "HTTP/1.1 200") && occursin("Playground", r)
+        # Page, assets, traversal guard; both servers advertise the same ports
+        for port in (aport, sport)
+            r = _req(port, "GET", "/"; full = true)
+            @test startswith(r, "HTTP/1.1 200") && occursin("Playground", r)
+            @test occursin("\"async\":$aport,\"sync\":$sport", r)
+        end
         r = _req(aport, "GET", "/static/app.js"; full = true)
         @test startswith(r, "HTTP/1.1 200") && occursin("EventSource", r)
         @test _status(_req(aport, "GET", "/static/../server.jl"; full = true)) == 404
@@ -119,12 +122,22 @@ end
         @test occursin("X-Service: mock-model", r)
         @test _status(_req(aport, "GET", "/readyz"; full = true)) == 200
 
+        # CORS: the UI switches between two origins, so every response and the
+        # OPTIONS preflight must allow it (admin/DELETE trigger preflight).
+        r = _req(aport, "GET", "/api/v1/models"; full = true)
+        @test occursin("Access-Control-Allow-Origin: *", r)
+        r = _req(aport, "OPTIONS", "/api/v1/predict"; full = true)
+        @test startswith(r, "HTTP/1.1 204")
+        @test occursin("Access-Control-Allow-Methods:", r) && occursin("POST", r)
+        @test occursin("Access-Control-Allow-Headers:", r) && occursin("X-Admin-Token", r)
+
         # SSE token stream: several ordered deltas, then the full text
         sse = Sockets.connect(Sockets.IPv4("127.0.0.1"), aport)
         try
             write(sse, "GET /api/v1/generate?prompt=ping&style=plain HTTP/1.1\r\nHost: x\r\n\r\n")
             head = String(readuntil(sse, "\r\n\r\n"))
             @test startswith(head, "HTTP/1.1 200") && occursin("text/event-stream", head)
+            @test occursin("Access-Control-Allow-Origin: *", head)   # cross-origin SSE
             t0 = time()
             raw = _read_until(sse, "event: done")
             elapsed = time() - t0
@@ -201,8 +214,11 @@ end
         @test startswith(r, "HTTP/1.1 200") && occursin("\"received\":100", r)
         @test _status(_req(aport, "POST", "/api/v1/upload"; body = "x"^8000, full = true)) == 413
 
-        # Admin token, log tail, metrics
-        @test _status(_req(aport, "GET", "/admin/stats"; full = true)) == 401
+        # Admin token, log tail, metrics (401 still carries CORS so the UI can
+        # show the status instead of a network error)
+        r = _req(aport, "GET", "/admin/stats"; full = true)
+        @test startswith(r, "HTTP/1.1 401")
+        @test occursin("Access-Control-Allow-Origin: *", r)
         r = _preq(aport,
             "GET /admin/stats HTTP/1.1\r\nHost: x\r\nX-Admin-Token: demo-token\r\n" *
             "Connection: close\r\n\r\n"; full = true)

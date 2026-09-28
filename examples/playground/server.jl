@@ -156,6 +156,34 @@ function (m::RequireToken)(ctx::Context)
     return m.handler(ctx)
 end
 
+# The async and sync servers are different origins (different ports), so the UI
+# needs CORS to switch between them. This is an example-level middleware; a
+# built-in `Cors` helper is a candidate for the library backlog.
+const CORS_ORIGIN = "Access-Control-Allow-Origin" => "*"
+
+struct WithCORS{H}
+    handler :: H
+end
+function (m::WithCORS)(ctx::Context)
+    resp = m.handler(ctx)
+    if resp isa Response
+        push!(resp.headers, CORS_ORIGIN)
+    elseif resp isa Stream
+        push!(resp.headers, CORS_ORIGIN)   # serialized with the stream head
+    end
+    return resp
+end
+
+"""Answer `OPTIONS` preflight for any path (admin token/DELETE need it)."""
+function cors_preflight(_::Context)
+    return Response(204, ["Access-Control-Allow-Origin" => "*",
+                          "Access-Control-Allow-Methods" =>
+                              "GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS",
+                          "Access-Control-Allow-Headers" =>
+                              "X-Admin-Token, Content-Type",
+                          "Access-Control-Max-Age" => "600"], UInt8[])
+end
+
 # ── Static files (traversal-guarded wildcard) ───────────────────────────────
 
 const PUBLIC_DIR = joinpath(@__DIR__, "public")
@@ -217,46 +245,52 @@ function build_playground(;
     max_body_size::Int = 1_048_576,
     max_connections::Int = 1024,
     catcher::AbstractCatcher = JsonCatcher(),
-    ports::Tuple{Int,Int} = (port, port + 1),
+    ports::Tuple{Int,Int},          # (async, sync) advertised to the UI
 )
     telemetry = PlaygroundTelemetry(log_io)
     maintenance = Threads.Atomic{Bool}(false)
     started = time()
     router = Trie()
 
+    # Every route is wrapped in CORS: the async and sync servers are different
+    # origins, and the UI switches between them from either page.
+    _get!(path, h; kw...)  = get!(router, path, WithCORS(h); kw...)
+    _post!(path, h; kw...) = post!(router, path, WithCORS(h); kw...)
+    _options!(path)        = options!(router, path, cors_preflight)
+
     # Page (with both ports injected) and assets
     page = replace(read(joinpath(PUBLIC_DIR, "index.html"), String),
                    "__CIRO_PORTS__" => "{\"async\":$(ports[1]),\"sync\":$(ports[2])}")
-    get!(router, "/", _ -> html(page))
-    get!(router, "/static/*", serve_static)
+    _get!("/", _ -> html(page))
+    _get!("/static/*", serve_static)
 
     # Probes, metrics (Prometheus + JSON)
-    get!(router, "/healthz", WithServiceHeader(_ ->
+    _get!("/healthz", WithServiceHeader(_ ->
         json("{\"status\":\"ok\",\"service\":\"$(SERVICE.name)\"," *
              "\"uptime_s\":$(round(time() - started; digits = 1))}")))
-    get!(router, "/readyz", _ -> maintenance[] ?
+    _get!("/readyz", _ -> maintenance[] ?
         Response(503, ["Content-Type" => "application/json"],
                  "{\"status\":\"maintenance\"}") :
         json("{\"status\":\"ready\",\"version\":\"$(SERVICE.version)\"}"))
-    get!(router, "/metrics", _ -> Response(200,
+    _get!("/metrics", _ -> Response(200,
         ["Content-Type" => "text/plain; version=0.0.4; charset=utf-8"],
         prometheus_text(telemetry.metrics)))
-    get!(router, "/api/metrics", _ -> json(metrics_json(telemetry.metrics)))
+    _get!("/api/metrics", _ -> json(metrics_json(telemetry.metrics)))
 
     # Routing: static, typed params, wildcard, 404/405, redirect
-    get!(router, "/api/v1/models", _ -> json(models_json()))
-    get!(router, "/api/v1/models/:id::Int", ctx -> begin
+    _get!("/api/v1/models", _ -> json(models_json()))
+    _get!("/api/v1/models/:id::Int", ctx -> begin
         id = param(ctx, Int, :id)
         (1 <= id <= length(MODELS)) || return fail(404, "Unknown model")
         return json(model_json(MODELS[id]))
     end)
-    get!(router, "/api/v1/files/*", ctx -> begin
+    _get!("/api/v1/files/*", ctx -> begin
         target = String(path(ctx))
         rest = startswith(target, "/api/v1/files/") ? target[15:end] : ""
         return json("{\"path\":\"$(json_escape(rest))\"}")
     end)
-    get!(router, "/old", _ -> redirect("/"))
-    post!(router, "/api/v1/predict", ctx -> begin
+    _get!("/old", _ -> redirect("/"))
+    _post!("/api/v1/predict", ctx -> begin
         features = parse_features(body(ctx))
         isempty(features) && return fail(422, "Expected comma-separated features")
         qp = queryparams(ctx)
@@ -271,19 +305,19 @@ function build_playground(;
     end)
 
     # Echo (query params + headers), upload with a per-route limit
-    get!(router, "/api/v1/echo", ctx -> begin
+    _get!("/api/v1/echo", ctx -> begin
         qp = queryparams(ctx)
         pairs = join(("\"$(json_escape(k))\":\"$(json_escape(v))\"" for (k, v) in qp), ",")
         return json("{\"path\":\"$(json_escape(String(path(ctx))))\",\"query\":{$pairs}," *
                     "\"user_agent\":\"$(json_escape(header(ctx, "User-Agent", "")))\"," *
                     "\"host\":\"$(json_escape(header(ctx, "Host", "")))\"}")
     end)
-    post!(router, "/api/v1/upload",
+    _post!("/api/v1/upload",
          ctx -> json("{\"received\":$(length(rawbody(ctx))),\"limit\":4096}");
          limits = RouteLimits(max_body_size = 4096))
 
     # Retention rule: copy(ctx) before handing to another task
-    get!(router, "/api/v1/audit", ctx -> begin
+    _get!("/api/v1/audit", ctx -> begin
         saved = copy(ctx)
         Threads.@spawn begin
             sleep(0.05)
@@ -294,10 +328,10 @@ function build_playground(;
     end)
 
     # Custom catcher demo
-    get!(router, "/api/v1/boom", _ -> error("intentional playground failure"))
+    _get!("/api/v1/boom", _ -> error("intentional playground failure"))
 
     # Streaming: SSE token deltas, and the same generation as chunked text
-    get!(router, "/api/v1/generate", ctx -> begin
+    _get!("/api/v1/generate", ctx -> begin
         qp = queryparams(ctx)
         text = generate_text(get(qp, "prompt", ""), get(qp, "style", "plain"))
         words = split(text)
@@ -309,7 +343,7 @@ function build_playground(;
             send("{\"text\":\"$(json_escape(text))\"}"; event = "done")
         end
     end)
-    get!(router, "/api/v1/generate.txt", ctx -> begin
+    _get!("/api/v1/generate.txt", ctx -> begin
         qp = queryparams(ctx)
         text = generate_text(get(qp, "prompt", ""), get(qp, "style", "plain"))
         words = split(text)
@@ -323,17 +357,17 @@ function build_playground(;
     end)
 
     # Admin (token-protected)
-    get!(router, "/admin/config", RequireToken(admin_token, _ -> json(
+    _get!("/admin/config", RequireToken(admin_token, _ -> json(
         "{\"service\":\"$(SERVICE.name)\",\"version\":\"$(SERVICE.version)\"," *
         "\"port\":$port,\"backend\":\"$backend\"," *
         "\"executor\":\"$(nameof(typeof(executor)))\"," *
         "\"max_body_size\":$max_body_size,\"max_connections\":$max_connections," *
         "\"admin_token\":\"***\"}")))
-    get!(router, "/admin/log/tail", RequireToken(admin_token, _ ->
+    _get!("/admin/log/tail", RequireToken(admin_token, _ ->
         json("{\"lines\":[" *
              join(("\"" * json_escape(l) * "\"" for l in tail_lines(telemetry)), ",") *
              "]}")))
-    post!(router, "/admin/maintenance", RequireToken(admin_token, ctx -> begin
+    _post!("/admin/maintenance", RequireToken(admin_token, ctx -> begin
         state = String(strip(body(ctx)))
         if state == "on"
             maintenance[] = true
@@ -345,11 +379,20 @@ function build_playground(;
         return json("{\"maintenance\":$(maintenance[])}")
     end))
 
+    # CORS preflight only where the UI sends non-simple requests: `DELETE`
+    # (routes card) and the `X-Admin-Token` header. A root `OPTIONS` wildcard
+    # would make every unknown path a 405, so register these explicitly.
+    _options!("/api/v1/predict")
+    _options!("/admin/stats")
+    _options!("/admin/config")
+    _options!("/admin/log/tail")
+    _options!("/admin/maintenance")
+
     server = Server(; router, port, backend, executor, telemetry, catcher,
                     logger = ConsoleLogger(),
                     max_body_size, max_connections, idle_timeout_ms = 120_000)
 
-    get!(router, "/admin/stats", RequireToken(admin_token, _ -> json(
+    _get!("/admin/stats", RequireToken(admin_token, _ -> json(
         metrics_json(telemetry.metrics)[1:end-1] * "," *
         "\"active_connections\":$(server.runtime.conn_count[])," *
         "\"max_connections\":$max_connections," *
@@ -387,10 +430,11 @@ function main()
     admin_token = get(ENV, "CIRO_ADMIN_TOKEN", "demo-token")
     pool        = _env_int("CIRO_WORKER_THREADS", 32)
 
-    async_server = build_playground(; port, backend, admin_token, token_ms,
+    ports = (port, port + 1)     # advertised to the UI by both servers
+    async_server = build_playground(; port, backend, admin_token, token_ms, ports,
         think_s = think_ms / 1000,
         executor = AsyncExecutor(worker_threads = pool, max_pending = 2 * pool))
-    sync_server = build_playground(; port = port + 1, backend, admin_token, token_ms,
+    sync_server = build_playground(; port = port + 1, backend, admin_token, token_ms, ports,
         think_s = think_ms / 1000, executor = SyncExecutor())
 
     async_workers = async_worker_budget(nworkers, Threads.nthreads())

@@ -53,7 +53,8 @@ Open <http://localhost:8080>. Stop with **Ctrl-C** (graceful drain).
 | Per-route body limit | **Upload 8 KB → 413** (route limit is 4 KB) |
 | `Expect: 100-continue` | curl recipe below |
 | Overload shedding (`503`) | 48 concurrent predicts against an 8-worker/24-pending pool |
-| Middleware (callable struct) | `RequireToken` on `/admin/*`, `WithServiceHeader` on `/healthz` |
+| Middleware (callable struct) | `RequireToken` on `/admin/*`, `WithServiceHeader` on `/healthz`, `WithCORS` on every route |
+| CORS across the two origins | `Access-Control-Allow-Origin: *` + `OPTIONS` preflight (DELETE/admin paths) |
 | Custom catcher | `/api/v1/boom` → JSON `500` with the exception type |
 | Custom logger | `ConsoleLogger` (startup/stop on stderr) |
 | Custom telemetry | `PlaygroundTelemetry` (metrics + access log + tail) |
@@ -100,5 +101,10 @@ curl -s localhost:8080/admin/stats -H 'X-Admin-Token: demo-token'
   (`CIRO_WORKER_THREADS`, default 32) is the concurrent-stream ceiling.
 - **SSE framing:** `sse()`'s sender emits one event per call — pass data, not
   preformatted `event:`/`data:` lines. Keepalives use `sse_comment`.
+- **CORS:** the async (`:8080`) and sync (`:8081`) servers are different
+  origins, so the example wraps routes in a `WithCORS` middleware and answers
+  `OPTIONS` preflight for the paths the UI calls with `DELETE` or
+  `X-Admin-Token`. (A built-in CORS helper is a candidate for the library
+  backlog; the example shows the pattern for now.)
 - The example is tested by `test/playground_test.jl` (48 assertions, real
   clients, `:uring` when the native library is present) as part of `Pkg.test()`.

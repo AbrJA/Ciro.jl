@@ -43,6 +43,14 @@ State at pause:
     the async workers (streams stalled after one token). The example budgets
     `max(1, min(requested, nthreads-2))` async engines and prints it; a unit
     test pins the budget.
+- CORS + ports fix: the two servers are different origins, so routes are
+  wrapped in `WithCORS` and `OPTIONS` preflight is registered for the paths the
+  UI calls with `DELETE`/`X-Admin-Token` (a root `OPTIONS` wildcard would turn
+  unknown paths into 405 because `_find_allowed_path` reports wildcard methods).
+  `ports` is now a required `build_playground` argument and `main` passes the
+  same `(async, sync)` pair to both servers — previously the sync server's page
+  advertised `(sync, sync+1)`, so the UI's "sync" hit a dead port and its
+  "async" silently hit the sync server.
 - The `JSON` test extra was removed (no example needs it now).
 - Earlier fixes kept: `copy(ctx)` param keys (Symbols), async worker cap.
 - Gates: `Pkg.test()` 962; acceptance 167/167.
@@ -219,6 +227,10 @@ State at pause:
   question, static files, and HTTP/2/TLS; benchmark ~500 idle subscribers +
   broadcast on both backends. Not a bug: the current task-per-stream model is
   correct and documented, just capped at `worker_threads` streams.
+- CORS (candidate built-in helper): the playground ships a `WithCORS` middleware
+  plus a catch-all `OPTIONS` preflight because its two servers are different
+  origins. Consider a small `Cors` middleware (`allow_origin`, `methods`,
+  `headers`, `max_age`) once there is demand; keep it out of core for now.
 - Static files (dotfile denial, traversal matrix), per-route streaming limits
   (chunk size / max stream duration), SSE keepalive comments.
 - Compiled routing (dispatch table at `freeze!`), `@inferred` guards outside
