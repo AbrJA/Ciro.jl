@@ -53,6 +53,15 @@ State at pause:
 - Earlier fixes kept: `copy(ctx)` param keys (Symbols), async worker cap.
 - Gates: `Pkg.test()` 910 (playground is manual-only); acceptance 167/167.
 
+### Repo cleanup (this session)
+- Untracked generated/scratch files and extended `.gitignore`: `lib/ciro.so`
+  (rebuilt by `make -C lib`; CI builds it before tests), root
+  `test_minimal.jl`, logs/pids/tmp, OS/editor junk. `Manifest.toml` and
+  `docs/Manifest.toml` stay ignored.
+- Removed the unreferenced actix `benchmarks/rust_server` crate;
+  `benchmarks/khttp` is the comparison server used by `run_bench.sh`.
+- Remaining Stage 4 packaging: JLL artifact, docs build, Linux-only CI matrix.
+
 ### Gap-closing iteration (committed, this session)
 - `b123167` — `max_connections` overflow is answered with a pre-serialized
   `503` + `Retry-After: 1` before the close (was a silent close), on both
@@ -240,7 +249,8 @@ State at pause:
   `SocketsEntry.reply`: blocking `take!` plus `close`-to-wake is load-bearing
   (disconnect/shutdown must release workers), and `close(jobs)` is the executor
   shutdown wakeup. ConcurrentCollections has no close/failure semantics.
-- Packaging: JLL artifact, untrack `lib/ciro.so`, docs build, Linux-only CI matrix.
+- Packaging: JLL artifact, docs build, Linux-only CI matrix (`lib/ciro.so` is
+  untracked and gitignored; CI builds it before tests).
 
 ### Gotchas from this session (don't relearn)
 - `close()` on a socket with a pending io_uring read does not FIN the peer: the request

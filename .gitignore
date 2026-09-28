@@ -1,8 +1,31 @@
+# Julia
 Manifest.toml
 *.jl.cov
 *.jl.*.cov
 *.jl.mem
+
+# Native build artifacts (built by `make -C lib`)
+lib/*.so
+lib/*.dylib
+lib/*.dll
+
+# Docs build
 /docs/build/
-/docs/Manifest.toml
+
+# Benchmarks
 target/
 bench/
+
+# Local scratch / runtime files
+/test_minimal.jl
+*.tmp
+*.log
+*.pid
+
+# OS and editor junk
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.vscode/
+.idea/
