@@ -123,6 +123,11 @@ function Interface.register!(trie::Trie, method::UInt8, pattern::String, handler
     if method == Methods.GET && !haskey(node.handlers, Methods.HEAD)
         node.handlers[Methods.HEAD] = Endpoint(function(ctx)
             resp = endpoint(ctx)
+            # A stream is passed through: the HTTP layer sends headers only for
+            # HEAD and never runs the body. Non-Response returns are normalized
+            # exactly like dispatch does, so auto-HEAD cannot 500 on them.
+            resp isa Stream && return resp
+            resp isa Response || (resp = text(string(resp)))
             headers = copy(resp.headers)
             _set_content_length!(headers, length(resp.body))
             return Response(resp.status, headers, UInt8[])

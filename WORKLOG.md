@@ -9,13 +9,13 @@ See `docs/DESIGN_LESSONS.md` for the engineering standards and
 ## RESUME — next session
 
 State at pause:
-- `dev`: Stages 0–2.5, async executor (`bacca8b`, `625c2bb`), streaming/SSE
-  (`095058e`), zero-alloc route params (`a7690ab`), telemetry (`5b74dae`), and the
-  lock-free-queue note (`0969dab`) committed; Stage 3.5 per-route limits
-  uncommitted. `Pkg.test()` → **843 passed, 0 failed**; acceptance 118/118 (both
+- `dev`: Stages 0–2.5, async executor, streaming/SSE, zero-alloc route params,
+  telemetry, per-route limits, and LTS-safe tests committed. Audit fixes (HEAD
+  normalization, sockets inflight) uncommitted. `Pkg.test()` → **865 passed,
+  0 failed on both Julia 1.10.12 and 1.13.0**; acceptance 135/135 (both
   backends); PicoHTTPParser `0.3.0` resolves from General.
-- Uncommitted (this session): per-route limits — `RouteLimits` on `Endpoint`,
-  early `io_route`, dispatch result reuse.
+- Uncommitted (this session): audit fixes — auto-HEAD handles `Stream` and
+  non-Response returns; SocketsIO clears `inflight` before `http_on_write`.
 
 ### Stage 3.5 — observability (uncommitted, this session)
 - `Interface/telemetry.jl`: `AbstractTelemetry` with no-op defaults for
@@ -221,6 +221,27 @@ State at pause:
 - `Test` exports `TestLogger`; defining a test-local `struct TestLogger` errors
   on LTS with "cannot assign a value to imported variable". Renamed to
   `CustomLogger`.
+- Auto-generated HEAD must mirror dispatch's normalization: pass `Stream`
+  through (the worker skips the body for HEAD) and wrap non-Response returns in
+  `text(string(...))`, or HEAD 500s on routes whose GET works.
+- SocketsIO must clear `st.inflight = :none` before `http_on_write` (uring does
+  it in `_handle_event`); otherwise `http_stream_end`'s resume check sees a
+  stale `:write` and the next keep-alive request is never read.
+
+### Test gaps (audit 2026-09-28)
+- `max_connections` shedding is untested (currently closes silently; consider
+  503 + `Retry-After`).
+- HTTP/1.0 wire behavior is untested (only unit-level `wants_close` tests).
+- `Expect: 100-continue` is unimplemented.
+- Chunk extensions (`5;ext=1`) are untested.
+- Telemetry: streams (end/abort), the AsyncExecutor path, the 3xx bucket, and
+  concurrent `AccessLog` writes are untested.
+- Per-route limits on param/wildcard routes, async handlers, and the
+  custom-router (no `io_route`) fallback are untested.
+- Streams: body exception mid-stream, `Content-Length` mismatch, HTTP/1.0 raw
+  mode are untested.
+- Shutdown drain with an in-flight async handler/stream is untested.
+- `@inferred` guards are still sparse outside routing.
 
 ### Resume commands
 ```sh

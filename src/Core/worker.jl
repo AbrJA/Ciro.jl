@@ -80,6 +80,16 @@ function _run_stream(outbound::Channel, st::HTTPConn, gen::UInt64, stream::Strea
     end
     started || return
 
+    if st.stream_head
+        # HEAD: the head was sent without body framing; never run the body
+        # (an SSE body would otherwise run forever discarding chunks).
+        try
+            put!(outbound, _StreamEnd(st, gen))
+        catch
+        end
+        return
+    end
+
     send = bytes -> begin
         ok = try
             put!(outbound, _StreamChunk(st, gen, bytes, ack))

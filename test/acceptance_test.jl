@@ -215,6 +215,7 @@ using Ciro
 router = Trie()
 get!(router, "/hello", _ -> text("hello"))
 get!(router, "/head", _ -> text("content"))
+get!(router, "/num", _ -> 42)
 post!(router, "/echo", ctx -> text(body(ctx)))
 get!(router, "/inject", _ -> redirect("/x\r\nX-Injected: yes"))
 get!(router, "/slow", _ -> (sleep(0.3); text("slow")))
@@ -432,6 +433,17 @@ end
                 @test startswith(resp, "HTTP/1.1 200")
                 @test !occursin("content", resp)
                 @test occursin("Content-Length: 7", resp)
+
+                # Auto-HEAD normalizes non-Response GET handlers instead of 500.
+                resp = roundtrip(port, "HEAD /num HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+                                 expect_body=false)
+                @test startswith(resp, "HTTP/1.1 200")
+                @test occursin("Content-Length: 2", resp)
+
+                # A streaming GET on a sync server is a 500 for HEAD too.
+                @test startswith(roundtrip(port, "HEAD /stream HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+                                           expect_body=false),
+                                 "HTTP/1.1 500")
             end
 
             @testset "CRLF header injection (P0 security)" begin
@@ -708,6 +720,27 @@ end
                         finally
                             _close(c)
                         end
+
+                        # HEAD: non-Response normalized, stream headers only and
+                        # the connection stays usable afterwards.
+                        c = TestClient(async_port; timeout=10.0)
+                        try
+                            _send(c, "HEAD /num HTTP/1.1\r\nHost: x\r\n\r\n")
+                            hs = String(copy(_recv_until_headers(c)))
+                            @test startswith(hs, "HTTP/1.1 200")
+                            @test occursin("Content-Length: 2", hs)
+
+                            _send(c, "HEAD /stream HTTP/1.1\r\nHost: x\r\n\r\n")
+                            hs = String(copy(_recv_until_headers(c)))
+                            @test startswith(hs, "HTTP/1.1 200")
+                            @test !occursin("chunked", lowercase(hs))
+
+                            _send(c, "GET /hello HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                            r = read_response(c)
+                            @test startswith(r, "HTTP/1.1 200") && endswith(r, "hello")
+                        finally
+                            _close(c)
+                        end
                     finally
                         _kill_server(ap)
                     end
@@ -749,6 +782,22 @@ end
                             _close(c)
                         end
                         sleep(0.5)
+                        @test startswith(roundtrip(shed_port,
+                            "GET /hello HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"; timeout=10.0),
+                            "HTTP/1.1 200")
+
+                        # HEAD on an infinite stream answers immediately and
+                        # frees the only worker (otherwise the next request
+                        # would be shed with 503).
+                        c = TestClient(shed_port; timeout=10.0)
+                        try
+                            _send(c, "HEAD /forever HTTP/1.1\r\nHost: x\r\n\r\n")
+                            hs = String(copy(_recv_until_headers(c)))
+                            @test startswith(hs, "HTTP/1.1 200")
+                        finally
+                            _close(c)
+                        end
+                        sleep(0.2)
                         @test startswith(roundtrip(shed_port,
                             "GET /hello HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"; timeout=10.0),
                             "HTTP/1.1 200")

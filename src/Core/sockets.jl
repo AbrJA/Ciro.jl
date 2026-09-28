@@ -182,9 +182,13 @@ function _sockets_connection(io::SocketsIO, st::HTTPConn, entry::SocketsEntry)
             end
 
             # Drain synchronous write completions, including pipelined responses.
+            # Clear `inflight` first, mirroring the uring adapter's completion
+            # handler: `http_on_write`/`http_stream_end` treat `:none` as "no
+            # operation outstanding" when deciding to resume the connection.
             while entry.wrote > 0 && !st.retired
                 n = entry.wrote
                 entry.wrote = 0
+                st.inflight = :none
                 http_on_write(io, st, n)
             end
         end

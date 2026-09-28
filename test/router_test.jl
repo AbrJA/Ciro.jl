@@ -261,6 +261,10 @@ using PicoHTTPParser
     @testset "HEAD auto-generated from GET" begin
         r = Trie()
         get!(r, "/page", req -> text("hello"))
+        get!(r, "/num", req -> 42)                    # non-Response GET
+        get!(r, "/stream", req -> stream() do w       # streaming GET
+            write(w, "body")
+        end)
 
         raw = Vector{UInt8}("HEAD /page HTTP/1.1\r\nHost: x\r\n\r\n")
         req = PicoHTTPParser.parse_request(raw)
@@ -270,6 +274,17 @@ using PicoHTTPParser
         resp = result.handler(Context(req, result.params))
         @test resp.status == 200
         @test isempty(resp.body)  # HEAD = no body
+        @test header(resp, "Content-Length") == "5"
+
+        # A non-Response GET is normalized, not an error.
+        num = route(r, Methods.HEAD, "/num").handler(Context(req, nothing))
+        @test num.status == 200
+        @test header(num, "Content-Length") == "2"
+
+        # A streaming GET passes the Stream through; the HTTP layer sends
+        # headers only and never runs the body.
+        s = route(r, Methods.HEAD, "/stream").handler(Context(req, nothing))
+        @test s isa Stream
     end
 
     @testset "Typed parameters - Float64" begin

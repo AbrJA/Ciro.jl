@@ -218,6 +218,7 @@ using PicoHTTPParser
 
         router = Trie()
         get!(router, "/slow", _ -> text("slow"))
+        get!(router, "/num", _ -> 42)
         get!(router, "/boom", _ -> error("handler exploded"))
 
         ex = AsyncExecutor(worker_threads=2, max_pending=8)
@@ -242,6 +243,12 @@ using PicoHTTPParser
             resp = take!(replies)
             @test resp.status == 405
             @test contains(header(resp, "Allow"), "GET")
+
+            # Non-Response returns are normalized on the worker too.
+            dispatch_async(router, ex, DefaultCatcher(), Request("GET", "/num"),
+                           r -> put!(replies, r))
+            resp = take!(replies)
+            @test resp.status == 200 && String(resp.body) == "42"
 
             # Handler errors are intercepted on the worker thread.
             dispatch_async(router, ex, DefaultCatcher(), Request("GET", "/boom"),
