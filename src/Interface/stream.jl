@@ -81,14 +81,30 @@ struct StreamClosedError <: Exception end
 Base.showerror(io::IO, ::StreamClosedError) =
     print(io, "stream closed: the client disconnected or the server is shutting down")
 
-function Base.unsafe_write(w::StreamWriter, p::Ptr{UInt8}, n::UInt)::Int
+# The IO contract calls `unsafe_write` with both `Int` (String/Vector writes)
+# and `UInt` (single-byte/Char writes through `Ref`); support both or
+# `print(w, ' ')` falls back to "does not support byte I/O".
+@inline function _stream_unsafe_write(w::StreamWriter, p::Ptr{UInt8}, n::Integer)::Int
     w.state === :closed && throw(StreamClosedError())
-    n == 0 && return 0
+    n <= 0 && return 0
     len = Int(n)
     bytes = Vector{UInt8}(undef, len)
     GC.@preserve bytes unsafe_copyto!(pointer(bytes), p, len)
     w.send(bytes) || throw(StreamClosedError())
     return len
+end
+
+Base.unsafe_write(w::StreamWriter, p::Ptr{UInt8}, n::UInt)::Int =
+    _stream_unsafe_write(w, p, n)
+Base.unsafe_write(w::StreamWriter, p::Ptr{UInt8}, n::Int)::Int =
+    _stream_unsafe_write(w, p, n)
+
+# Base's generic `write(::IO, ::UInt8)` errors; concrete IOs specialize it, and
+# Char writes (e.g. `print(w, ' ')`) route through it.
+function Base.write(w::StreamWriter, x::UInt8)::Int
+    w.state === :closed && throw(StreamClosedError())
+    w.send(UInt8[x]) || throw(StreamClosedError())
+    return 1
 end
 
 function Base.close(w::StreamWriter)

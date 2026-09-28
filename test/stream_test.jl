@@ -71,6 +71,17 @@ using Ciro
         @test_throws Ciro.StreamClosedError write(failing, "x")
     end
 
+    @testset "StreamWriter IO contract (Char/byte writes)" begin
+        sent = Vector{UInt8}[]
+        w = Ciro.StreamWriter(b -> (push!(sent, b); true), () -> nothing, :open)
+        print(w, "a")          # String write -> Ptr/UInt path
+        print(w, ' ')          # Char write -> Ref/UInt path
+        write(w, UInt8('!'))   # single byte
+        println(w, "b")        # String + newline
+        close(w)
+        @test String(reduce(vcat, sent)) == "a !b\n"
+    end
+
     @testset "worker/loop stream protocol" begin
         st = Ciro.HTTP.HTTPConn(nothing)
         outbound = Channel{Ciro.Core._Outbound}(Inf)

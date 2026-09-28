@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ciro.jl · Playground</title>
+  <script>window.CIRO_PORTS = __CIRO_PORTS__;</script>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1><span class="bolt">⚡</span> Ciro.jl <em>Playground</em></h1>
+    <div class="header-right">
+      <label class="inline">executor
+        <select id="executor">
+          <option value="async">async</option>
+          <option value="sync">sync</option>
+        </select>
+      </label>
+      <span id="health" class="pill">checking…</span>
+      <span id="ready" class="pill">checking…</span>
+      <span id="meta" class="pill muted">—</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="grid">
+      <div class="card">
+        <h2>Generate <small>SSE token stream + chunked text</small></h2>
+        <label class="field">Prompt
+          <input id="prompt" value="Explain Ciro in one line" spellcheck="false">
+        </label>
+        <label class="field">Style
+          <select id="style">
+            <option value="plain">plain</option>
+            <option value="haiku">haiku</option>
+            <option value="json">json</option>
+          </select>
+        </label>
+        <div class="actions">
+          <button id="gen-sse">Stream (SSE)</button>
+          <button id="gen-txt" class="ghost">Stream (.txt)</button>
+          <button id="gen-abort" class="ghost">Abort</button>
+        </div>
+        <pre id="gen-out" class="result">—</pre>
+      </div>
+
+      <div class="card">
+        <h2>Predict <small>slow handler: async vs sync</small></h2>
+        <label class="field">Features
+          <input id="features" value="1.0, 2.5, 3.0" spellcheck="false">
+        </label>
+        <label class="field">Model
+          <select id="model">
+            <option value="1">1 · linear</option>
+            <option value="2">2 · mlp</option>
+            <option value="3">3 · tiny-llm</option>
+          </select>
+        </label>
+        <div class="actions">
+          <button id="predict">Predict</button>
+          <button id="predict-10" class="ghost">10× concurrent</button>
+          <button id="slow-ping" class="ghost">Slow + ping health</button>
+        </div>
+        <pre id="predict-out" class="result">—</pre>
+      </div>
+    </section>
+
+    <section class="grid">
+      <div class="card">
+        <h2>Upload <small>POST /api/v1/upload · 4 KB route limit</small></h2>
+        <div class="actions">
+          <button id="upload-ok" class="ghost">Upload 100 B</button>
+          <button id="upload-big" class="ghost">Upload 8 KB → 413</button>
+        </div>
+        <pre id="upload-out" class="result small">—</pre>
+      </div>
+
+      <div class="card">
+        <h2>Routes <small>click and inspect the raw response</small></h2>
+        <div id="routes" class="routes"></div>
+        <pre id="raw" class="result small">—</pre>
+      </div>
+    </section>
+
+    <section class="grid">
+      <div class="card">
+        <h2>Metrics <small>GET /api/metrics · polled 1s</small></h2>
+        <div id="metrics" class="metrics"></div>
+      </div>
+
+      <div class="card">
+        <h2>Prometheus <small>GET /metrics</small></h2>
+        <pre id="prom" class="result small">—</pre>
+      </div>
+    </section>
+
+    <section class="grid">
+      <div class="card">
+        <h2>Admin <small>token-protected · 401 without</small></h2>
+        <label class="field">Admin token
+          <input id="token" value="demo-token" spellcheck="false">
+        </label>
+        <div class="actions">
+          <button id="adm-stats" class="ghost">Stats</button>
+          <button id="adm-config" class="ghost">Config</button>
+          <button id="adm-log" class="ghost">Log tail</button>
+          <button id="maint-on" class="ghost">Maintenance on</button>
+          <button id="maint-off" class="ghost">off</button>
+        </div>
+        <pre id="admin-out" class="result small">—</pre>
+      </div>
+
+      <div class="card">
+        <h2>Access log tail <small>GET /admin/log/tail</small></h2>
+        <div id="log" class="events"><div class="muted">loading…</div></div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    two servers, same routes: <b>async</b> (streaming, slow work off-loop) and
+    <b>sync</b> (streaming → 500, slow work blocks) ·
+    env: <code>CIRO_PORT</code>, <code>CIRO_BACKEND</code>, <code>CIRO_WORKERS</code>,
+    <code>CIRO_TOKEN_MS</code>, <code>CIRO_THINK_MS</code>, <code>CIRO_ADMIN_TOKEN</code>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -225,9 +225,10 @@ Everything in §3.3 is implemented, plus the `HTTP`/`Backend` extraction:
   continues the `:body` phase). `max_connections` overflow is answered with a
   pre-serialized `503` + `Retry-After` before the close on both backends, and is
   reported to telemetry.
-- Examples: `examples/ml_dashboard` (real-world dashboard over the JSON API, SSE,
-  async inference, per-route limits, custom telemetry), `examples/feature_tour`,
-  and `examples/ml_serving`; the dashboard is smoke-tested in `Pkg.test`.
+- Example: `examples/playground` — one app that exercises the library end to end
+  (routing, typed params, SSE/chunked streaming, async vs sync executors,
+  per-route limits, telemetry, admin, static files) with a UI; driven by
+  `test/playground_test.jl` (real clients, `:uring` when available).
 - Gates: `Pkg.test()` → 926 passed, 0 failed on Julia 1.10.12 and 1.13.0;
   acceptance 167/167, also under `--check-bounds=yes`.
 

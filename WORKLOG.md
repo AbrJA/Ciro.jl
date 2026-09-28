@@ -11,42 +11,41 @@ See `docs/DESIGN_LESSONS.md` for the engineering standards and
 State at pause:
 - `dev`: Stages 0–2.5, async executor, streaming/SSE, zero-alloc route params,
   telemetry, per-route limits, audit fixes, 503 shedding, `Expect:
-  100-continue`, and the examples committed. `Pkg.test()` → **964 passed,
-  0 failed on both Julia 1.10.12 and 1.13.0**; acceptance 167/167 (both
-  backends); PicoHTTPParser `0.3.0` resolves from General.
-- Uncommitted (this session): the ai_chat SSE framing fix + `sse_comment`.
+  100-continue`, and the single `examples/playground` committed. `Pkg.test()` →
+  **962 passed, 0 failed on both Julia 1.10.12 and 1.13.0**; acceptance 167/167
+  (both backends); PicoHTTPParser `0.3.0` resolves from General.
+- Uncommitted (this session): none (this section describes the committed state).
 
-### Examples + fixes (uncommitted, this session)
-- `examples/ml_dashboard`: re-themed as a production-style **ops console**
-  (SSE and predict removed so `ai_chat` owns real-time): liveness/readiness
-  probes, Prometheus text `/metrics`, JSON `/api/metrics`, access log to stdout
-  or `CIRO_LOG` with an in-memory tail (`/admin/log/tail`), token-protected
-  `/admin/{stats,config,maintenance}`, env-driven config, per-route upload
-  limit, static assets, graceful drain. `test/example_test.jl` rewritten
-  (28 assertions). `Pkg.test()` 936 on 1.10.12 and 1.13.0.
-- `examples/ai_chat`: real-time chat rooms — SSE fan-out with per-subscriber
-  bounded queues (unbounded channel + atomic depth counter; slow clients are
-  disconnected, broadcast never blocks), async-executor inference with typing
-  and presence events, chunked transcript downloads, transcript import with an
-  8 KB `RouteLimits` (and `Expect: 100-continue`), token-protected admin stats,
-  `copy(ctx)` audit, env/positional config, and a curl/xargs shedding recipe.
-  `test/chat_test.jl` drives the whole flow in-process (23 assertions) and
-  asserts a mix of 200/503 under a 4-worker/4-pending pool.
-- Root `server.jl`/`examples_server.jl` moved to `examples/ml_serving` and
-  `examples/feature_tour`; `examples/README.md` maps every capability.
-  Example tests sandbox their `include`s in `Module()` so helper names cannot
-  collide across examples.
-- `test/example_test.jl` starts the dashboard in-process (sockets backend) and
-  checks every endpoint (18 assertions) inside `Pkg.test`.
-- Bug 1: `copy(ctx)` materialized params with **String** keys while `param`
-  matches Symbol names with `===`, so `param(ctx, ...)` returned `nothing` in
-  every async handler (and any copied context). `_materialize_params` now keeps
-  the supplied keys and returns `()` when empty.
-- Bug 2: with an async executor and `nworkers == nthreads >= 2`, the engine
-  loops starve the executor's task queue and handlers never run (a hang).
-  `start!` now caps `nworkers` to `nthreads - 1` with a warning
-  (`_effective_nworkers`), and an acceptance test pins it.
-- Gates: `Pkg.test()` 926; acceptance 167/167.
+### Single playground example (this session)
+- Replaced the four example apps (`ai_chat`, `ml_dashboard`, `feature_tour`,
+  `ml_serving`) with one: `examples/playground`. Two servers share the routes —
+  async executor (`:8080`, streaming + off-loop handlers) and sync executor
+  (`:8081`, streaming answers 500, slow handlers block) — with a UI that
+  switches between them. Covers routing (typed params, wildcards, 405/404,
+  redirect, auto-HEAD), SSE token deltas + `sse_comment`, chunked text
+  streaming, async-vs-sync blocking, per-route limits + `Expect: 100-continue`,
+  telemetry (Prometheus + JSON + access-log tail), admin token + maintenance
+  drain, `copy(ctx)` audit, custom logger/catcher/telemetry, static files,
+  shedding, and graceful shutdown.
+- `test/playground_test.jl` drives it with real clients (48 + 4 assertions) on
+  `:uring` when the native library is present: incremental SSE with time gaps,
+  chunked body de-framed, responsiveness during a slow handler, sync blocking,
+  10-way concurrency, abort recovery, 200/503 shedding, routing/limits/admin.
+  Passes with 1 and 4 threads.
+- Bugs found and fixed while building it:
+  - `StreamWriter` only implemented `unsafe_write(::Ptr{UInt8}, ::UInt)`, so
+    `print(w, ' ')`/`write(w, UInt8)` hit Base's "does not support byte I/O"
+    error and killed the stream after the first token. Added `unsafe_write`
+    for `Int` and a specialized `write(::UInt8)`; stream_test pins the IO
+    contract.
+  - Two servers in one process add a second engine: with the async server
+    capped to `nthreads-1`, the sync engine took the last thread and starved
+    the async workers (streams stalled after one token). The example budgets
+    `max(1, min(requested, nthreads-2))` async engines and prints it; a unit
+    test pins the budget.
+- The `JSON` test extra was removed (no example needs it now).
+- Earlier fixes kept: `copy(ctx)` param keys (Symbols), async worker cap.
+- Gates: `Pkg.test()` 962; acceptance 167/167.
 
 ### Gap-closing iteration (committed, this session)
 - `b123167` — `max_connections` overflow is answered with a pre-serialized
@@ -307,6 +306,12 @@ State at pause:
   `event:`/`data:` frames to it: every line gets a `data: ` prefix and browsers
   silently parse one malformed message (the UI only updates on history fetch).
   Substring-based tests hid this; assert `event: X\ndata: ` and no `data: event:`.
+- A custom `IO` subtype must specialize `write(io, ::UInt8)` (Base's generic
+  method errors with "does not support byte I/O") and implement `unsafe_write`
+  for both `Int` and `UInt`; otherwise `print(io, ' ')` kills the writer.
+- Multiple servers in one process share the thread budget: an async server
+  capped at `nthreads-1` plus a second server's engine starves the async
+  workers (streams stall). Keep at least one thread engine-free in total.
 
 ### Test gaps (audit 2026-09-28; updated)
 Closed: `max_connections` shedding, `Expect: 100-continue`, telemetry

@@ -1,89 +1,22 @@
-# Ciro.jl examples
+# Ciro.jl example: the playground
 
-Each example has a different job — together they cover the library without
-being three copies of the same kitchen-sink demo.
+One app that exercises the library end to end, with a small UI so you can see it
+work. Two servers start from the same routes:
 
-| Example | Theme | Focus |
-|---|---|---|
-| [`ai_chat`](ai_chat) | Real-time / product | SSE fan-out, async inference, chunked transcript streaming, uploads with `Expect: 100-continue`, per-route limits, overload shedding, `copy(ctx)` |
-| [`ml_dashboard`](ml_dashboard) | Production / ops | Liveness & readiness probes, Prometheus metrics, access log + tail, token-protected admin, maintenance drain, per-route limits, graceful shutdown |
-| [`feature_tour`](feature_tour) | API tour | Routing, typed params, wildcards, groups, middleware, status codes |
-| [`ml_serving`](ml_serving) | Minimal service | JSON ML endpoints (needs `Pkg.add("JSON")`) |
+- **async executor** — `http://localhost:8080` (streaming; slow work stays off the event loop)
+- **sync executor** — `http://localhost:8081` (streaming answers `500`; slow work blocks, see below)
 
----
+The page has an executor switch, so you can point every button at either server.
 
-## `ai_chat` — real-time AI chat rooms
-
-Multiple browser tabs chat live over SSE; the assistant answers after simulated
-inference on the async executor. This is the streaming/fan-out example.
-
-### Run it
-
-```bash
-julia --project=. --threads=8 examples/ai_chat/server.jl
-# optional positional args: server.jl [port] [backend]
-# env: CIRO_PORT, CIRO_BACKEND, CIRO_WORKERS, CIRO_THINK_MS,
-#      CIRO_ADMIN_TOKEN, CIRO_WORKERS_MAX
-```
-
-Open <http://localhost:8080> in two tabs, type in one, watch it arrive in both.
-The assistant replies after ~0.4 s (`CIRO_THINK_MS`). Stop with Ctrl-C.
-
-### What each piece demonstrates
-
-| Capability | Where |
-|---|---|
-| SSE fan-out (broadcast to every subscriber) | `GET /api/v1/rooms/:id/events` |
-| Async executor (simulated inference off the loop) | `POST /api/v1/rooms/:id/messages` |
-| Typing indicator / presence events | SSE `typing` and `presence` events |
-| Chunked streaming download | `GET /api/v1/rooms/:id/transcript` |
-| Upload + per-route limit + `Expect: 100-continue` | `POST /api/v1/rooms/:id/import` (8 KB → 413) |
-| Typed params, query params, 404s | `/api/v1/rooms/:id::Int/...` |
-| Middleware (callable struct) | `RequireToken` on `/admin/stats` |
-| `copy(ctx)` retention rule | message audit task |
-| Telemetry | `GET /api/metrics`, `/admin/stats` |
-| Overload shedding | `503` beyond `worker_threads`/`max_pending` |
-
-### curl cheatsheet
-
-```bash
-curl -s localhost:8080/api/v1/rooms
-curl -s localhost:8080/api/v1/rooms/1/messages
-curl -s -X POST --data 'hello there' 'localhost:8080/api/v1/rooms/1/messages?as=me'
-curl -s -N localhost:8080/api/v1/rooms/1/events          # SSE stream
-curl -s localhost:8080/api/v1/rooms/1/transcript         # chunked download
-curl -s -X POST --data 'line' localhost:8080/api/v1/rooms/1/import
-curl -s localhost:8080/admin/stats -H 'X-Admin-Token: demo-token'
-
-# overload shedding: 200 concurrent asks; expect a mix of 200 and 503
-seq 1 200 | xargs -P200 -I{} curl -s -o /dev/null -w '%{http_code}\n' \
-  -X POST --data 'hi' 'localhost:8080/api/v1/rooms/3/messages?as=load' | sort | uniq -c
-```
-
-### Notes
-
-- **Each open SSE stream holds one async worker** for its lifetime, so
-  `CIRO_WORKERS_MAX` (default 32) is the concurrent-stream ceiling; browsers
-  also cap themselves at ~6 connections per host. Beyond the pool,
-  `max_pending` queues and then requests get `503` (the xargs test shows it).
-- The assistant is a mock: `sleep` stands in for inference.
-- A subscriber whose 64-event queue fills is disconnected rather than buffered.
-
----
-
-## `ml_dashboard` — a production-style ops console
-
-A small model service with the things you actually deploy, plus an HTML
-console that polls it.
-
-### Run it
+## Run it
 
 ```bash
 cd /path/to/Ciro.jl
 (cd lib && make)                       # once, for the io_uring backend
 
-julia --project=. examples/ml_dashboard/server.jl
-# or, on non-Linux: CIRO_BACKEND=sockets julia --project=. examples/ml_dashboard/server.jl
+julia --project=. --threads=8 examples/playground/server.jl
+# optional positional args: server.jl [port] [backend]
+# non-Linux:  julia --project=. examples/playground/server.jl 8080 sockets
 ```
 
 Open <http://localhost:8080>. Stop with **Ctrl-C** (graceful drain).
@@ -92,71 +25,80 @@ Open <http://localhost:8080>. Stop with **Ctrl-C** (graceful drain).
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `CIRO_PORT` | `8080` | Listen port |
+| `CIRO_PORT` | `8080` | Async server port (sync = port + 1) |
 | `CIRO_BACKEND` | `uring` | `uring` (Linux) or `sockets` |
-| `CIRO_WORKERS` | `nthreads()` | Event-loop workers |
-| `CIRO_LOG` | *(stdout)* | Append the access log to this file |
-| `CIRO_ADMIN_TOKEN` | `demo-token` | Token for `/admin/*` (`X-Admin-Token`) |
-| `CIRO_MAX_BODY` | `1048576` | Server-wide body limit |
-| `CIRO_MAX_CONNECTIONS` | `1024` | Over-limit connections get `503` + `Retry-After` |
+| `CIRO_WORKERS` | `nthreads()` | Event-loop workers (async server is capped at `nthreads-1`) |
+| `CIRO_TOKEN_MS` | `40` | Delay between streamed tokens |
+| `CIRO_THINK_MS` | `400` | Simulated inference time |
+| `CIRO_ADMIN_TOKEN` | `demo-token` | Token for `/admin/*` |
+| `CIRO_WORKER_THREADS` | `32` | Async handler pool |
 
-### What each piece demonstrates
+## What each piece demonstrates
 
-| Capability | Where |
+| Capability | Where in the UI |
 |---|---|
-| Liveness / readiness probes | `GET /healthz`, `GET /readyz` (`503` in maintenance) |
-| Prometheus metrics | `GET /metrics` (text exposition) |
-| Metrics for a UI | `GET /api/metrics` (JSON) |
-| Access log (stdout or file) + in-memory tail | `OpsTelemetry`, `GET /admin/log/tail` |
-| Custom `AbstractLogger` | `ConsoleLogger` (startup/stop/warnings) |
-| Middleware (callable structs) | `WithServiceHeader` on `/healthz`, `RequireToken` on `/admin/*` |
-| Maintenance drain | `POST /admin/maintenance` with body `on` / `off` |
-| Effective config + live connection count | `GET /admin/config`, `GET /admin/stats` |
-| Per-route body limits | `POST /api/v1/upload` (4 KB → `413`) |
-| Typed route params + 404 | `GET /api/v1/models/:id::Int` |
-| Static files (traversal-guarded wildcard) | `GET /static/*` |
-| Graceful shutdown | Ctrl-C / `SIGINT` drains in-flight responses |
+| SSE token streaming (`sse`, `sse_comment`) | **Generate → Stream (SSE)** types live |
+| Chunked response streaming (`stream`) | **Generate → Stream (.txt)** |
+| Async executor (slow handler off-loop) | **Predict**, and **Slow + ping health** on the async server |
+| Sync executor (blocking) | **Slow + ping health** on the sync server with `CIRO_WORKERS=1` |
+| Streaming requires AsyncExecutor | **Stream (SSE)** on the sync server → `500` JSON |
+| JSON request/response, body, `content_type` | **Predict** |
+| Query params | `?prompt=&style=`, `/api/v1/echo?q=hi` |
+| Headers | `/api/v1/echo` shows `Host` / `User-Agent` |
+| Typed params (`:id::Int`) + `404` | **Routes → GET /api/v1/models/2, /99** |
+| Wildcards | `/api/v1/files/a/b/c`, `/static/*` |
+| `405` + `Allow` | **Routes → DELETE /api/v1/predict** |
+| Redirect | **Routes → GET /old** (`302`) |
+| Auto-HEAD (no body, GET length) | **Routes → HEAD /api/v1/models/1** |
+| Per-route body limit | **Upload 8 KB → 413** (route limit is 4 KB) |
+| `Expect: 100-continue` | curl recipe below |
+| Overload shedding (`503`) | 48 concurrent predicts against an 8-worker/24-pending pool |
+| Middleware (callable struct) | `RequireToken` on `/admin/*`, `WithServiceHeader` on `/healthz` |
+| Custom catcher | `/api/v1/boom` → JSON `500` with the exception type |
+| Custom logger | `ConsoleLogger` (startup/stop on stderr) |
+| Custom telemetry | `PlaygroundTelemetry` (metrics + access log + tail) |
+| Metrics: Prometheus + JSON | `/metrics`, `/api/metrics`, panels in the UI |
+| Access log tail | `/admin/log/tail` panel |
+| Zero-copy retention rule (`copy(ctx)`) | `/api/v1/audit` hands an owned copy to a task |
+| Probes + maintenance drain | `/healthz`, `/readyz` (`503` while draining) |
+| Static files (traversal-guarded) | the page assets via `/static/*` |
+| Graceful shutdown, backend choice | Ctrl-C; `[port] [backend]` args |
 
-### curl cheatsheet
+Not in the UI (covered by tests): raw framing/pipelining, CRLF/CL/TE defenses,
+header/body/idle timeouts, `max_connections`, custom `AbstractRouter`/
+`AbstractBackend`, `Application`/`FakeTransport`.
+
+## curl cheatsheet
 
 ```bash
 curl -s localhost:8080/healthz
-curl -s localhost:8080/readyz
-curl -s localhost:8080/metrics | head
-curl -s localhost:8080/api/v1/models/2
-curl -s -o /dev/null -w '%{http_code}\n' -X POST --data "$(head -c 8000 /dev/zero | tr '\0' x)" \
-     localhost:8080/api/v1/upload                     # 413 (4 KB route limit)
+curl -sN 'localhost:8080/api/v1/generate?prompt=hello&style=haiku'   # SSE tokens
+curl -s  'localhost:8080/api/v1/generate.txt?prompt=hello'           # chunked text
+curl -s -X POST --data '1,2,3' 'localhost:8080/api/v1/predict?model=2'
+curl -s  'localhost:8080/api/v1/echo?q=hi'
+curl -s  localhost:8080/api/v1/files/a/b/c
+curl -s  localhost:8080/metrics | head
+
+# Expect: 100-continue (curl sends it automatically for larger bodies)
+curl -v -X POST --data-binary @<(head -c 2000 /dev/zero | tr '\0' x) localhost:8080/api/v1/upload
+
+# overload shedding: expect a mix of 200 and 503
+seq 1 200 | xargs -P200 -I{} curl -s -o /dev/null -w '%{http_code}\n' \
+  -X POST --data '1,2,3' localhost:8080/api/v1/predict | sort | uniq -c
+
+# admin (401 without the token)
 curl -s localhost:8080/admin/stats -H 'X-Admin-Token: demo-token'
-curl -s -X POST --data on  localhost:8080/admin/maintenance -H 'X-Admin-Token: demo-token'
-curl -s -o /dev/null -w '%{http_code}\n' localhost:8080/readyz   # 503 while draining
-curl -s -X POST --data off localhost:8080/admin/maintenance -H 'X-Admin-Token: demo-token'
 ```
 
-### Production notes
+## Notes
 
-- The console uses `SyncExecutor` (handlers are cheap). Slow handlers belong on
-  an `AsyncExecutor`; see [`ai_chat`](ai_chat).
-- `CIRO_LOG=/var/log/ciro-access.log` makes the access log appendable and
-  tail-able; the admin tail keeps the last 50 lines in memory.
-- Scrape `GET /metrics` from Prometheus; the counters are atomic and safe to
-  read from any task.
-- Over-limit connections and oversized uploads are answered (`503`/`413`)
-  rather than silently dropped.
-
-## `feature_tour` — routing/API tour
-
-```bash
-julia --project=. --threads=auto examples/feature_tour/server.jl   # :3001
-```
-
-Every routing and request feature in one server: typed params, multi-params,
-wildcards, groups, custom middleware, 401/500 handling, HEAD.
-
-## `ml_serving` — minimal JSON ML service
-
-```bash
-julia --project=. -t4 examples/ml_serving/server.jl                # :3001 (needs Pkg.add("JSON"))
-```
-
-`/health`, `/api/v1/model`, `/api/v1/predict`, `/api/v1/batch`, `/api/v1/echo`
-with a custom JSON error catcher.
+- **Async vs sync:** the async server runs slow handlers on workers, so other
+  requests stay responsive. On the sync server with `:uring` and one worker
+  (`CIRO_WORKERS=1`), a slow handler blocks the engine — press **Slow + ping
+  health** on both to see it.
+- **Each open stream holds one async worker** for its lifetime; the pool
+  (`CIRO_WORKER_THREADS`, default 32) is the concurrent-stream ceiling.
+- **SSE framing:** `sse()`'s sender emits one event per call — pass data, not
+  preformatted `event:`/`data:` lines. Keepalives use `sse_comment`.
+- The example is tested by `test/playground_test.jl` (48 assertions, real
+  clients, `:uring` when the native library is present) as part of `Pkg.test()`.

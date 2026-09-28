@@ -84,21 +84,15 @@ start!(server)
 
 ### 📂 Examples
 
-Four runnable examples live in [`examples/`](examples) (see
-[`examples/README.md`](examples/README.md)):
+[`examples/playground`](examples/playground) is one app that exercises the
+library end to end — routing, typed params, SSE and chunked streaming, async vs
+sync executors, per-route limits, telemetry, admin — with a UI to click through
+it all (see [`examples/README.md`](examples/README.md)):
 
 ```bash
-# Real-time AI chat: SSE fan-out, async inference, chunked streaming, shedding
-julia --project=. --threads=8 examples/ai_chat/server.jl          # :8080
-
-# Production-style ops console: probes, Prometheus, access log, admin, drain
-julia --project=. examples/ml_dashboard/server.jl                 # :8080
-
-# Tour of every routing/request feature (typed params, wildcards, middleware)
-julia --project=. --threads=auto examples/feature_tour/server.jl  # :3001
-
-# JSON ML serving API (needs Pkg.add("JSON"))
-julia --project=. -t4 examples/ml_serving/server.jl               # :3001
+julia --project=. --threads=8 examples/playground/server.jl
+# async executor  http://localhost:8080
+# sync executor   http://localhost:8081   (same routes; shows blocking)
 ```
 
 ---
