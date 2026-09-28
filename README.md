@@ -88,11 +88,11 @@ Three runnable examples live in [`examples/`](examples) (see
 [`examples/README.md`](examples/README.md)):
 
 ```bash
-# Real-world ML dashboard: HTML/JS, JSON API, SSE, async inference, limits
-julia --project=. --threads=8 examples/ml_dashboard/server.jl     # :8080
+# Production-style ops console: probes, Prometheus, access log, admin, drain
+julia --project=. examples/ml_dashboard/server.jl                 # :8080
 
 # Tour of every routing/request feature (typed params, wildcards, middleware)
-julia --project=. --threads=8 examples/feature_tour/server.jl     # :3001
+julia --project=. --threads=auto examples/feature_tour/server.jl  # :3001
 
 # JSON ML serving API (needs Pkg.add("JSON"))
 julia --project=. -t4 examples/ml_serving/server.jl               # :3001

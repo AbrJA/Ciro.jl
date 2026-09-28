@@ -2,8 +2,8 @@ using Test
 using Ciro
 using Sockets
 
-# The example defines `build_dashboard` and a custom telemetry; `main()` is
-# guarded by `PROGRAM_FILE`, so including it does not start a server.
+# The example defines `build_console`; `main()` is guarded by `PROGRAM_FILE`,
+# so including it does not start a server.
 include(joinpath(@__DIR__, "..", "examples", "ml_dashboard", "server.jl"))
 
 """Yielding in-process client (the server shares this process)."""
@@ -25,16 +25,16 @@ function _ex_request(port::Integer, data::AbstractString; full::Bool=false)
     end
 end
 
-@testset "Example: ML dashboard (in-process sockets)" begin
-    port = 20000 + (getpid() % 10000) + 500
-    server = build_dashboard(; port, backend = :sockets,
-                             telemetry = DemoTelemetry(devnull))
+@testset "Example: ops console (in-process sockets)" begin
+    port = 20000 + (getpid() % 10000) + 600
+    server = build_console(; port, backend = :sockets, nworkers = 1,
+                           admin_token = "demo-token", log_io = devnull)
     task = Threads.@spawn start!(server; nworkers = 1)
     try
         ready = false
         for _ in 1:200
             try
-                _ex_request(port, "GET /api/health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+                _ex_request(port, "GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
                             full = true)
                 ready = true
                 break
@@ -45,17 +45,31 @@ end
         @test ready
 
         r = _ex_request(port, "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"; full = true)
-        @test startswith(r, "HTTP/1.1 200") && occursin("ML Dashboard", r)
+        @test startswith(r, "HTTP/1.1 200") && occursin("Ops Console", r)
 
-        r = _ex_request(port, "GET /api/health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+        # Probes: liveness answers, readiness reflects maintenance.
+        r = _ex_request(port, "GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
                         full = true)
         @test startswith(r, "HTTP/1.1 200") && occursin("\"status\":\"ok\"", r)
-        @test occursin("X-Server: Ciro", r)                 # middleware
+        @test occursin("X-Service: mock-linear", r)
+        r = _ex_request(port, "GET /readyz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+                        full = true)
+        @test startswith(r, "HTTP/1.1 200") && occursin("\"status\":\"ready\"", r)
 
+        # Metrics: Prometheus text and JSON.
+        r = _ex_request(port, "GET /metrics HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+                        full = true)
+        @test startswith(r, "HTTP/1.1 200")
+        @test occursin("text/plain; version=0.0.4", r)
+        @test occursin("ciro_requests_total", r)
+        r = _ex_request(port, "GET /api/metrics HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+                        full = true)
+        @test startswith(r, "HTTP/1.1 200") && occursin("\"requests\"", r)
+
+        # Service info: typed param and 404.
         r = _ex_request(port, "GET /api/v1/models HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
                         full = true)
         @test startswith(r, "HTTP/1.1 200") && occursin("linear", r)
-
         r = _ex_request(port, "GET /api/v1/models/2 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
                         full = true)
         @test startswith(r, "HTTP/1.1 200") && occursin("\"mlp\"", r)
@@ -63,49 +77,67 @@ end
                         full = true)
         @test startswith(r, "HTTP/1.1 404")
 
-        # Async executor: simulated inference off the event loop
-        r = _ex_request(port,
-            "POST /api/v1/predict?model=2 HTTP/1.1\r\nHost: x\r\nContent-Length: 9\r\n" *
-            "Connection: close\r\n\r\n1.0,2.0,3", full = true)
-        @test startswith(r, "HTTP/1.1 200") && occursin("\"prediction\"", r)
-        @test occursin("\"model\":\"mlp\"", r)
-
-        # Per-route limit: 4 KB on /api/v1/upload
+        # Per-route upload limit.
         r = _ex_request(port,
             "POST /api/v1/upload HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n" *
             "Connection: close\r\n\r\n" * "x"^10, full = true)
         @test startswith(r, "HTTP/1.1 200") && occursin("\"received\":10", r)
         r = _ex_request(port,
-            "POST /api/v1/upload HTTP/1.1\r\nHost: x\r\nContent-Length: 5000\r\n" *
-            "Connection: close\r\n\r\n" * "x"^5000, full = true)
+            "POST /api/v1/upload HTTP/1.1\r\nHost: x\r\nContent-Length: 8000\r\n" *
+            "Connection: close\r\n\r\n" * "x"^8000, full = true)
         @test startswith(r, "HTTP/1.1 413")
 
-        # Middleware: token-protected admin endpoint
+        # Admin endpoints require the token.
         r = _ex_request(port, "GET /admin/stats HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
                         full = true)
         @test startswith(r, "HTTP/1.1 401")
         r = _ex_request(port,
             "GET /admin/stats HTTP/1.1\r\nHost: x\r\nX-Admin-Token: demo-token\r\n" *
             "Connection: close\r\n\r\n", full = true)
-        @test startswith(r, "HTTP/1.1 200") && occursin("\"requests\"", r)
+        @test startswith(r, "HTTP/1.1 200") && occursin("\"active_connections\"", r)
+        r = _ex_request(port,
+            "GET /admin/config HTTP/1.1\r\nHost: x\r\nX-Admin-Token: demo-token\r\n" *
+            "Connection: close\r\n\r\n", full = true)
+        @test startswith(r, "HTTP/1.1 200") && occursin("\"backend\":\"sockets\"", r)
+        @test occursin("\"admin_token\":\"***\"", r)
 
-        # Static files via wildcard, with traversal rejection
+        # Access log tail captured the requests above.
+        r = _ex_request(port,
+            "GET /admin/log/tail HTTP/1.1\r\nHost: x\r\nX-Admin-Token: demo-token\r\n" *
+            "Connection: close\r\n\r\n", full = true)
+        @test startswith(r, "HTTP/1.1 200") && occursin("\"lines\"", r)
+        @test occursin("GET /healthz", r)
+
+        # Maintenance drain: readiness flips to 503 and back.
+        r = _ex_request(port,
+            "POST /admin/maintenance HTTP/1.1\r\nHost: x\r\nX-Admin-Token: demo-token\r\n" *
+            "Content-Length: 2\r\nConnection: close\r\n\r\non", full = true)
+        @test startswith(r, "HTTP/1.1 200") && occursin("\"maintenance\":true", r)
+        r = _ex_request(port, "GET /readyz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+                        full = true)
+        @test startswith(r, "HTTP/1.1 503") && occursin("\"maintenance\"", r)
+        r = _ex_request(port,
+            "POST /admin/maintenance HTTP/1.1\r\nHost: x\r\nX-Admin-Token: demo-token\r\n" *
+            "Content-Length: 3\r\nConnection: close\r\n\r\noff", full = true)
+        @test startswith(r, "HTTP/1.1 200") && occursin("\"maintenance\":false", r)
+        r = _ex_request(port, "GET /readyz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+                        full = true)
+        @test startswith(r, "HTTP/1.1 200")
+        r = _ex_request(port,
+            "POST /admin/maintenance HTTP/1.1\r\nHost: x\r\nX-Admin-Token: demo-token\r\n" *
+            "Content-Length: 5\r\nConnection: close\r\n\r\nbogus", full = true)
+        @test startswith(r, "HTTP/1.1 400")
+
+        # Static files via wildcard, with traversal rejection.
         r = _ex_request(port, "GET /static/app.js HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
                         full = true)
-        @test startswith(r, "HTTP/1.1 200") && occursin("EventSource", r)
+        @test startswith(r, "HTTP/1.1 200") && occursin("maintenance", r)
         r = _ex_request(port, "GET /static/../server.jl HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
                         full = true)
         @test startswith(r, "HTTP/1.1 404")
-
-        # Retention rule: copy(ctx) handed to another task
-        r = _ex_request(port, "GET /api/v1/audit HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+        r = _ex_request(port, "GET /missing HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
                         full = true)
-        @test startswith(r, "HTTP/1.1 200") && occursin("\"audited\":true", r)
-
-        # SSE: headers arrive immediately (body is an infinite stream)
-        r = _ex_request(port, "GET /api/v1/events HTTP/1.1\r\nHost: x\r\n\r\n")
-        @test startswith(r, "HTTP/1.1 200")
-        @test occursin("Content-Type: text/event-stream", r)
+        @test startswith(r, "HTTP/1.1 404")
     finally
         stop!(server)
         timedwait(() -> istaskdone(task), 5.0)

@@ -200,3 +200,17 @@ code {
   border-radius: 4px;
   padding: 1px 5px;
 }
+
+/* Ops console additions */
+.pill.warn { color: var(--warn); border-color: var(--warn); }
+.card.wide { grid-column: 1 / -1; }
+.result.small { min-height: 0; max-height: 220px; }
+.metrics-down b { color: var(--warn); }
+.config {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+}
+.config code { color: var(--accent); }

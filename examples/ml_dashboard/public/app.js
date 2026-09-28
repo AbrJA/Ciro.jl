@@ -1,9 +1,10 @@
-// Ciro.jl ML dashboard — vanilla JS, no dependencies.
+// Ciro.jl ops console — vanilla JS, no dependencies.
 
 const $ = (id) => document.getElementById(id);
 const fmt = (n) => Number(n).toLocaleString();
+const token = () => $("token").value.trim();
 
-async function request(url, opts) {
+async function request(url, opts = {}) {
   try {
     const res = await fetch(url, opts);
     return { status: res.status, body: await res.text() };
@@ -12,14 +13,43 @@ async function request(url, opts) {
   }
 }
 
-async function refreshHealth() {
-  const { status, body } = await request("/api/health");
+const admin = (url, opts = {}) =>
+  request(url, { ...opts, headers: { "X-Admin-Token": token(), ...(opts.headers ?? {}) } });
+
+async function refreshProbes() {
+  const h = await request("/healthz");
+  $("health").textContent = h.status === 200 ? "live" : "down";
+
+  const r = await request("/readyz");
+  const ready = $("ready");
+  if (r.status === 200) {
+    ready.textContent = "ready";
+    ready.classList.remove("warn");
+  } else if (r.status === 503) {
+    ready.textContent = "maintenance (503)";
+    ready.classList.add("warn");
+  } else {
+    ready.textContent = "unknown";
+    ready.classList.add("warn");
+  }
+}
+
+async function refreshMetrics() {
+  const { status, body } = await request("/api/metrics");
   if (status !== 200) {
-    $("health").textContent = "unreachable — retrying";
+    $("metrics").innerHTML =
+      `<div class="metrics-down"><span>server</span><b>${status === 503 ? "busy" : "unreachable"}</b></div>`;
     return;
   }
-  const h = JSON.parse(body);
-  $("health").textContent = `ok · up ${h.uptime_s}s`;
+  const m = JSON.parse(body);
+  const cells = [
+    ["requests", m.requests], ["responses", m.responses],
+    ["2xx", m.status_2xx], ["4xx", m.status_4xx], ["5xx", m.status_5xx],
+    ["exceptions", m.exceptions], ["bytes in", m.bytes_in], ["bytes out", m.bytes_out],
+  ];
+  $("metrics").innerHTML = cells
+    .map(([k, v]) => `<div><span>${k}</span><b>${fmt(v)}</b></div>`)
+    .join("");
 }
 
 async function refreshModels() {
@@ -30,37 +60,37 @@ async function refreshModels() {
     .join("");
 }
 
-async function refreshMetrics() {
-  const { status, body } = await request("/api/metrics");
+async function refreshConfig() {
+  const { status, body } = await admin("/admin/config");
   if (status !== 200) {
-    $("metrics").innerHTML =
-      `<div class="metrics-down"><span>server</span><b>${status === 503 ? "busy (503)" : "unreachable"}</b></div>`;
+    $("config").innerHTML = `<span class="muted">config needs the admin token (${status})</span>`;
     return;
   }
-  const m = JSON.parse(body);
-  const cells = [
-    ["requests", m.requests],
-    ["responses", m.responses],
-    ["2xx", m.status_2xx],
-    ["4xx", m.status_4xx],
-    ["5xx", m.status_5xx],
-    ["exceptions", m.exceptions],
-    ["bytes in", m.bytes_in],
-    ["bytes out", m.bytes_out],
-  ];
-  $("metrics").innerHTML = cells
-    .map(([k, v]) => `<div><span>${k}</span><b>${fmt(v)}</b></div>`)
-    .join("");
+  const c = JSON.parse(body);
+  $("config").innerHTML =
+    `<span class="muted">${c.service} v${c.version}</span>` +
+    `<code>backend=${c.backend} workers=${c.nworkers} max_body=${fmt(c.max_body_size)} ` +
+    `max_conns=${fmt(c.max_connections)}</code>`;
 }
 
-async function predict() {
-  const features = $("features").value;
-  const t0 = performance.now();
-  const { status, body } = await request("/api/v1/predict", { method: "POST", body: features });
-  const ms = Math.round(performance.now() - t0);
-  const note = status === 0 ? "request failed (server unreachable?)" :
-               status === 503 ? "server busy — the worker pool is full (open streams?)" : "";
-  $("result").textContent = `HTTP ${status} · client round-trip ${ms} ms${note ? " · " + note : ""}\n${body}`;
+async function refreshPrometheus() {
+  const { status, body } = await request("/metrics");
+  $("prom").textContent = status === 200
+    ? body.split("\n").slice(0, 11).join("\n") + "\n…"
+    : `HTTP ${status}`;
+}
+
+async function refreshLog() {
+  const { status, body } = await admin("/admin/log/tail");
+  const log = $("log");
+  if (status !== 200) {
+    log.innerHTML = `<div class="muted">access log needs the admin token (${status})</div>`;
+    return;
+  }
+  const { lines } = JSON.parse(body);
+  log.innerHTML = lines.length
+    ? lines.slice().reverse().map((l) => `<div>${l.replace(/</g, "&lt;")}</div>`).join("")
+    : '<div class="muted">no requests yet</div>';
 }
 
 async function upload(bytes) {
@@ -68,44 +98,34 @@ async function upload(bytes) {
     method: "POST",
     body: "x".repeat(bytes),
   });
-  const note = status === 0 ? "request failed (connection reset by the 413 close?)" :
-               status === 503 ? "server busy" : "";
+  const note = status === 0 ? "connection failed" :
+               status === 413 ? "per-route limit is 4 KB" : "";
   $("result").textContent = `HTTP ${status} · uploaded ${bytes} bytes${note ? " · " + note : ""}\n${body}`;
 }
 
-async function audit() {
-  const { status, body } = await request("/api/v1/audit");
-  $("result").textContent = `HTTP ${status}\n${body}`;
+async function maintenance(state) {
+  const { status, body } = await admin("/admin/maintenance", { method: "POST", body: state });
+  $("result").textContent = `HTTP ${status} · maintenance ${state}\n${body}`;
+  refreshProbes();
 }
 
-function connectEvents() {
-  const events = $("events");
-  const es = new EventSource("/api/v1/events");
-  es.addEventListener("metrics", (ev) => {
-    const d = JSON.parse(ev.data);
-    if (events.querySelector(".muted")) events.innerHTML = "";
-    const line = document.createElement("div");
-    line.textContent = `t=${d.tick}  requests=${d.requests}  responses=${d.responses}  errors=${d.errors}`;
-    events.prepend(line);
-    while (events.childElementCount > 20) events.lastChild.remove();
-  });
-  es.onerror = () => {
-    events.innerHTML =
-      '<div class="muted">stream lost — reconnecting… (each open stream holds a server worker; ' +
-      'if the pool is full, other requests wait or get 503)</div>';
-  };
-}
-
-$("predict").onclick = predict;
 $("upload-ok").onclick = () => upload(100);
 $("upload-big").onclick = () => upload(8000);
-$("audit").onclick = audit;
+$("maint-on").onclick = () => maintenance("on");
+$("maint-off").onclick = () => maintenance("off");
+$("token").addEventListener("change", () => {
+  refreshConfig();
+  refreshLog();
+});
 
-refreshHealth();
-refreshModels();
+refreshProbes();
 refreshMetrics();
+refreshModels();
+refreshConfig();
+refreshPrometheus();
+refreshLog();
 setInterval(() => {
-  refreshHealth();
+  refreshProbes();
   refreshMetrics();
 }, 1000);
-connectEvents();
+setInterval(refreshLog, 2000);

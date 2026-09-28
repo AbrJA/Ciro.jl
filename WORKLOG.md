@@ -11,7 +11,7 @@ See `docs/DESIGN_LESSONS.md` for the engineering standards and
 State at pause:
 - `dev`: Stages 0–2.5, async executor, streaming/SSE, zero-alloc route params,
   telemetry, per-route limits, audit fixes, 503 shedding, `Expect:
-  100-continue`, and the examples committed. `Pkg.test()` → **926 passed,
+  100-continue`, and the examples committed. `Pkg.test()` → **936 passed,
   0 failed on both Julia 1.10.12 and 1.13.0**; acceptance 167/167 (both
   backends); PicoHTTPParser `0.3.0` resolves from General.
 - Uncommitted (this session): examples (`examples/ml_dashboard`,
@@ -19,11 +19,14 @@ State at pause:
   exposed (`copy(ctx)` param keys, async worker cap).
 
 ### Examples + fixes (uncommitted, this session)
-- `examples/ml_dashboard`: real-world ML dashboard — HTML/JS page over JSON
-  APIs, typed params, middleware, a custom `AbstractTelemetry` (metrics +
-  access log), AsyncExecutor inference, SSE, a 4 KB per-route upload limit,
-  `copy(ctx)` audit, and traversal-guarded static files via a wildcard route.
-  Root `server.jl`/`examples_server.jl` moved to `examples/ml_serving` and
+- `examples/ml_dashboard`: re-themed as a production-style **ops console**
+  (SSE and predict removed so `ai_chat` owns real-time): liveness/readiness
+  probes, Prometheus text `/metrics`, JSON `/api/metrics`, access log to stdout
+  or `CIRO_LOG` with an in-memory tail (`/admin/log/tail`), token-protected
+  `/admin/{stats,config,maintenance}`, env-driven config, per-route upload
+  limit, static assets, graceful drain. `test/example_test.jl` rewritten
+  (28 assertions). `Pkg.test()` 936 on 1.10.12 and 1.13.0.
+- Root `server.jl`/`examples_server.jl` moved to `examples/ml_serving` and
   `examples/feature_tour`; `examples/README.md` maps every capability.
 - `test/example_test.jl` starts the dashboard in-process (sockets backend) and
   checks every endpoint (18 assertions) inside `Pkg.test`.

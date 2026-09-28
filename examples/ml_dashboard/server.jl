@@ -1,25 +1,35 @@
 #!/usr/bin/env julia
 # ══════════════════════════════════════════════════════════════════════════════
-# Ciro.jl — real-world example: an ML inference dashboard
+# Ciro.jl — real-world example: a production-style ops console
+#
+# A small model service with the things you actually deploy: liveness and
+# readiness probes, Prometheus metrics, an access log (stdout or a file),
+# token-protected admin endpoints, a maintenance/drain switch, per-route body
+# limits, and graceful shutdown.
 #
 # Run:
-#   julia --project=. --threads=8 examples/ml_dashboard/server.jl [port] [backend]
-#   # e.g. julia --project=. --threads=8 examples/ml_dashboard/server.jl 8080 uring
-#   #      julia --project=. --threads=8 examples/ml_dashboard/server.jl 8080 sockets
+#   julia --project=. examples/ml_dashboard/server.jl
 #
-# Then open http://localhost:8080 — the page polls the API, streams live metrics
-# over SSE, and exercises the async executor with simulated inference.
+# Configuration (environment variables):
+#   CIRO_PORT=8080  CIRO_BACKEND=uring|sockets  CIRO_WORKERS=<threads>
+#   CIRO_LOG=/path/access.log   CIRO_ADMIN_TOKEN=demo-token
+#   CIRO_MAX_BODY=1048576       CIRO_MAX_CONNECTIONS=1024
+#
+# Then open http://localhost:8080 — the console polls the API, shows the access
+# log tail, and can flip the service into maintenance (readyz -> 503).
 # ══════════════════════════════════════════════════════════════════════════════
 
 using Ciro
 using Dates
 
-# Extend telemetry callbacks for the custom observer (explicit imports are
-# required on Julia 1.10 to add methods to another module's functions).
-import Ciro: telemetry_capture_path, telemetry_request!, telemetry_response!,
+# Extend Ciro's extension points (explicit imports are required to add methods
+# to another module's functions).
+import Ciro: log!, telemetry_capture_path, telemetry_request!, telemetry_response!,
              telemetry_read!, telemetry_exception!
 
-# ── Domain data ─────────────────────────────────────────────────────────────
+# ── Service identity ────────────────────────────────────────────────────────
+
+const SERVICE = (name = "mock-linear", version = "0.1.0")
 
 const MODELS = [
     (id = 1, name = "linear",   kind = "regression", params = 1_024),
@@ -29,8 +39,23 @@ const MODELS = [
 
 model_json(m) = "{\"id\":$(m.id),\"name\":\"$(m.name)\",\"kind\":\"$(m.kind)\"," *
                 "\"params\":$(m.params)}"
-
 models_json() = "{\"models\":[" * join(model_json.(MODELS), ",") * "]}"
+
+json_escape(s::AbstractString) = sprint() do io
+    for c in s
+        if c == '"' || c == '\\'
+            print(io, '\\', c)
+        elseif c == '\n'
+            print(io, "\\n")
+        elseif c == '\r'
+            print(io, "\\r")
+        elseif c == '\t'
+            print(io, "\\t")
+        else
+            print(io, c)
+        end
+    end
+end
 
 function metrics_json(m::ServerMetrics)
     s = metrics_snapshot(m)
@@ -44,42 +69,80 @@ function metrics_json(m::ServerMetrics)
                   ",\"bytes_out\":", s.bytes_out, "}")
 end
 
-# ── Custom telemetry: one observer feeding both metrics and an access log ───
-
-struct DemoTelemetry <: AbstractTelemetry
-    metrics :: ServerMetrics
-    io      :: IO
-    lock    :: ReentrantLock
+"""Prometheus text exposition of the HTTP counters."""
+function prometheus_text(m::ServerMetrics)
+    s = metrics_snapshot(m)
+    io = IOBuffer()
+    for (name, help, value) in (
+        ("ciro_requests_total",     "Parsed HTTP requests.", s.requests),
+        ("ciro_responses_total",    "HTTP responses queued.", s.responses),
+        ("ciro_status_2xx_total",   "Responses with 2xx status.", s.status_2xx),
+        ("ciro_status_3xx_total",   "Responses with 3xx status.", s.status_3xx),
+        ("ciro_status_4xx_total",   "Responses with 4xx status.", s.status_4xx),
+        ("ciro_status_5xx_total",   "Responses with 5xx status.", s.status_5xx),
+        ("ciro_exceptions_total",   "Handler exceptions intercepted.", s.exceptions),
+        ("ciro_bytes_in_total",     "Bytes read from connections.", s.bytes_in),
+        ("ciro_bytes_out_total",    "Bytes written to connections.", s.bytes_out),
+    )
+        print(io, "# HELP ", name, " ", help, "\n# TYPE ", name, " counter\n",
+                  name, " ", value, "\n")
+    end
+    return String(take!(io))
 end
 
-DemoTelemetry(io::IO=stdout) = DemoTelemetry(ServerMetrics(), io, ReentrantLock())
+# ── Telemetry: metrics + access log with an in-memory tail ──────────────────
 
-telemetry_capture_path(::DemoTelemetry)::Bool = true
+struct OpsTelemetry <: AbstractTelemetry
+    metrics  :: ServerMetrics
+    io       :: IO
+    lock     :: ReentrantLock
+    tail     :: Vector{String}
+    max_tail :: Int
+end
 
-telemetry_request!(t::DemoTelemetry, m::UInt8, p, v::UInt8) =
+OpsTelemetry(io::IO = stdout; max_tail::Int = 50) =
+    OpsTelemetry(ServerMetrics(), io, ReentrantLock(), String[], max_tail)
+
+telemetry_capture_path(::OpsTelemetry)::Bool = true
+
+telemetry_request!(t::OpsTelemetry, m::UInt8, p, v::UInt8) =
     telemetry_request!(t.metrics, m, p, v)
-telemetry_read!(t::DemoTelemetry, n::Int) = telemetry_read!(t.metrics, n)
-telemetry_exception!(t::DemoTelemetry) = telemetry_exception!(t.metrics)
+telemetry_read!(t::OpsTelemetry, n::Int) = telemetry_read!(t.metrics, n)
+telemetry_exception!(t::OpsTelemetry) = telemetry_exception!(t.metrics)
 
-function telemetry_response!(t::DemoTelemetry, m::UInt8, p, s::Int, b::Int, e::Float64)
+function telemetry_response!(t::OpsTelemetry, m::UInt8, p, s::Int, b::Int, e::Float64)
     telemetry_response!(t.metrics, m, p, s, b, e)
     line = string(Dates.now(), " \"", Methods.to_string(m), " ", p, "\" ", s, " ", b,
                   " ", round(e * 1000; digits = 2), "ms")
     lock(t.lock) do
         println(t.io, line)
+        flush(t.io)                     # keep file logs current for tailing
+        push!(t.tail, line)
+        length(t.tail) > t.max_tail && popfirst!(t.tail)
     end
     return nothing
 end
 
+tail_lines(t::OpsTelemetry) = lock(t.lock) do
+    copy(t.tail)
+end
+
+# ── System logger (AbstractLogger extension point) ──────────────────────────
+
+struct ConsoleLogger <: AbstractLogger end
+
+log!(::ConsoleLogger, level::Severity, msg::String) =
+    println(stderr, "[", level, "] ", msg)
+
 # ── Middleware (callable structs) ───────────────────────────────────────────
 
-struct WithServerHeader{H}
+struct WithServiceHeader{H}
     handler :: H
 end
 
-function (m::WithServerHeader)(ctx::Context)
+function (m::WithServiceHeader)(ctx::Context)
     resp = m.handler(ctx)
-    resp isa Response && push!(resp.headers, "X-Server" => "Ciro")
+    resp isa Response && push!(resp.headers, "X-Service" => SERVICE.name)
     return resp
 end
 
@@ -93,7 +156,7 @@ function (m::RequireToken)(ctx::Context)
     return m.handler(ctx)
 end
 
-# ── Static files (a small, traversal-safe wildcard handler) ─────────────────
+# ── Static files (traversal-guarded wildcard) ───────────────────────────────
 
 const PUBLIC_DIR = joinpath(@__DIR__, "public")
 
@@ -112,82 +175,48 @@ function serve_static(ctx::Context)
                     read(file))
 end
 
-# ── Handlers ────────────────────────────────────────────────────────────────
-
-function predict(ctx::Context)
-    features = Float64[]
-    for part in split(body(ctx), ',')
-        v = tryparse(Float64, strip(part))
-        v === nothing || push!(features, v)
-    end
-    isempty(features) && return fail(422, "Expected comma-separated features")
-
-    qp = queryparams(ctx)
-    model_id = clamp(something(tryparse(Int, get(qp, "model", "1")), 1), 1, length(MODELS))
-
-    t0 = time()
-    sleep(0.05 + 0.1 * rand())          # simulated inference, off the event loop
-    score = sum(features) / length(features) + 0.01 * model_id
-    return json("{\"model\":\"$(MODELS[model_id].name)\"," *
-                "\"prediction\":$(round(score; digits = 4))," *
-                "\"features\":$(length(features))," *
-                "\"latency_ms\":$(round((time() - t0) * 1000; digits = 1))}")
-end
-
-function audit(ctx::Context)
-    saved = copy(ctx)                   # owned request: safe to hand to a task
-    Threads.@spawn begin
-        sleep(0.2)
-        println("[audit] $(saved.request.method) $(saved.request.path) " *
-                "ua=$(header(saved.request, "User-Agent", "unknown"))")
-    end
-    return json("{\"audited\":true}")
-end
-
-function events(ctx::Context, metrics::ServerMetrics)
-    return sse() do send
-        try
-            while true
-                s = metrics_snapshot(metrics)
-                send("{\"tick\":$(round(time(); digits = 2))," *
-                     "\"requests\":$(s.requests),\"responses\":$(s.responses)," *
-                     "\"errors\":$(s.status_4xx + s.status_5xx)}"; event = "metrics")
-                sleep(1)
-            end
-        catch err
-            err isa StreamClosedError || rethrow(err)
-        end
-    end
-end
-
 # ── Application ─────────────────────────────────────────────────────────────
 
 """
-    build_dashboard(; port=8080, backend=:uring, executor=..., telemetry=...)
+    build_console(; port, backend, nworkers, admin_token, log_io, ...) -> Server
 
-Build (but do not start) the example server. Kept separate from `main` so the
-test suite can start it in-process.
+Build (but do not start) the ops-console server. Kept separate from `main` so
+tests can start it in-process.
 """
-function build_dashboard(;
+function build_console(;
     port::Int = 8080,
     backend::Symbol = :uring,
-    # Each open SSE stream holds one worker for its lifetime, so size the pool
-    # for the number of concurrent streams you expect (one per dashboard tab).
-    executor::AbstractExecutor = AsyncExecutor(worker_threads = 32, max_pending = 128),
-    telemetry::AbstractTelemetry = DemoTelemetry(),
+    nworkers::Int = Threads.nthreads(),
+    admin_token::String = "demo-token",
+    log_io::IO = stdout,
+    max_body_size::Int = 1_048_576,
+    max_connections::Int = 1024,
 )
+    telemetry = OpsTelemetry(log_io)
+    maintenance = Threads.Atomic{Bool}(false)
     started = time()
+
     router = Trie()
 
-    # Dashboard page and assets
+    # Console page and assets
     get!(router, "/", _ -> html(read(joinpath(PUBLIC_DIR, "index.html"), String)))
     get!(router, "/static/*", serve_static)
 
-    # Health (middleware adds a header)
-    get!(router, "/api/health", WithServerHeader(_ -> json(
-        "{\"status\":\"ok\",\"uptime_s\":$(round(time() - started; digits = 1))}")))
+    # Probes: liveness always answers; readiness reflects maintenance.
+    get!(router, "/healthz", WithServiceHeader(_ ->
+        json("{\"status\":\"ok\",\"uptime_s\":$(round(time() - started; digits = 1))}")))
+    get!(router, "/readyz", _ -> maintenance[] ?
+        Response(503, ["Content-Type" => "application/json"],
+                 "{\"status\":\"maintenance\"}") :
+        json("{\"status\":\"ready\",\"service\":\"$(SERVICE.name)\",\"version\":\"$(SERVICE.version)\"}"))
 
-    # Models: collection, typed param, 404
+    # Metrics: Prometheus text for scrapers, JSON for the console UI.
+    get!(router, "/metrics", _ -> Response(200,
+        ["Content-Type" => "text/plain; version=0.0.4; charset=utf-8"],
+        prometheus_text(telemetry.metrics)))
+    get!(router, "/api/metrics", _ -> json(metrics_json(telemetry.metrics)))
+
+    # Service info (typed param + 404)
     get!(router, "/api/v1/models", _ -> json(models_json()))
     get!(router, "/api/v1/models/:id::Int", ctx -> begin
         id = param(ctx, Int, :id)
@@ -195,50 +224,84 @@ function build_dashboard(;
         return json(model_json(MODELS[id]))
     end)
 
-    # Simulated inference on the async executor
-    post!(router, "/api/v1/predict", predict)
-
-    # Live metrics over SSE (requires AsyncExecutor)
-    get!(router, "/api/v1/events", ctx -> events(ctx, telemetry.metrics))
-
-    # Upload with a small per-route body limit (server-wide default is 1 MiB)
+    # Diagnostics upload with a small per-route limit (server default is 1 MiB)
     post!(router, "/api/v1/upload",
          ctx -> json("{\"received\":$(length(rawbody(ctx))),\"limit\":4096}");
          limits = RouteLimits(max_body_size = 4096))
 
-    # Retention rule: copy(ctx) before crossing a task boundary
-    get!(router, "/api/v1/audit", audit)
+    # Admin: token-protected ops endpoints
+    get!(router, "/admin/config", RequireToken(admin_token, _ -> json(
+        "{\"service\":\"$(SERVICE.name)\",\"version\":\"$(SERVICE.version)\"," *
+        "\"port\":$port,\"backend\":\"$backend\",\"nworkers\":$nworkers," *
+        "\"max_body_size\":$max_body_size,\"max_connections\":$max_connections," *
+        "\"admin_token\":\"***\"}")))
+    get!(router, "/admin/log/tail", RequireToken(admin_token, _ ->
+        json("{\"lines\":[" *
+             join(("\"" * json_escape(l) * "\"" for l in tail_lines(telemetry)), ",") *
+             "]}")))
+    post!(router, "/admin/maintenance", RequireToken(admin_token, ctx -> begin
+        state = strip(body(ctx))
+        if state == "on"
+            maintenance[] = true
+        elseif state == "off"
+            maintenance[] = false
+        else
+            return fail(400, "expected body 'on' or 'off'")
+        end
+        return json("{\"maintenance\":$(maintenance[])}")
+    end))
 
-    # Metrics for the dashboard, and admin stats behind a token middleware
-    get!(router, "/api/metrics", _ -> json(metrics_json(telemetry.metrics)))
-    get!(router, "/admin/stats",
-         RequireToken("demo-token", _ -> json(metrics_json(telemetry.metrics))))
+    server = Server(; router, port, backend, logger = ConsoleLogger(), telemetry,
+                    max_body_size, max_connections, idle_timeout_ms = 120_000)
 
-    return Server(; router, port, backend, executor, telemetry,
-                  host = "0.0.0.0",
-                  max_body_size = 1_048_576,
-                  idle_timeout_ms = 120_000)
+    # Registered after construction so it can read the live connection count.
+    get!(router, "/admin/stats", RequireToken(admin_token, _ -> json(
+        metrics_json(telemetry.metrics)[1:end-1] * "," *
+        "\"active_connections\":$(server.runtime.conn_count[])," *
+        "\"max_connections\":$max_connections," *
+        "\"maintenance\":$(maintenance[])}")))
+
+    return server
+end
+
+# ── Environment configuration ───────────────────────────────────────────────
+
+function _env_int(key::String, default::Int)::Int
+    raw = get(ENV, key, "")
+    isempty(raw) && return default
+    value = tryparse(Int, raw)
+    value === nothing && error("$key must be an integer, got $(repr(raw))")
+    return value
 end
 
 function main()
-    port = length(ARGS) >= 1 ? parse(Int, ARGS[1]) : 8080
-    backend = length(ARGS) >= 2 ? Symbol(ARGS[2]) : :uring
-    server = build_dashboard(; port, backend)
+    port            = _env_int("CIRO_PORT", 8080)
+    backend         = Symbol(get(ENV, "CIRO_BACKEND", "uring"))
+    nworkers        = _env_int("CIRO_WORKERS", Threads.nthreads())
+    admin_token     = get(ENV, "CIRO_ADMIN_TOKEN", "demo-token")
+    log_path        = get(ENV, "CIRO_LOG", "")
+    max_body_size   = _env_int("CIRO_MAX_BODY", 1_048_576)
+    max_connections = _env_int("CIRO_MAX_CONNECTIONS", 1024)
+
+    log_io = isempty(log_path) ? stdout : open(log_path, "a")
+    server = build_console(; port, backend, nworkers, admin_token, log_io,
+                           max_body_size, max_connections)
 
     println("""
-    ╭──────────────────────────────────────────────────────────────╮
-    │  Ciro.jl ML dashboard                                        │
-    │    http://localhost:$(lpad(port, 5))  (backend=:$backend)        │
-    │                                                              │
-    │  API:  GET  /api/health          GET  /api/v1/models         │
-    │        GET  /api/v1/models/:id   POST /api/v1/predict        │
-    │        GET  /api/v1/events (SSE) POST /api/v1/upload         │
-    │        GET  /api/metrics         GET  /admin/stats (token)   │
-    │                                                              │
-    │  Admin token: demo-token      Stop: Ctrl-C (graceful)        │
-    ╰──────────────────────────────────────────────────────────────╯
+    ╭────────────────────────────────────────────────────────────────╮
+    │  Ciro.jl ops console                                           │
+    │    http://localhost:$(lpad(port, 5))   backend=:$backend  workers=$nworkers      │
+    │                                                                │
+    │  probes   GET /healthz   GET /readyz                           │
+    │  metrics  GET /metrics (Prometheus)   GET /api/metrics (JSON)  │
+    │  admin    GET /admin/stats|config|log/tail                     │
+    │           POST /admin/maintenance  (body "on" / "off")         │
+    │                                                                │
+    │  token: $admin_token     log: $(isempty(log_path) ? "stdout" : log_path)
+    │  stop:  Ctrl-C (graceful drain)                                │
+    ╰────────────────────────────────────────────────────────────────╯
     """)
-    start!(server; nworkers = min(Threads.nthreads(), 8))
+    start!(server; nworkers)
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__
