@@ -1,14 +1,8 @@
-using Documenter, Example
+using Documenter, Ciro
 
-makedocs(modules = [Example],
-         sitename = "Example.jl",
-         format = Documenter.HTML()
+makedocs(modules = [Ciro],
+         sitename = "Ciro.jl",
+         format = Documenter.HTML(),
          )
 
-deploydocs(
-    repo = "github.com/JuliaLang/Example.jl.git",
-    target = "build",
-    deps   = nothing,
-    make   = nothing,
-    push_preview = true,
-)
+deploydocs(repo = "github.com/AbrJA/Ciro.jl.git")

@@ -12,7 +12,13 @@ lib/*.dll
 # Docs build
 /docs/build/
 
-# Benchmarks
+# Internal notes (kept locally, not published)
+/WORKLOG.md
+/ARCHITECTURE.md
+/docs/*.md
+
+# Benchmarks (dev-only harness, kept locally)
+/benchmarks/
 target/
 bench/
 

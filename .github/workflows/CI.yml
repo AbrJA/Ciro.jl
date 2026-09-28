@@ -41,5 +41,5 @@ jobs:
         with:
           files: lcov.info
           token: ${{ secrets.CODECOV_TOKEN }}
-  # Docs job disabled until Stage 4: docs/make.jl is still the Example.jl
-  # template and docs/src/index.md references a non-existent ext/CiroMiddleware.
+  # Docs job returns in Stage 4: needs the Documenter deploy setup
+  # (gh-pages branch + token) and the full API doc pass.

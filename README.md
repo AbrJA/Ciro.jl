@@ -35,9 +35,6 @@
 - 🗺️ **Trie router** with typed params, groups, wildcards, and 405 + `Allow`.
 - 🧩 **Modular internals**: `Interface → Router → Runtime → HTTP → Backend → Core`.
 
-> 📖 `ARCHITECTURE.md` is the design guide · `docs/DESIGN_REVIEW.md` the audit and
-> staged plan · `WORKLOG.md` the progress tracker.
-
 ---
 
 ## 🧰 Requirements
@@ -189,8 +186,8 @@ get!(router, "/audit", ctx -> begin
 end)
 ```
 
-> `body(ctx)` / `rawbody(ctx)` already return owned copies.
-> Lifetime rules: `ARCHITECTURE.md` §4.4.
+> `body(ctx)` / `rawbody(ctx)` already return owned copies; retain one if the
+> request must outlive the handler.
 
 ### ⏱️ Async Handlers — Slow Work Off the Event Loop
 
@@ -309,21 +306,8 @@ adapters pass the same wire acceptance suite.
 julia --project=. -e 'using Pkg; Pkg.test()'
 ```
 
-The suite includes **Aqua + JET**, allocation budgets, and **wire-level acceptance
-tests** that run real servers over sockets for both backends.
-
----
-
-## 📈 Benchmarks
-
-```bash
-(cd benchmarks/khttp && cargo build --release)
-./benchmarks/khttp/target/release/server &
-julia --project=. benchmarks/ciro_bench.jl &
-./benchmarks/run_bench.sh
-```
-
-Requires [oha](https://github.com/hatoo/oha) (`cargo install oha`).
+The suite includes **Aqua + JET** and **wire-level acceptance tests** that run
+real servers over sockets for both backends.
 
 ---
 
