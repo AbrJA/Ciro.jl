@@ -149,8 +149,11 @@ State at pause:
   `max_pending=1`). `Pkg.test()` 775; acceptance 97/97.
 
 ### Next
-- Compiled routing (dispatch table at `freeze!`); `Expect: 100-continue`; Stage 4
+- Chat example (`examples/ai_chat`, replaces the dashboard) on the current
+  streaming model; compiled routing (dispatch table at `freeze!`); Stage 4
   packaging (untrack `lib/ciro.so`, JLL, docs build, CI matrix); static files.
+- **Deferred to a future design review**: push-based streaming (streaming v2) —
+  see Backlog.
 
 ### Stage 2 — DONE (one pipeline, graceful shutdown)
 - Single dispatch pipeline: `Runtime.dispatch(router, executor, catcher, request)` is
@@ -195,13 +198,21 @@ State at pause:
   buffers, provided-buffer rings).
 
 ### Backlog (order TBD)
-- Wire tests for chunked transfer-encoding (decoder fixed, no HTTP-level coverage yet).
-- Per-route body limits; `Expect: 100-continue`; early 413 without RST mid-upload.
-- Access logging + metrics (count exceptions as 5xx too). `max_connections` currently
-  sheds by closing silently; consider 503 + `Retry-After` (the async executor already
-  uses 503 shedding).
+- **Streaming v2 — deferred to a design review** (decided 2026-09-28): push-based
+  SSE/streaming. The event loop owns a bounded per-connection outbound queue;
+  app code `subscribe`s and `push!`es events; overflow policy is explicit (drop
+  events vs disconnect the slow subscriber); keepalive comes from a tick. This
+  removes the one-worker-per-open-stream ceiling (idle subscribers cost no task)
+  and makes broadcast O(subscribers) without blocking producers. Keep
+  `stream() do w ... end` as the blocking-producer API (file/transcript/token
+  streaming) feeding the same queue. Bundle with the lock-free reply-inbox
+  question, static files, and HTTP/2/TLS; benchmark ~500 idle subscribers +
+  broadcast on both backends. Not a bug: the current task-per-stream model is
+  correct and documented, just capped at `worker_threads` streams.
 - Static files (dotfile denial, traversal matrix), per-route streaming limits
   (chunk size / max stream duration), SSE keepalive comments.
+- Compiled routing (dispatch table at `freeze!`), `@inferred` guards outside
+  routing, idle memory (smaller read buffers, provided-buffer rings).
 - Perf (evidence-gated, do not do speculatively): if a profile shows `Channel` lock
   contention, evaluate replacing only the UringIO reply inbox with a lock-free queue
   (ConcurrentCollections.jl `ConcurrentQueue`, or a bounded ring sized from

@@ -342,7 +342,8 @@ Requires [oha](https://github.com/hatoo/oha) (`cargo install oha`).
 - 📐 Route params are **zero-allocation on the served path** (ranges into the request
   path, resolved by `param`; `copy(ctx)` to retain). The public `route` helper still
   returns owned strings; compiled routing is on the roadmap. Streaming/SSE requires
-  `AsyncExecutor` and occupies a worker per open stream (HTTP/1.1 only; no HTTP/2).
+  `AsyncExecutor` and occupies a worker per open stream; push-based streaming for
+  high fan-out is slated for the v2 design review (HTTP/1.1 only; no HTTP/2).
 
 ---
 

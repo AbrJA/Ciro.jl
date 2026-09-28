@@ -443,6 +443,7 @@ overstated things).
 | E2 | `PendingWrites` fd-indexed, fragile across fd reuse | Attach to per-connection state owned by `HTTP` |
 | F2 | SIGTERM not interceptable in Julia | Document SIGINT/`stop!` as the supported stop path (`systemd KillSignal=SIGINT`, `docker stop --signal=SIGINT`); do not build a wrapper process — out of scope for a library |
 | J2 | `AbstractBackend` (boot contract) vs `AbstractIO` (byte seam) naming collision risk | Keep both, document the distinction in §5's table; do not merge them — they answer different questions ("how do I start" vs "how do I move bytes") |
+| S1 | Streaming transport: task-per-stream (current) vs push/broker (event-loop-owned per-connection queues) | **Deferred to a v2 design review.** Push is right for fan-out (idle subscribers cost no task; broadcast never blocks), but it changes the API, lifecycle, and backpressure policy, so decide it together with static files, HTTP/2/TLS, and the lock-free reply-inbox question. Keep the blocking writer for per-connection producers. |
 
 Questions I'd most like a maintainer decision on:
 1. Does §4.2's ordering (close the framing/timeout gap **before** extracting `HTTP`)
@@ -489,6 +490,7 @@ Questions I'd most like a maintainer decision on:
 | 4 | JLL packaging for the native lib, docs build, CI matrix. |
 | v1.5 ✅ | Async executor (bounded, 503 shedding, copy-on-escape, both backends) and streaming/SSE on the same ownership boundary (chunked, backpressure, disconnect-safe). |
 | v2 | Sockets backend ✅ (proves the seam), then Reseau/native alternatives only if benchmarks demand them. |
+| v2 design review | Decide the streaming transport (task-per-stream vs push/broker, §7 S1), static files, HTTP/2/TLS, and the lock-free reply inbox together, with benchmarks (e.g. ~500 idle SSE subscribers + broadcast on both backends). |
 
 Rationale: every stage must leave the test suite green and must not require moving
 code a later stage adds. The one deliberate reordering versus the previous document is
