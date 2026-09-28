@@ -171,7 +171,9 @@ test suite can start it in-process.
 function build_dashboard(;
     port::Int = 8080,
     backend::Symbol = :uring,
-    executor::AbstractExecutor = AsyncExecutor(worker_threads = 4, max_pending = 64),
+    # Each open SSE stream holds one worker for its lifetime, so size the pool
+    # for the number of concurrent streams you expect (one per dashboard tab).
+    executor::AbstractExecutor = AsyncExecutor(worker_threads = 32, max_pending = 128),
     telemetry::AbstractTelemetry = DemoTelemetry(),
 )
     started = time()

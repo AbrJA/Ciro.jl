@@ -57,6 +57,12 @@ curl -s localhost:8080/admin/stats -H 'X-Admin-Token: demo-token'
 
 - Streaming responses require `AsyncExecutor` (a synchronous handler would
   block the event loop for the whole body); a sync server answers `500`.
+- **Each open SSE stream holds one async worker for its lifetime.** The example
+  uses `worker_threads = 32, max_pending = 128`: with more than 32 concurrent
+  streams (one per dashboard tab, plus reloads that have not been reaped yet)
+  requests queue up to `max_pending` and are then shed with `503`. If the Live
+  events panel shows "stream lost — reconnecting…", the pool is exhausted —
+  close extra tabs or raise `worker_threads`.
 - The example's access log goes to stdout; metrics are available as JSON.
 - `GET /static/*` is a minimal example of serving files by hand (no dotfile or
   symlink policy beyond `..` rejection) — it is not a production static server.

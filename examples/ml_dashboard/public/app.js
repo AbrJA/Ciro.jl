@@ -4,18 +4,22 @@ const $ = (id) => document.getElementById(id);
 const fmt = (n) => Number(n).toLocaleString();
 
 async function request(url, opts) {
-  const res = await fetch(url, opts);
-  return { status: res.status, body: await res.text() };
+  try {
+    const res = await fetch(url, opts);
+    return { status: res.status, body: await res.text() };
+  } catch (err) {
+    return { status: 0, body: `network error: ${err.message}` };
+  }
 }
 
 async function refreshHealth() {
-  try {
-    const { body } = await request("/api/health");
-    const h = JSON.parse(body);
-    $("health").textContent = `ok · up ${h.uptime_s}s`;
-  } catch {
-    $("health").textContent = "unreachable";
+  const { status, body } = await request("/api/health");
+  if (status !== 200) {
+    $("health").textContent = "unreachable — retrying";
+    return;
   }
+  const h = JSON.parse(body);
+  $("health").textContent = `ok · up ${h.uptime_s}s`;
 }
 
 async function refreshModels() {
@@ -27,7 +31,12 @@ async function refreshModels() {
 }
 
 async function refreshMetrics() {
-  const { body } = await request("/api/metrics");
+  const { status, body } = await request("/api/metrics");
+  if (status !== 200) {
+    $("metrics").innerHTML =
+      `<div class="metrics-down"><span>server</span><b>${status === 503 ? "busy (503)" : "unreachable"}</b></div>`;
+    return;
+  }
   const m = JSON.parse(body);
   const cells = [
     ["requests", m.requests],
@@ -49,7 +58,9 @@ async function predict() {
   const t0 = performance.now();
   const { status, body } = await request("/api/v1/predict", { method: "POST", body: features });
   const ms = Math.round(performance.now() - t0);
-  $("result").textContent = `HTTP ${status} · client round-trip ${ms} ms\n${body}`;
+  const note = status === 0 ? "request failed (server unreachable?)" :
+               status === 503 ? "server busy — the worker pool is full (open streams?)" : "";
+  $("result").textContent = `HTTP ${status} · client round-trip ${ms} ms${note ? " · " + note : ""}\n${body}`;
 }
 
 async function upload(bytes) {
@@ -57,7 +68,9 @@ async function upload(bytes) {
     method: "POST",
     body: "x".repeat(bytes),
   });
-  $("result").textContent = `HTTP ${status} · uploaded ${bytes} bytes\n${body}`;
+  const note = status === 0 ? "request failed (connection reset by the 413 close?)" :
+               status === 503 ? "server busy" : "";
+  $("result").textContent = `HTTP ${status} · uploaded ${bytes} bytes${note ? " · " + note : ""}\n${body}`;
 }
 
 async function audit() {
@@ -77,7 +90,9 @@ function connectEvents() {
     while (events.childElementCount > 20) events.lastChild.remove();
   });
   es.onerror = () => {
-    events.innerHTML = '<div class="muted">reconnecting…</div>';
+    events.innerHTML =
+      '<div class="muted">stream lost — reconnecting… (each open stream holds a server worker; ' +
+      'if the pool is full, other requests wait or get 503)</div>';
   };
 }
 
