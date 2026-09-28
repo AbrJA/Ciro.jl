@@ -10,12 +10,30 @@ See `docs/DESIGN_LESSONS.md` for the engineering standards and
 
 State at pause:
 - `dev`: Stages 0–2.5, async executor, streaming/SSE, zero-alloc route params,
-  telemetry, per-route limits, and LTS-safe tests committed. Audit fixes (HEAD
-  normalization, sockets inflight) uncommitted. `Pkg.test()` → **865 passed,
-  0 failed on both Julia 1.10.12 and 1.13.0**; acceptance 135/135 (both
-  backends); PicoHTTPParser `0.3.0` resolves from General.
-- Uncommitted (this session): audit fixes — auto-HEAD handles `Stream` and
-  non-Response returns; SocketsIO clears `inflight` before `http_on_write`.
+  telemetry, per-route limits, audit fixes, 503 connection shedding, and the
+  gap-closing tests committed. `Expect: 100-continue` uncommitted.
+  `Pkg.test()` → **901 passed, 0 failed on both Julia 1.10.12 and 1.13.0**;
+  acceptance 166/166 (both backends); PicoHTTPParser `0.3.0` resolves from
+  General.
+- Uncommitted (this session): `Expect: 100-continue` (interim response + state
+  machine), plus README/ARCHITECTURE updates.
+
+### Gap-closing iteration (committed, this session)
+- `b123167` — `max_connections` overflow is answered with a pre-serialized
+  `503` + `Retry-After: 1` before the close (was a silent close), on both
+  backends, and reported to telemetry.
+- `ac0d2c5` — telemetry coverage: async delivery, 3xx bucket, completed and
+  client-aborted streams (reported on retire), plus a concurrent `AccessLog`
+  unit test.
+- `ae404df` — per-route limits on param/wildcard routes, async handlers, and
+  custom routers (default `route!` fallback preserves `Endpoint.limits`).
+- `Expect: 100-continue`: after framing checks pass the server queues the
+  interim `100 Continue` and keeps reading; final rejections (413/400/501) skip
+  it; dispatch waits for the interim flush (`http_on_write` continues the
+  `:body` phase). Per-request `http11`/`stream_head` moved to head-parse time
+  because `_prepare_body` needs them (they were set in `_complete_request`).
+  Tests: CL and chunked flows on both backends, async handlers, and the final
+  413 case. `Pkg.test()` 901; acceptance 166/166.
 
 ### Stage 3.5 — observability (uncommitted, this session)
 - `Interface/telemetry.jl`: `AbstractTelemetry` with no-op defaults for
@@ -228,16 +246,13 @@ State at pause:
   it in `_handle_event`); otherwise `http_stream_end`'s resume check sees a
   stale `:write` and the next keep-alive request is never read.
 
-### Test gaps (audit 2026-09-28)
-- `max_connections` shedding is untested (currently closes silently; consider
-  503 + `Retry-After`).
+### Test gaps (audit 2026-09-28; updated)
+Closed: `max_connections` shedding, `Expect: 100-continue`, telemetry
+(streams/async/3xx/concurrency), per-route limits on dynamic routes.
+
+Still open:
 - HTTP/1.0 wire behavior is untested (only unit-level `wants_close` tests).
-- `Expect: 100-continue` is unimplemented.
 - Chunk extensions (`5;ext=1`) are untested.
-- Telemetry: streams (end/abort), the AsyncExecutor path, the 3xx bucket, and
-  concurrent `AccessLog` writes are untested.
-- Per-route limits on param/wildcard routes, async handlers, and the
-  custom-router (no `io_route`) fallback are untested.
 - Streams: body exception mid-stream, `Content-Length` mismatch, HTTP/1.0 raw
   mode are untested.
 - Shutdown drain with an in-flight async handler/stream is untested.

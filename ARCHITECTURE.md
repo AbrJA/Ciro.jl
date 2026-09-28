@@ -217,8 +217,14 @@ Everything in §3.3 is implemented, plus the `HTTP`/`Backend` extraction:
   route's limits before reading the body (413 from `Content-Length`, or as soon as a
   chunked body passes the limit); dispatch reuses the early `RouteResult`, so
   routing still happens once. Backends without `io_route` keep server-wide limits.
-- Gates: `Pkg.test()` → 843 passed, 0 failed; acceptance 118/118, also under
-  `--check-bounds=yes`.
+- **Interim responses and shedding**: `Expect: 100-continue` is answered with the
+  interim `100 Continue` once framing checks pass; final rejections (413/400/501)
+  deliberately skip it, and dispatch waits for the interim flush (`http_on_write`
+  continues the `:body` phase). `max_connections` overflow is answered with a
+  pre-serialized `503` + `Retry-After` before the close on both backends, and is
+  reported to telemetry.
+- Gates: `Pkg.test()` → 901 passed, 0 failed on Julia 1.10.12 and 1.13.0;
+  acceptance 166/166, also under `--check-bounds=yes`.
 
 Still open: compiled routing, HTTP/2/TLS (see §4.2 and §9).
 
@@ -291,6 +297,7 @@ HTTP: append to rbuf
    ├─ headers done         → early route (io_route) → per-route limits
    │                          ├─ CL > max_body → 413 (+ close after flush)
    │                          ├─ CL+TE, duplicate CL, obs-fold → 400
+   │                          ├─ Expect: 100-continue → interim 100, keep reading
    │                          └─ body incomplete → rearm read (body deadline)
    └─ message complete     → build Request (views) → Runtime.dispatch
                               (reusing the early RouteResult)

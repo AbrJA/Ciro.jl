@@ -146,6 +146,10 @@ function http_on_write(io::AbstractIO, st::HTTPConn, n::Int)
         st.stream_ack = nothing
         st.stream_final && _resume_connection(io, st)
         return
+    elseif st.phase == :body
+        # Interim 100-continue flushed: continue reading the body.
+        _pump(io, st)
+        return
     end
 
     _resume_connection(io, st)
@@ -358,6 +362,10 @@ function _process(io::AbstractIO, st::HTTPConn)
             return :done
         end
         st.header_len = head_length(st.hbuf)
+        # Method/version drive framing decisions made before dispatch
+        # (per-route limits, Expect, HEAD body suppression).
+        st.http11 = UInt8(minor_version(st.hbuf)) >= 1
+        st.stream_head = Methods.from_string(request_method(st.hbuf, st.rbuf)) == Methods.HEAD
         st.route = _early_route(io, st)
         _telemetry_begin(io, st)
         _prepare_body(io, st) || return :done
@@ -372,6 +380,9 @@ function _process(io::AbstractIO, st::HTTPConn)
         elseif st.rlen < st.header_len + st.body_need
             return :need_more
         end
+        # An interim 100-continue write may still be in flight; its completion
+        # re-pumps and dispatches (http_on_write handles the :body phase).
+        st.inflight == :none || return :need_more
         st.phase = :writing
     end
 
@@ -415,13 +426,11 @@ function _prepare_body(io::AbstractIO, st::HTTPConn)
             st.bodylen = 0
             st.chunklen = 0
             st.fed = st.header_len
-            return true
+        else
+            _respond_and_close(io, st, fail(501, "Not Implemented"))
+            return false
         end
-        _respond_and_close(io, st, fail(501, "Not Implemented"))
-        return false
-    end
-
-    if cl !== nothing
+    elseif cl !== nothing
         if cl > _effective_max_body(io, st)
             _respond_and_close(io, st, fail(413, "Content Too Large"))
             return false
@@ -429,6 +438,30 @@ function _prepare_body(io::AbstractIO, st::HTTPConn)
         st.body_need = cl
     else
         st.body_need = 0
+    end
+
+    # Expect: 100-continue — invite the body. Rejections above (400/413/501)
+    # are final responses and deliberately skip the interim 100.
+    if st.http11 && (st.chunked || st.body_need > 0)
+        expect = PicoHTTPParser.header(st.hbuf, st.rbuf, "expect")
+        if expect !== nothing && contains_token_ci(expect, "100-continue")
+            _queue_continue(io, st) || return false
+        end
+    end
+    return true
+end
+
+const _CONTINUE_BYTES = Vector{UInt8}(codeunits("HTTP/1.1 100 Continue\r\n\r\n"))
+
+"""Queue the interim `100 Continue` so the client starts sending the body."""
+function _queue_continue(io::AbstractIO, st::HTTPConn)::Bool
+    out = io_acquire_buffer(io)
+    n = length(_CONTINUE_BYTES)
+    length(out) < n && resize!(out, n)
+    copyto!(out, 1, _CONTINUE_BYTES, 1, n)
+    if io_write(io, st, out, n) != 0
+        http_finalize(io, st)
+        return false
     end
     return true
 end
@@ -501,8 +534,6 @@ end
 function _complete_request(io::AbstractIO, st::HTTPConn)
     req = _build_request(st)
     st.close_after = wants_close(req)
-    st.http11 = req.minor_version >= 1
-    st.stream_head = req.method == "HEAD"
     st.stream_chunked = false
     st.stream_final = false
     st.stream_ack = nothing

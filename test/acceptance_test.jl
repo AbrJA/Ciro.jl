@@ -406,6 +406,34 @@ end
                 end
             end
 
+            @testset "Expect: 100-continue" begin
+                # Content-Length body: the client waits for the interim 100.
+                c = TestClient(port; timeout=10.0)
+                try
+                    _send(c, "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n" *
+                             "Expect: 100-continue\r\nConnection: close\r\n\r\n")
+                    @test startswith(read_response(c), "HTTP/1.1 100 Continue")
+                    _send(c, "hello")
+                    resp = read_response(c)
+                    @test startswith(resp, "HTTP/1.1 200") && endswith(resp, "hello")
+                finally
+                    _close(c)
+                end
+
+                # Chunked body.
+                c = TestClient(port; timeout=10.0)
+                try
+                    _send(c, "POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n" *
+                             "Expect: 100-continue\r\nConnection: close\r\n\r\n")
+                    @test startswith(read_response(c), "HTTP/1.1 100 Continue")
+                    _send(c, "5\r\nhello\r\n0\r\n\r\n")
+                    resp = read_response(c)
+                    @test startswith(resp, "HTTP/1.1 200") && endswith(resp, "hello")
+                finally
+                    _close(c)
+                end
+            end
+
             @testset "body larger than one read buffer (P0)" begin
                 payload = repeat("a", 70_000)
                 c = TestClient(port; timeout=5.0)
@@ -505,6 +533,19 @@ end
                             "POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n" *
                             "32\r\n" * chunk * "\r\n32\r\n" * chunk * "\r\n0\r\n\r\n")
                         @test startswith(resp, "HTTP/1.1 413")
+                    end
+
+                    @testset "Expect: 100-continue with a final 413" begin
+                        # Over the limit: the final response comes without the
+                        # interim 100 (RFC 9110 allows rejecting early).
+                        c = TestClient(limited_port; timeout=3.0)
+                        try
+                            _send(c, "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 1000\r\n" *
+                                     "Expect: 100-continue\r\nConnection: close\r\n\r\n")
+                            @test startswith(read_response(c), "HTTP/1.1 413")
+                        finally
+                            _close(c)
+                        end
                     end
 
                     @testset "per-route body limit" begin
@@ -633,6 +674,19 @@ end
                     @test startswith(roundtrip(sock_port,
                         "POST /tiny HTTP/1.1\r\nHost: x\r\nContent-Length: 9\r\nConnection: close\r\n\r\n123456789"),
                         "HTTP/1.1 413")
+
+                    # Expect: 100-continue on this backend too
+                    c = TestClient(sock_port; timeout=10.0)
+                    try
+                        _send(c, "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n" *
+                                 "Expect: 100-continue\r\nConnection: close\r\n\r\n")
+                        @test startswith(read_response(c), "HTTP/1.1 100 Continue")
+                        _send(c, "hello")
+                        resp = read_response(c)
+                        @test startswith(resp, "HTTP/1.1 200") && endswith(resp, "hello")
+                    finally
+                        _close(c)
+                    end
                 finally
                     _kill_server(sp)
                 end
@@ -764,6 +818,19 @@ end
                             "POST /tiny HTTP/1.1\r\nHost: x\r\nContent-Length: 9\r\nConnection: close\r\n\r\n123456789";
                             timeout=10.0),
                             "HTTP/1.1 413")
+
+                        # Expect: 100-continue works with async handlers as well.
+                        c = TestClient(async_port; timeout=10.0)
+                        try
+                            _send(c, "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n" *
+                                     "Expect: 100-continue\r\nConnection: close\r\n\r\n")
+                            @test startswith(read_response(c), "HTTP/1.1 100 Continue")
+                            _send(c, "hello")
+                            r = read_response(c)
+                            @test startswith(r, "HTTP/1.1 200") && endswith(r, "hello")
+                        finally
+                            _close(c)
+                        end
                     finally
                         _kill_server(ap)
                     end

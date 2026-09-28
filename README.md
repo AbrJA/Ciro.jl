@@ -27,8 +27,9 @@
 - 📊 **Observability**: opt-in `ServerMetrics` counters and one-line `AccessLog`, plus
   an `AbstractTelemetry` seam for custom metrics/tracing.
 - 🛡️ **Strict framing & limits**: header/body/idle timeouts, size and connection caps;
-  obs-fold, duplicate `Content-Length`, and CL+TE are rejected; header injection is
-  impossible through `Response`.
+  obs-fold, duplicate `Content-Length`, and CL+TE are rejected; `Expect:
+  100-continue` is honored; over-limit connections get `503` + `Retry-After`;
+  header injection is impossible through `Response`.
 - 🌊 **Graceful shutdown**: `stop!` (or SIGINT) stops accepting, flushes in-flight
   writes, closes idle connections, and drains within `shutdown_timeout`.
 - 🗺️ **Trie router** with typed params, groups, wildcards, and 405 + `Allow`.
