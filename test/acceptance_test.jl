@@ -246,6 +246,8 @@ end)
 post!(router, "/tiny", ctx -> text(body(ctx)); limits=RouteLimits(max_body_size=8))
 post!(router, "/big", ctx -> text(body(ctx)); limits=RouteLimits(max_body_size=1024))
 post!(router, "/quick", ctx -> text(body(ctx)); limits=RouteLimits(body_timeout_ms=150))
+post!(router, "/tiny/:name", ctx -> text(body(ctx)); limits=RouteLimits(max_body_size=4))
+post!(router, "/tinyfile/*", ctx -> text("wild"); limits=RouteLimits(max_body_size=4))
 start!(Server(; router, port=PORT EXTRA); nworkers=2)
 """
 
@@ -523,6 +525,16 @@ end
                             "POST /big HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\nConnection: close\r\n\r\n" *
                             repeat("b", 100)),
                             "HTTP/1.1 200")
+                        # Param and wildcard routes carry their own limits.
+                        @test startswith(roundtrip(limited_port,
+                            "POST /tiny/x HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc"),
+                            "HTTP/1.1 200")
+                        @test startswith(roundtrip(limited_port,
+                            "POST /tiny/x HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nConnection: close\r\n\r\nabcde"),
+                            "HTTP/1.1 413")
+                        @test startswith(roundtrip(limited_port,
+                            "POST /tinyfile/a/b HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nConnection: close\r\n\r\nabcde"),
+                            "HTTP/1.1 413")
                     end
 
                     @testset "per-route body timeout" begin
@@ -745,6 +757,13 @@ end
                         finally
                             _close(c)
                         end
+
+                        # Per-route limits are enforced before dispatch on async
+                        # routes too (the request never reaches a worker).
+                        @test startswith(roundtrip(async_port,
+                            "POST /tiny HTTP/1.1\r\nHost: x\r\nContent-Length: 9\r\nConnection: close\r\n\r\n123456789";
+                            timeout=10.0),
+                            "HTTP/1.1 413")
                     finally
                         _kill_server(ap)
                     end

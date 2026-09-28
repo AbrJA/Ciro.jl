@@ -81,6 +81,25 @@ using PicoHTTPParser
         @test dispatch(app, Request("GET", "/other")).status == 404
     end
 
+    @testset "Custom routers can carry route limits" begin
+        struct LimitedRouter <: AbstractRouter end
+        Ciro.Interface.route(::LimitedRouter, method::UInt8, path::AbstractString) =
+            (method == Methods.POST && path == "/limited") ?
+                RouteResult(Endpoint(_ -> text("ok");
+                                     limits=RouteLimits(max_body_size=3)), ()) :
+                RouteResult()
+
+        captures = Pair{Symbol,UnitRange{Int}}[]
+        res = route!(LimitedRouter(), Methods.POST, "/limited", captures)
+        @test route_limits(res.handler) == RouteLimits(max_body_size=3)
+
+        # The default route! fallback preserves limits, so adapters that route
+        # early through io_route enforce them for custom routers too.
+        resp = dispatch(LimitedRouter(), SyncExecutor(), DefaultCatcher(),
+                        Request("POST", "/limited"), captures)
+        @test resp.status == 200
+    end
+
     @testset "Freeze semantics" begin
         router = Trie()
         app = Application(; router)

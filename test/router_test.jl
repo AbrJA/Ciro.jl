@@ -533,6 +533,10 @@ using PicoHTTPParser
         get!(r, "/small", _ -> text("s");
              limits=RouteLimits(max_body_size=16, body_timeout_ms=250))
         post!(r, "/plain", _ -> text("p"))
+        post!(r, "/up/:name", _ -> text("u");
+              limits=RouteLimits(max_body_size=4))
+        post!(r, "/files/*", _ -> text("w");
+              limits=RouteLimits(max_body_size=2))
         group!(r, "/api") do g
             post!(g, "/up", _ -> text("u"); limits=RouteLimits(max_body_size=4))
         end
@@ -544,6 +548,12 @@ using PicoHTTPParser
         # Auto-HEAD inherits the GET route's limits.
         head_result = route(r, Methods.HEAD, "/small")
         @test route_limits(head_result.handler) == RouteLimits(max_body_size=16, body_timeout_ms=250)
+
+        # Param and wildcard routes carry their limits.
+        @test route_limits(route(r, Methods.POST, "/up/abc").handler) ==
+              RouteLimits(max_body_size=4)
+        @test route_limits(route(r, Methods.POST, "/files/a/b").handler) ==
+              RouteLimits(max_body_size=2)
 
         # Group proxy routes carry their limits.
         @test route_limits(route(r, Methods.POST, "/api/up").handler) ==
