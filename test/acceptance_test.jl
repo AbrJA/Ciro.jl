@@ -166,12 +166,16 @@ Blocking (yielding) client for in-process servers. The raw `TestClient` would
 stall the Julia scheduler while the server shares this process, so in-process
 tests use libuv sockets, which yield while the server tasks run.
 """
-function _julia_request(port::Integer, data::AbstractString)
+function _julia_request(port::Integer, data::AbstractString; full::Bool=false)
     sock = Sockets.connect(Sockets.IPv4("127.0.0.1"), port)
     try
         write(sock, data)
         result = Ref("")
-        task = @async (result[] = String(readuntil(sock, "\r\n\r\n")))
+        task = @async begin
+            head = readuntil(sock, "\r\n\r\n")
+            rest = full ? read(sock) : UInt8[]
+            result[] = String(head) * String(rest)
+        end
         timedwait(() -> istaskdone(task), 10.0) == :ok ||
             error("in-process request to port $port timed out")
         return result[]
@@ -862,6 +866,52 @@ end
                 finally
                     stop!(lserver)
                     timedwait(() -> istaskdone(ltask), 5.0)
+                end
+
+                # Async executor + streams: metrics cover the async delivery
+                # path, a 3xx, a completed stream, and an aborted stream.
+                ametrics = ServerMetrics()
+                aport = port + 12
+                arouter = Trie()
+                get!(arouter, "/hello", _ -> text("hello"))
+                get!(arouter, "/redirect", _ -> redirect("/x"))
+                get!(arouter, "/stream", _ -> stream() do w
+                    print(w, "abc")
+                end)
+                get!(arouter, "/forever", _ -> stream() do w
+                    while true
+                        write(w, "x")
+                        sleep(0.05)
+                    end
+                end)
+                aserver = Server(; router=arouter, port=aport, backend=:sockets,
+                                 telemetry=ametrics,
+                                 executor=AsyncExecutor(worker_threads=2, max_pending=8))
+                atask = Threads.@spawn start!(aserver; nworkers=1)
+                try
+                    _wait_ready(aport)
+                    @test startswith(_julia_request(aport,
+                        "GET /hello HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"; full=true),
+                        "HTTP/1.1 200")
+                    @test startswith(_julia_request(aport,
+                        "GET /redirect HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"; full=true),
+                        "HTTP/1.1 302")
+                    @test startswith(_julia_request(aport,
+                        "GET /stream HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"; full=true),
+                        "HTTP/1.1 200")
+
+                    # Abort a stream mid-body: the server reports it on retire.
+                    _julia_request(aport, "GET /forever HTTP/1.1\r\nHost: x\r\n\r\n")
+                    @test timedwait(() -> metrics_snapshot(ametrics).responses >= 4, 8.0) == :ok
+                    s = metrics_snapshot(ametrics)
+                    @test s.requests == 4
+                    @test s.status_2xx == 3    # hello, completed stream, aborted stream
+                    @test s.status_3xx == 1    # redirect
+                    @test s.responses == 4
+                    @test s.bytes_out > 0
+                finally
+                    stop!(aserver)
+                    timedwait(() -> istaskdone(atask), 5.0)
                 end
             end
 

@@ -49,6 +49,18 @@ using Ciro
         @test occursin("\"UNKNOWN \" 400 9 0.0ms", String(take!(buf)))
     end
 
+    @testset "AccessLog serializes concurrent writers" begin
+        buf = IOBuffer()
+        log = AccessLog(buf)
+        tasks = [Threads.@spawn begin
+                     for _ in 1:50
+                         telemetry_response!(log, Methods.GET, "/x", 200, 1, 0.0)
+                     end
+                 end for _ in 1:4]
+        foreach(wait, tasks)
+        @test count(==('\n'), String(take!(buf))) == 200
+    end
+
     @testset "catcher wrapper counts and delegates" begin
         m = ServerMetrics()
         c = Ciro.Interface._TelemetryCatcher(DefaultCatcher(), m)
