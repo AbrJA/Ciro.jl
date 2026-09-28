@@ -1001,6 +1001,24 @@ end
                 end
             end
 
+            @testset "async executor with nworkers == nthreads" begin
+                # Default nworkers (2) equals the server's thread count: start!
+                # must leave a thread free for handlers, otherwise this request
+                # hangs and times out.
+                cap_port = port + 13
+                cap = _start_server(cap_port; threads=2,
+                    extra=", executor=AsyncExecutor(worker_threads=2, max_pending=8)")
+                try
+                    _wait_ready(cap_port)
+                    resp = roundtrip(cap_port,
+                        "GET /slow HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+                        timeout=10.0)
+                    @test resp !== nothing && startswith(resp, "HTTP/1.1 200")
+                finally
+                    _kill_server(cap)
+                end
+            end
+
             @testset "max_connections shedding (both backends)" begin
                 for backend in (:uring, :sockets)
                     cap_port = port + (backend === :uring ? 10 : 11)

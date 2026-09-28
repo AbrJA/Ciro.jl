@@ -2,8 +2,8 @@
 # ══════════════════════════════════════════════════════════════════════════════
 # Ciro.jl — ML Model Serving Example
 #
-# Run:  julia --project=. -t4 server.jl
-#       julia --project=. -t4 -e 'include("server.jl")'
+# Run:  julia --project=. -t4 examples/ml_serving/server.jl
+#       julia --project=. -t4 -e 'include("examples/ml_serving/server.jl")'
 # Test: curl http://localhost:8080/health
 #       curl -X POST http://localhost:8080/api/v1/predict \
 #            -H 'Content-Type: application/json' \

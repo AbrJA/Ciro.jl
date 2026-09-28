@@ -516,7 +516,7 @@ using PicoHTTPParser
         ctx = RequestContext(req, result.params)
         @test param(ctx, :id) == "42"
         @test param(ctx, Int, :id) == 42
-        @test copy(ctx).params == ["id" => "42"]
+        @test copy(ctx).params == [:id => "42"]
         @test @inferred(param(ctx, :id)) isa String
         @test @inferred(dispatch(r, SyncExecutor(), DefaultCatcher(), req, captures)) isa Response
 

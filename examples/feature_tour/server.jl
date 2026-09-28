@@ -3,7 +3,7 @@
 # Demonstrates every routing and request feature available in the core.
 # Middleware and cookies are in separate packages — not used here.
 #
-# Run with: julia --threads=auto --project=. examples_server.jl
+# Run with: julia --threads=auto --project=. examples/feature_tour/server.jl
 # Test with: curl http://localhost:3001/
 using Ciro
 

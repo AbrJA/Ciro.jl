@@ -238,6 +238,7 @@ using PicoHTTPParser
         router = Trie()
         get!(router, "/slow", _ -> text("slow"))
         get!(router, "/num", _ -> 42)
+        get!(router, "/users/:id::Int", ctx -> text("id=$(param(ctx, Int, :id))"))
         get!(router, "/boom", _ -> error("handler exploded"))
 
         ex = AsyncExecutor(worker_threads=2, max_pending=8)
@@ -268,6 +269,12 @@ using PicoHTTPParser
                            r -> put!(replies, r))
             resp = take!(replies)
             @test resp.status == 200 && String(resp.body) == "42"
+
+            # Route params survive copy-on-escape: `param` must still find them.
+            dispatch_async(router, ex, DefaultCatcher(), Request("GET", "/users/42"),
+                           r -> put!(replies, r))
+            resp = take!(replies)
+            @test resp.status == 200 && String(resp.body) == "id=42"
 
             # Handler errors are intercepted on the worker thread.
             dispatch_async(router, ex, DefaultCatcher(), Request("GET", "/boom"),

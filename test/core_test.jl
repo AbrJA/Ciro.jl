@@ -292,6 +292,16 @@ using PicoHTTPParser
         @test String(copy(resp2.body)) == "options"
     end
 
+    @testset "Async executor worker cap" begin
+        # Sync executors may use every thread.
+        @test Ciro.Core._effective_nworkers(SyncExecutor(), 8, 8) == 8
+        # An async executor must leave a thread free for handlers.
+        @test Ciro.Core._effective_nworkers(AsyncExecutor(), 8, 8) == 7
+        @test Ciro.Core._effective_nworkers(AsyncExecutor(), 8, 16) == 8
+        @test Ciro.Core._effective_nworkers(AsyncExecutor(), 1, 1) == 1
+        @test Ciro.Core._effective_nworkers(AsyncExecutor(), 1, 2) == 1
+    end
+
     @testset "Server stop! flag" begin
         router = Trie()
         server = Server(; router, port=19992)

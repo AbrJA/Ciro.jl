@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ciro.jl · ML Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1><span class="bolt">⚡</span> Ciro.jl <em>ML Dashboard</em></h1>
+    <div class="header-right">
+      <span id="health" class="pill">checking…</span>
+      <span class="pill muted">io_uring + async executor</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="grid">
+      <div class="card">
+        <h2>Server metrics <small>atomic counters, polled every second</small></h2>
+        <div id="metrics" class="metrics"></div>
+      </div>
+
+      <div class="card">
+        <h2>Models <small>GET /api/v1/models</small></h2>
+        <ul id="models" class="models"></ul>
+      </div>
+    </section>
+
+    <section class="grid">
+      <div class="card">
+        <h2>Inference <small>POST /api/v1/predict · runs on a worker</small></h2>
+        <label class="field">
+          Features
+          <input id="features" value="1.0, 2.5, 3.0" spellcheck="false">
+        </label>
+        <div class="actions">
+          <button id="predict">Predict</button>
+          <button id="upload-ok" class="ghost">Upload 100 B</button>
+          <button id="upload-big" class="ghost">Upload 8 KB → 413</button>
+          <button id="audit" class="ghost">Audit copy(ctx)</button>
+        </div>
+        <pre id="result" class="result">—</pre>
+      </div>
+
+      <div class="card">
+        <h2>Live events <small>GET /api/v1/events · Server-Sent Events</small></h2>
+        <div id="events" class="events">
+          <div class="muted">connecting…</div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    Ciro.jl example ·
+    <code>/api/v1/upload</code> carries a 4 KB per-route limit ·
+    admin stats need <code>X-Admin-Token: demo-token</code> ·
+    streaming holds a worker per open stream
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -82,13 +82,20 @@ server = Server(; router, port=8080)
 start!(server)
 ```
 
-Run the included ML demo (needs `Pkg.add("JSON")`):
+### 📂 Examples
+
+Three runnable examples live in [`examples/`](examples) (see
+[`examples/README.md`](examples/README.md)):
 
 ```bash
-julia --project=. -t4 server.jl
-curl http://localhost:3001/health
-curl -X POST http://localhost:3001/api/v1/predict \
-  -H 'Content-Type: application/json' -d '{"features":[1.0,2.0,3.0]}'
+# Real-world ML dashboard: HTML/JS, JSON API, SSE, async inference, limits
+julia --project=. --threads=8 examples/ml_dashboard/server.jl     # :8080
+
+# Tour of every routing/request feature (typed params, wildcards, middleware)
+julia --project=. --threads=8 examples/feature_tour/server.jl     # :3001
+
+# JSON ML serving API (needs Pkg.add("JSON"))
+julia --project=. -t4 examples/ml_serving/server.jl               # :3001
 ```
 
 ---

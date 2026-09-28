@@ -147,11 +147,11 @@ end
     return nothing
 end
 
-"""Owned `name => value` pairs, used by `copy(ctx)` to retain values."""
+"""Owned `name => value` pairs, used by `copy(ctx)` to retain values.
+Keys stay as supplied (Symbols for Trie matches), so `param` still finds them."""
 function _materialize_params(ctx::RequestContext)
-    return Pair{String,String}[
-        String(k) => String(_capture(ctx, v)) for (k, v) in ctx.params
-    ]
+    isempty(ctx.params) && return ()
+    return [k => String(_capture(ctx, v)) for (k, v) in ctx.params]
 end
 
 export param

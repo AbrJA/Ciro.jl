@@ -10,13 +10,32 @@ See `docs/DESIGN_LESSONS.md` for the engineering standards and
 
 State at pause:
 - `dev`: Stages 0–2.5, async executor, streaming/SSE, zero-alloc route params,
-  telemetry, per-route limits, audit fixes, 503 connection shedding, and the
-  gap-closing tests committed. `Expect: 100-continue` uncommitted.
-  `Pkg.test()` → **901 passed, 0 failed on both Julia 1.10.12 and 1.13.0**;
-  acceptance 166/166 (both backends); PicoHTTPParser `0.3.0` resolves from
-  General.
-- Uncommitted (this session): `Expect: 100-continue` (interim response + state
-  machine), plus README/ARCHITECTURE updates.
+  telemetry, per-route limits, audit fixes, 503 shedding, `Expect:
+  100-continue`, and the examples committed. `Pkg.test()` → **926 passed,
+  0 failed on both Julia 1.10.12 and 1.13.0**; acceptance 167/167 (both
+  backends); PicoHTTPParser `0.3.0` resolves from General.
+- Uncommitted (this session): examples (`examples/ml_dashboard`,
+  `feature_tour`, `ml_serving`), the in-process example test, and two fixes it
+  exposed (`copy(ctx)` param keys, async worker cap).
+
+### Examples + fixes (uncommitted, this session)
+- `examples/ml_dashboard`: real-world ML dashboard — HTML/JS page over JSON
+  APIs, typed params, middleware, a custom `AbstractTelemetry` (metrics +
+  access log), AsyncExecutor inference, SSE, a 4 KB per-route upload limit,
+  `copy(ctx)` audit, and traversal-guarded static files via a wildcard route.
+  Root `server.jl`/`examples_server.jl` moved to `examples/ml_serving` and
+  `examples/feature_tour`; `examples/README.md` maps every capability.
+- `test/example_test.jl` starts the dashboard in-process (sockets backend) and
+  checks every endpoint (18 assertions) inside `Pkg.test`.
+- Bug 1: `copy(ctx)` materialized params with **String** keys while `param`
+  matches Symbol names with `===`, so `param(ctx, ...)` returned `nothing` in
+  every async handler (and any copied context). `_materialize_params` now keeps
+  the supplied keys and returns `()` when empty.
+- Bug 2: with an async executor and `nworkers == nthreads >= 2`, the engine
+  loops starve the executor's task queue and handlers never run (a hang).
+  `start!` now caps `nworkers` to `nthreads - 1` with a warning
+  (`_effective_nworkers`), and an acceptance test pins it.
+- Gates: `Pkg.test()` 926; acceptance 167/167.
 
 ### Gap-closing iteration (committed, this session)
 - `b123167` — `max_connections` overflow is answered with a pre-serialized
@@ -245,6 +264,14 @@ State at pause:
 - SocketsIO must clear `st.inflight = :none` before `http_on_write` (uring does
   it in `_handle_event`); otherwise `http_stream_end`'s resume check sees a
   stale `:write` and the next keep-alive request is never read.
+- `copy(ctx)` must keep param **keys** as supplied (Symbols): `param` matches
+  with `k === name`, so String keys silently return `nothing` on workers.
+- With an async executor, `nworkers == nthreads >= 2` starves the executor's
+  tasks (engine loops keep every thread busy and `yield()` does not pull the
+  global queue); `start!` caps at `nthreads - 1`. One thread (`nthreads=1`) is
+  fine because engine and worker share it cooperatively.
+- Extending Ciro's functions from an example/test file requires explicit
+  `import Ciro: ...` on Julia 1.10 (`using` alone is not enough).
 
 ### Test gaps (audit 2026-09-28; updated)
 Closed: `max_connections` shedding, `Expect: 100-continue`, telemetry

@@ -195,7 +195,9 @@ Everything in §3.3 is implemented, plus the `HTTP`/`Backend` extraction:
   shutdown lets in-flight handlers finish until `shutdown_timeout`. Worker tasks run
   user code via `invokelatest` so handlers registered across `start!` cycles are
   visible (world-age safety); `run_eventloop!` submits after `on_tick`, so replies
-  queued from worker threads are flushed even when no completion arrives.
+  queued from worker threads are flushed even when no completion arrives. `start!`
+  caps `nworkers` at `nthreads - 1` for async executors: with `nworkers == nthreads`
+  the engine loops starve the executor's tasks and handlers never run.
 - **Streaming/SSE**: handlers return `Stream` (`stream`/`sse` builders); the body
   runs on an executor worker with a `StreamWriter <: IO`. The HTTP layer frames
   `Transfer-Encoding: chunked` (raw when the user supplies `Content-Length`; body
@@ -223,8 +225,11 @@ Everything in §3.3 is implemented, plus the `HTTP`/`Backend` extraction:
   continues the `:body` phase). `max_connections` overflow is answered with a
   pre-serialized `503` + `Retry-After` before the close on both backends, and is
   reported to telemetry.
-- Gates: `Pkg.test()` → 901 passed, 0 failed on Julia 1.10.12 and 1.13.0;
-  acceptance 166/166, also under `--check-bounds=yes`.
+- Examples: `examples/ml_dashboard` (real-world dashboard over the JSON API, SSE,
+  async inference, per-route limits, custom telemetry), `examples/feature_tour`,
+  and `examples/ml_serving`; the dashboard is smoke-tested in `Pkg.test`.
+- Gates: `Pkg.test()` → 926 passed, 0 failed on Julia 1.10.12 and 1.13.0;
+  acceptance 167/167, also under `--check-bounds=yes`.
 
 Still open: compiled routing, HTTP/2/TLS (see §4.2 and §9).
 
