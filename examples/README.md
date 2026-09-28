@@ -5,9 +5,69 @@ being three copies of the same kitchen-sink demo.
 
 | Example | Theme | Focus |
 |---|---|---|
+| [`ai_chat`](ai_chat) | Real-time / product | SSE fan-out, async inference, chunked transcript streaming, uploads with `Expect: 100-continue`, per-route limits, overload shedding, `copy(ctx)` |
 | [`ml_dashboard`](ml_dashboard) | Production / ops | Liveness & readiness probes, Prometheus metrics, access log + tail, token-protected admin, maintenance drain, per-route limits, graceful shutdown |
 | [`feature_tour`](feature_tour) | API tour | Routing, typed params, wildcards, groups, middleware, status codes |
 | [`ml_serving`](ml_serving) | Minimal service | JSON ML endpoints (needs `Pkg.add("JSON")`) |
+
+---
+
+## `ai_chat` — real-time AI chat rooms
+
+Multiple browser tabs chat live over SSE; the assistant answers after simulated
+inference on the async executor. This is the streaming/fan-out example.
+
+### Run it
+
+```bash
+julia --project=. --threads=8 examples/ai_chat/server.jl
+# optional positional args: server.jl [port] [backend]
+# env: CIRO_PORT, CIRO_BACKEND, CIRO_WORKERS, CIRO_THINK_MS,
+#      CIRO_ADMIN_TOKEN, CIRO_WORKERS_MAX
+```
+
+Open <http://localhost:8080> in two tabs, type in one, watch it arrive in both.
+The assistant replies after ~0.4 s (`CIRO_THINK_MS`). Stop with Ctrl-C.
+
+### What each piece demonstrates
+
+| Capability | Where |
+|---|---|
+| SSE fan-out (broadcast to every subscriber) | `GET /api/v1/rooms/:id/events` |
+| Async executor (simulated inference off the loop) | `POST /api/v1/rooms/:id/messages` |
+| Typing indicator / presence events | SSE `typing` and `presence` events |
+| Chunked streaming download | `GET /api/v1/rooms/:id/transcript` |
+| Upload + per-route limit + `Expect: 100-continue` | `POST /api/v1/rooms/:id/import` (8 KB → 413) |
+| Typed params, query params, 404s | `/api/v1/rooms/:id::Int/...` |
+| Middleware (callable struct) | `RequireToken` on `/admin/stats` |
+| `copy(ctx)` retention rule | message audit task |
+| Telemetry | `GET /api/metrics`, `/admin/stats` |
+| Overload shedding | `503` beyond `worker_threads`/`max_pending` |
+
+### curl cheatsheet
+
+```bash
+curl -s localhost:8080/api/v1/rooms
+curl -s localhost:8080/api/v1/rooms/1/messages
+curl -s -X POST --data 'hello there' 'localhost:8080/api/v1/rooms/1/messages?as=me'
+curl -s -N localhost:8080/api/v1/rooms/1/events          # SSE stream
+curl -s localhost:8080/api/v1/rooms/1/transcript         # chunked download
+curl -s -X POST --data 'line' localhost:8080/api/v1/rooms/1/import
+curl -s localhost:8080/admin/stats -H 'X-Admin-Token: demo-token'
+
+# overload shedding: 200 concurrent asks; expect a mix of 200 and 503
+seq 1 200 | xargs -P200 -I{} curl -s -o /dev/null -w '%{http_code}\n' \
+  -X POST --data 'hi' 'localhost:8080/api/v1/rooms/3/messages?as=load' | sort | uniq -c
+```
+
+### Notes
+
+- **Each open SSE stream holds one async worker** for its lifetime, so
+  `CIRO_WORKERS_MAX` (default 32) is the concurrent-stream ceiling; browsers
+  also cap themselves at ~6 connections per host. Beyond the pool,
+  `max_pending` queues and then requests get `503` (the xargs test shows it).
+- The assistant is a mock: `sleep` stands in for inference.
+- A subscriber whose 64-event queue fills is disconnected rather than buffered.
 
 ---
 
@@ -75,7 +135,7 @@ curl -s -X POST --data off localhost:8080/admin/maintenance -H 'X-Admin-Token: d
 ### Production notes
 
 - The console uses `SyncExecutor` (handlers are cheap). Slow handlers belong on
-  an `AsyncExecutor`; see the `ai_chat` example (next).
+  an `AsyncExecutor`; see [`ai_chat`](ai_chat).
 - `CIRO_LOG=/var/log/ciro-access.log` makes the access log appendable and
   tail-able; the admin tail keeps the last 50 lines in memory.
 - Scrape `GET /metrics` from Prometheus; the counters are atomic and safe to

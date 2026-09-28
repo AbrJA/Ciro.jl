@@ -12,5 +12,6 @@ using Ciro
     include("backend_test.jl")
     include("acceptance_test.jl")
     include("example_test.jl")
+    include("chat_test.jl")
     include("quality_test.jl")
 end

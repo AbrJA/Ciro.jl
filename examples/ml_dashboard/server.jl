@@ -275,8 +275,10 @@ function _env_int(key::String, default::Int)::Int
 end
 
 function main()
-    port            = _env_int("CIRO_PORT", 8080)
-    backend         = Symbol(get(ENV, "CIRO_BACKEND", "uring"))
+    # Positional args override the environment: `server.jl [port] [backend]`.
+    port            = length(ARGS) >= 1 ? parse(Int, ARGS[1]) : _env_int("CIRO_PORT", 8080)
+    backend         = length(ARGS) >= 2 ? Symbol(ARGS[2]) :
+                      Symbol(get(ENV, "CIRO_BACKEND", "uring"))
     nworkers        = _env_int("CIRO_WORKERS", Threads.nthreads())
     admin_token     = get(ENV, "CIRO_ADMIN_TOKEN", "demo-token")
     log_path        = get(ENV, "CIRO_LOG", "")
@@ -288,18 +290,16 @@ function main()
                            max_body_size, max_connections)
 
     println("""
-    ╭────────────────────────────────────────────────────────────────╮
-    │  Ciro.jl ops console                                           │
-    │    http://localhost:$(lpad(port, 5))   backend=:$backend  workers=$nworkers      │
-    │                                                                │
-    │  probes   GET /healthz   GET /readyz                           │
-    │  metrics  GET /metrics (Prometheus)   GET /api/metrics (JSON)  │
-    │  admin    GET /admin/stats|config|log/tail                     │
-    │           POST /admin/maintenance  (body "on" / "off")         │
-    │                                                                │
-    │  token: $admin_token     log: $(isempty(log_path) ? "stdout" : log_path)
-    │  stop:  Ctrl-C (graceful drain)                                │
-    ╰────────────────────────────────────────────────────────────────╯
+    Ciro.jl ops console
+      http://localhost:$port   backend=:$backend   workers=$nworkers
+      log: $(isempty(log_path) ? "stdout" : log_path)
+
+      GET  /healthz   GET /readyz                (probes; readyz 503 while draining)
+      GET  /metrics (Prometheus)                 GET /api/metrics (JSON)
+      GET  /admin/stats|config|log/tail          POST /admin/maintenance ("on"/"off")
+      POST /api/v1/upload                        (4 KB per-route limit)
+
+      token: $admin_token   ·   stop: Ctrl-C (graceful drain)
     """)
     start!(server; nworkers)
 end

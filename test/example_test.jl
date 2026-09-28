@@ -3,8 +3,11 @@ using Ciro
 using Sockets
 
 # The example defines `build_console`; `main()` is guarded by `PROGRAM_FILE`,
-# so including it does not start a server.
-include(joinpath(@__DIR__, "..", "examples", "ml_dashboard", "server.jl"))
+# so including it does not start a server. Sandbox it in its own module so its
+# helper names (RequireToken, serve_static, ...) cannot collide with other
+# examples included by the suite.
+const OpsExample = Module()
+Base.include(OpsExample, joinpath(@__DIR__, "..", "examples", "ml_dashboard", "server.jl"))
 
 """Yielding in-process client (the server shares this process)."""
 function _ex_request(port::Integer, data::AbstractString; full::Bool=false)
@@ -27,8 +30,8 @@ end
 
 @testset "Example: ops console (in-process sockets)" begin
     port = 20000 + (getpid() % 10000) + 600
-    server = build_console(; port, backend = :sockets, nworkers = 1,
-                           admin_token = "demo-token", log_io = devnull)
+    server = OpsExample.build_console(; port, backend = :sockets, nworkers = 1,
+                                      admin_token = "demo-token", log_io = devnull)
     task = Threads.@spawn start!(server; nworkers = 1)
     try
         ready = false

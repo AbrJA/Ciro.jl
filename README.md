@@ -84,10 +84,13 @@ start!(server)
 
 ### 📂 Examples
 
-Three runnable examples live in [`examples/`](examples) (see
+Four runnable examples live in [`examples/`](examples) (see
 [`examples/README.md`](examples/README.md)):
 
 ```bash
+# Real-time AI chat: SSE fan-out, async inference, chunked streaming, shedding
+julia --project=. --threads=8 examples/ai_chat/server.jl          # :8080
+
 # Production-style ops console: probes, Prometheus, access log, admin, drain
 julia --project=. examples/ml_dashboard/server.jl                 # :8080
 

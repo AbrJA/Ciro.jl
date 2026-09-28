@@ -11,12 +11,11 @@ See `docs/DESIGN_LESSONS.md` for the engineering standards and
 State at pause:
 - `dev`: Stages 0–2.5, async executor, streaming/SSE, zero-alloc route params,
   telemetry, per-route limits, audit fixes, 503 shedding, `Expect:
-  100-continue`, and the examples committed. `Pkg.test()` → **936 passed,
+  100-continue`, and the examples committed. `Pkg.test()` → **959 passed,
   0 failed on both Julia 1.10.12 and 1.13.0**; acceptance 167/167 (both
   backends); PicoHTTPParser `0.3.0` resolves from General.
-- Uncommitted (this session): examples (`examples/ml_dashboard`,
-  `feature_tour`, `ml_serving`), the in-process example test, and two fixes it
-  exposed (`copy(ctx)` param keys, async worker cap).
+- Uncommitted (this session): the `ai_chat` example (SSE fan-out, async
+  inference, chunked transcript, import limits) and its test.
 
 ### Examples + fixes (uncommitted, this session)
 - `examples/ml_dashboard`: re-themed as a production-style **ops console**
@@ -26,8 +25,18 @@ State at pause:
   `/admin/{stats,config,maintenance}`, env-driven config, per-route upload
   limit, static assets, graceful drain. `test/example_test.jl` rewritten
   (28 assertions). `Pkg.test()` 936 on 1.10.12 and 1.13.0.
+- `examples/ai_chat`: real-time chat rooms — SSE fan-out with per-subscriber
+  bounded queues (unbounded channel + atomic depth counter; slow clients are
+  disconnected, broadcast never blocks), async-executor inference with typing
+  and presence events, chunked transcript downloads, transcript import with an
+  8 KB `RouteLimits` (and `Expect: 100-continue`), token-protected admin stats,
+  `copy(ctx)` audit, env/positional config, and a curl/xargs shedding recipe.
+  `test/chat_test.jl` drives the whole flow in-process (23 assertions) and
+  asserts a mix of 200/503 under a 4-worker/4-pending pool.
 - Root `server.jl`/`examples_server.jl` moved to `examples/ml_serving` and
   `examples/feature_tour`; `examples/README.md` maps every capability.
+  Example tests sandbox their `include`s in `Module()` so helper names cannot
+  collide across examples.
 - `test/example_test.jl` starts the dashboard in-process (sockets backend) and
   checks every endpoint (18 assertions) inside `Pkg.test`.
 - Bug 1: `copy(ctx)` materialized params with **String** keys while `param`
@@ -152,9 +161,9 @@ State at pause:
   `max_pending=1`). `Pkg.test()` 775; acceptance 97/97.
 
 ### Next
-- Chat example (`examples/ai_chat`, replaces the dashboard) on the current
-  streaming model; compiled routing (dispatch table at `freeze!`); Stage 4
-  packaging (untrack `lib/ciro.so`, JLL, docs build, CI matrix); static files.
+- Compiled routing (dispatch table at `freeze!`); Stage 4 packaging (untrack
+  `lib/ciro.so`, JLL, docs build, CI matrix); static files; per-route streaming
+  limits and SSE keepalive comments.
 - **Deferred to a future design review**: push-based streaming (streaming v2) —
   see Backlog.
 
@@ -286,6 +295,15 @@ State at pause:
   fine because engine and worker share it cooperatively.
 - Extending Ciro's functions from an example/test file requires explicit
   `import Ciro: ...` on Julia 1.10 (`using` alone is not enough).
+- `Base.tryput!` does not exist. For non-blocking broadcast use an unbounded
+  `Channel` plus an atomic depth counter and `close` on overflow; never `put!`
+  into a bounded channel from a producer that must not block.
+- `readuntil(io, needle)` drops the needle by default; pass `keep=true` when
+  the assertion or parser needs it. `strip(s)` returns a `SubString` — wrap in
+  `String(...)` before calling a `::String` method.
+- Example tests include each example inside its own `Module()`: the examples
+  share helper names (`RequireToken`, `serve_static`, `main`, ...) and direct
+  includes collide in `Main`.
 
 ### Test gaps (audit 2026-09-28; updated)
 Closed: `max_connections` shedding, `Expect: 100-continue`, telemetry
