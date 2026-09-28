@@ -439,13 +439,14 @@ using PicoHTTPParser
 
     @testset "Custom logger integration" begin
         messages = String[]
-        struct TestLogger <: AbstractLogger end
-        Ciro.Interface.log!(::TestLogger, level::Severity, msg::String) =
+        # Not `TestLogger`: `Test` exports that name and defining it errors on LTS.
+        struct CustomLogger <: AbstractLogger end
+        Ciro.Interface.log!(::CustomLogger, level::Severity, msg::String) =
             push!(messages, "[$level] $msg")
 
         router = Trie()
-        server = Server(; router, logger=TestLogger(), port=19985)
-        @test server.logger isa TestLogger
+        server = Server(; router, logger=CustomLogger(), port=19985)
+        @test server.logger isa CustomLogger
     end
 
     @testset "Server with all custom params" begin

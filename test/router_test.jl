@@ -463,11 +463,15 @@ using PicoHTTPParser
         get!(r, "/users/:id::Int", _ -> text("u"))
         freeze!(r)
 
-        route(r, Methods.GET, "/fixed")     # warmup
-        route(r, Methods.GET, "/users/42")
+        # Consume the result inside the measured function: returning the
+        # non-isbits RouteResult across the measurement boundary boxes it on
+        # older Julia, which would measure the harness, not routing.
+        static_route() = (res = route(r, Methods.GET, "/fixed"); matched(res) ? 1 : 0)
+        param_route()  = (res = route(r, Methods.GET, "/users/42"); length(res.params))
+        static_route(); param_route()
 
-        @test (@allocated route(r, Methods.GET, "/fixed")) <= 64
-        @test (@allocated route(r, Methods.GET, "/users/42")) <= 256
+        @test (@allocated static_route()) <= 64
+        @test (@allocated param_route()) <= 256
         @test @inferred(route(r, Methods.GET, "/fixed")) isa RouteResult
     end
 
@@ -481,17 +485,17 @@ using PicoHTTPParser
         route!(r, Methods.GET, "/fixed", captures)      # warm capacity
         route!(r, Methods.GET, "/users/42", captures)
 
-        static!() = route!(r, Methods.GET, "/fixed", captures)
-        param!()  = route!(r, Methods.GET, "/users/42", captures)
+        static!() = (res = route!(r, Methods.GET, "/fixed", captures); matched(res) ? 1 : 0)
+        param!()  = (res = route!(r, Methods.GET, "/users/42", captures); length(res.params))
         static!(); param!()
 
         @test (@allocated static!()) == 0
         @test (@allocated param!()) == 0
-        @test @inferred(param!()) isa RouteResult
+        @test @inferred(route!(r, Methods.GET, "/users/42", captures)) isa RouteResult
 
         # The served result aliases the scratch; ranges resolve against the
         # routed path via the context and `copy(ctx)` materializes strings.
-        result = param!()
+        result = route!(r, Methods.GET, "/users/42", captures)
         @test result.params === captures
         req = Request("GET", "/users/42")
         ctx = RequestContext(req, result.params)

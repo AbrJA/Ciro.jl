@@ -23,13 +23,16 @@ get!(router, "/users/:id::Int", _ -> text("u"))
 post!(router, "/data", _ -> text("created"; status=201))
 freeze!(router)
 
-check("route static", 64, () -> route(router, Methods.GET, "/fixed"))
-check("route param", 256, () -> route(router, Methods.GET, "/users/42"))
+# Consume the result inside the measured closure: returning the non-isbits
+# RouteResult across the measurement boundary boxes it on Julia < 1.12, which
+# would measure the harness rather than routing.
+check("route static", 64, () -> (res = route(router, Methods.GET, "/fixed"); matched(res) ? 1 : 0))
+check("route param", 256, () -> (res = route(router, Methods.GET, "/users/42"); length(res.params)))
 
 # The served path reuses a per-connection scratch: no allocation at all.
 const _CAPTURES = Pair{Symbol,UnitRange{Int}}[]
-check("route! static", 16, () -> route!(router, Methods.GET, "/fixed", _CAPTURES))
-check("route! param", 16, () -> route!(router, Methods.GET, "/users/42", _CAPTURES))
+check("route! static", 16, () -> (res = route!(router, Methods.GET, "/fixed", _CAPTURES); matched(res) ? 1 : 0))
+check("route! param", 16, () -> (res = route!(router, Methods.GET, "/users/42", _CAPTURES); length(res.params)))
 
 # ── Request construction (zero-copy views) ──────────────────────────────────
 

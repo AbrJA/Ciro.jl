@@ -213,6 +213,14 @@ State at pause:
 - New optional `io_*` seam methods must be added to Core's `import ..HTTP: ...`
   list, or `io_foo(io::UringIO) = ...` silently defines a *new* `Core.io_foo`
   that HTTP never calls (this bit twice: `io_telemetry`, `io_route`).
+- Julia < 1.12 boxes a non-isbits struct (`RouteResult`) returned across a
+  measurement boundary (32 B); 1.13 elides it. Measure allocations inside a
+  compiled consumer (`res = route!(...); use(res)`), not at the boundary — the
+  served path is 0 B on 1.10 too. CI runs LTS 1.10 + release, so budgets must
+  hold on both.
+- `Test` exports `TestLogger`; defining a test-local `struct TestLogger` errors
+  on LTS with "cannot assign a value to imported variable". Renamed to
+  `CustomLogger`.
 
 ### Resume commands
 ```sh
