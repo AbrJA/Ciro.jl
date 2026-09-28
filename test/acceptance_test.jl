@@ -865,6 +865,45 @@ end
                 end
             end
 
+            @testset "max_connections shedding (both backends)" begin
+                for backend in (:uring, :sockets)
+                    cap_port = port + (backend === :uring ? 10 : 11)
+                    cap = _start_server(cap_port;
+                        extra=", max_connections=1, backend=:$backend")
+                    try
+                        _wait_ready(cap_port)
+                        # Hold one connection open (retrying in case the
+                        # readiness probe's close has not been released yet).
+                        held = nothing
+                        for _ in 1:20
+                            c = TestClient(cap_port; timeout=10.0)
+                            try
+                                _send(c, "GET /hello HTTP/1.1\r\nHost: x\r\n\r\n")
+                                if startswith(read_response(c), "HTTP/1.1 200")
+                                    held = c
+                                    break
+                                end
+                            catch
+                            end
+                            _close(c)
+                            sleep(0.1)
+                        end
+                        @test held !== nothing
+                        try
+                            resp = roundtrip(cap_port,
+                                "GET /hello HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+                                timeout=10.0)
+                            @test startswith(resp, "HTTP/1.1 503")
+                            @test occursin("Retry-After: 1", resp)
+                        finally
+                            held === nothing || _close(held)
+                        end
+                    finally
+                        _kill_server(cap)
+                    end
+                end
+            end
+
             @testset "stop! drains and returns" begin
                 # Exercise the supported API directly: start a server, then
                 # stop it from another task and require start! to return after

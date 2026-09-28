@@ -62,6 +62,26 @@ end
     return
 end
 
+# ── Connection shedding (max_connections) ───────────────────────────────────
+# Over-limit connections get an immediate 503 + Retry-After before the close,
+# mirroring the async executor's overload behavior.
+
+const _SHED_503_BYTES = let
+    resp = Response(503, ["Content-Type" => "text/plain", "Retry-After" => "1",
+                          "Connection" => "close"], "Service Unavailable")
+    buf = Vector{UInt8}(undef, 256)
+    n = serialize_response!(buf, resp)
+    resize!(buf, n)
+    buf
+end
+
+@inline function _report_shed(io::AbstractIO)
+    t = io_telemetry(io)
+    telemetry_active(t) || return
+    telemetry_response!(t, Methods.UNKNOWN, "", 503, length(_SHED_503_BYTES), 0.0)
+    return
+end
+
 """
     _run_stream(outbound, st, gen, stream)
 
@@ -359,10 +379,24 @@ end
     nothing
 end
 
+const _MSG_NOSIGNAL = Cint(0x4000)   # Linux
+
+"""Answer an over-limit connection with 503 + Retry-After, then close it."""
+function _shed_connection(io::UringIO, client_fd::Cint)
+    _report_shed(io)
+    n = length(_SHED_503_BYTES)
+    GC.@preserve _SHED_503_BYTES begin
+        ccall(:send, Cssize_t, (Cint, Ptr{UInt8}, Csize_t, Cint),
+              client_fd, pointer(_SHED_503_BYTES), n, _MSG_NOSIGNAL)
+    end
+    close_fd!(client_fd)
+    return
+end
+
 function _on_accept(io::UringIO, client_fd::Cint)
     if Threads.atomic_add!(io.server.runtime.conn_count, 1) + 1 > io.server.config.max_connections
         Threads.atomic_sub!(io.server.runtime.conn_count, 1)
-        close_fd!(client_fd)
+        _shed_connection(io, client_fd)
         return
     end
 

@@ -215,6 +215,12 @@ function _sockets_accept_loop(io::SocketsIO)
         if Threads.atomic_add!(io.server.runtime.conn_count, 1) + 1 >
            io.server.config.max_connections
             Threads.atomic_sub!(io.server.runtime.conn_count, 1)
+            _report_shed(io)
+            try
+                write(sock, _SHED_503_BYTES)
+                flush(sock)
+            catch
+            end
             close(sock)
             continue
         end
