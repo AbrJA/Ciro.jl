@@ -1,6 +1,4 @@
-# ══════════════════════════════════════════════════════════════════════════════
 # Engine — io_uring instance lifecycle and I/O operations
-# ══════════════════════════════════════════════════════════════════════════════
 
 """
     init_engine(port; host="0.0.0.0", backlog=8192, queue_depth=4096) -> Union{Engine,Nothing}
@@ -31,11 +29,10 @@ function close_engine!(engine::Engine)
     nothing
 end
 
-# ── Queue Operations ────────────────────────────────────────────────────────
-# These add SQEs to the submission queue. All return 0 on success and -1 when
-# the operation could not be queued (ring full / submission failed): callers
-# must treat -1 as a fatal connection error, never ignore it. Call submit!() to
-# flush unless the operation submits internally (accepts do).
+# Queue Operations
+# All return 0 on success and -1 when the operation could not be queued;
+# callers must treat -1 as a fatal connection error, never ignore it. Call
+# submit!() to flush unless the operation submits internally (accepts do).
 
 """Queue a single-shot accept on the server socket."""
 @inline function queue_accept!(engine::Engine, conn::Connection)::Cint
@@ -64,7 +61,7 @@ Queue a write from `data` (len bytes). The caller MUST keep the data alive
         engine.ptr, conn.ptr, data, Cint(len))
 end
 
-# ── Submission & Completion ─────────────────────────────────────────────────
+# Submission & Completion
 
 """Submit all pending SQEs to the kernel. Returns number submitted."""
 @inline function submit!(engine::Engine)::Cint

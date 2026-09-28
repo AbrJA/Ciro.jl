@@ -1,11 +1,4 @@
-# ══════════════════════════════════════════════════════════════════════════════
 # Telemetry — per-request observation (metrics, access logs, tracing)
-#
-# The HTTP layer reports every parsed request, every response it queues, every
-# byte it reads, and the Runtime reports intercepted exceptions (through the
-# adapter's catcher wrapper). `NullTelemetry` is the default and compiles away;
-# `ServerMetrics` and `AccessLog` are ready-made implementations.
-# ══════════════════════════════════════════════════════════════════════════════
 
 using Dates: now
 

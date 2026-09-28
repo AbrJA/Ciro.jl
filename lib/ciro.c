@@ -35,7 +35,6 @@ static inline struct io_uring_sqe* get_sqe_submit_retry(struct io_uring* ring) {
     return io_uring_get_sqe(ring);
 }
 
-// Allocation helper for Julia
 conn_t* create_connection() {
     return (conn_t*)calloc(1, sizeof(conn_t));
 }
@@ -44,7 +43,7 @@ void free_connection(conn_t* conn) {
     free(conn);
 }
 
-// --- Accessors for Julia (conn_t is opaque from Julia's perspective) ---
+// Accessors for Julia (conn_t is opaque from Julia's perspective)
 int get_conn_op_type(conn_t* conn) { return (int)conn->type; }
 int get_conn_fd(conn_t* conn) { return conn->fd; }
 char* get_conn_buffer(conn_t* conn) { return conn->buffer; }
@@ -112,7 +111,7 @@ int setup_server_socket(const char* host, int port, int backlog) {
     return server_fd;
 }
 
-// Initialization - returns NULL on failure
+// Returns NULL on failure.
 struct engine_state* init_engine(const char* host, int port, int backlog, int queue_depth) {
     struct engine_state* state = malloc(sizeof(struct engine_state));
     if (!state) {
@@ -136,7 +135,6 @@ struct engine_state* init_engine(const char* host, int port, int backlog, int qu
     return state;
 }
 
-// Cleanup - properly releases all resources
 void cleanup_engine(struct engine_state* state) {
     if (!state) return;
     io_uring_queue_exit(&state->ring);
@@ -151,7 +149,7 @@ int get_server_fd(struct engine_state* state) {
     return state ? state->server_fd : -1;
 }
 
-// Queue an accept request. Returns 0 on success, -1 if it could not be queued.
+// Returns 0 on success, -1 if it could not be queued.
 int queue_accept(struct engine_state* state, conn_t* conn) {
     struct io_uring_sqe *sqe = get_sqe_submit_retry(&state->ring);
     if (!sqe) return -1;
@@ -163,12 +161,11 @@ int queue_accept(struct engine_state* state, conn_t* conn) {
     return io_uring_submit(&state->ring) < 0 ? -1 : 0;
 }
 
-// Set TCP_NODELAY on accepted connections (exposed to Julia)
 void configure_client_socket(int fd) {
     set_tcp_nodelay(fd);
 }
 
-// Queue a read request. Returns 0 on success, -1 if it could not be queued.
+// Returns 0 on success, -1 if it could not be queued.
 int queue_read(struct engine_state* state, conn_t* conn) {
     struct io_uring_sqe *sqe = get_sqe_submit_retry(&state->ring);
     if (!sqe) return -1;
@@ -191,12 +188,11 @@ int queue_write(struct engine_state* state, conn_t* conn, const char* data, int 
     return 0;
 }
 
-// 2. Add bulk submission support
 int submit_pending(struct engine_state* state) {
     return io_uring_submit(&state->ring);
 }
 
-// 3. Wait for completion — no signal mask overhead (EINTR is handled by retry)
+// Wait for completion — no signal mask overhead (EINTR is handled by retry)
 conn_t* wait_completion(struct engine_state* state, int* res, int timeout_ms) {
     struct io_uring_cqe *cqe;
     struct __kernel_timespec ts = {
@@ -236,7 +232,6 @@ int drain_completions(struct engine_state* state, conn_t** conns, int* results, 
     return count;
 }
 
-// Combined: accept fd → set fd on conn → set TCP_NODELAY → queue read.
 // Returns 0 on success, -1 if it could not be queued.
 int accept_and_queue_read(struct engine_state* state, conn_t* conn, int client_fd) {
     set_tcp_nodelay(client_fd);   // must happen before first read
@@ -250,10 +245,8 @@ int accept_and_queue_read(struct engine_state* state, conn_t* conn, int client_f
     return 0;
 }
 
-// Combined: queue write + mark for close after (via io_uring linked ops)
 // Returns 0 on success, -1 if it could not be queued.
 int queue_write_and_close(struct engine_state* state, conn_t* conn, const char* data, int len) {
-    // First: queue the write
     struct io_uring_sqe *sqe = get_sqe_submit_retry(&state->ring);
     if (!sqe) return -1;
     conn->type = WRITE;
@@ -262,7 +255,6 @@ int queue_write_and_close(struct engine_state* state, conn_t* conn, const char* 
     // Link: next op executes only after this completes
     sqe->flags |= IOSQE_IO_LINK;
 
-    // Second: queue close (linked, fires after write completes)
     sqe = get_sqe_submit_retry(&state->ring);
     if (!sqe) return -1;
     io_uring_prep_close(sqe, conn->fd);
@@ -270,14 +262,13 @@ int queue_write_and_close(struct engine_state* state, conn_t* conn, const char* 
     return 0;
 }
 
-// 4. Use io_uring multishot accept (kernel 5.19+)
+// io_uring multishot accept (kernel 5.19+)
 // Returns 0 on success, -1 if it could not be queued.
 int queue_multishot_accept(struct engine_state* state, conn_t* conn) {
     struct io_uring_sqe *sqe = get_sqe_submit_retry(&state->ring);
     if (!sqe) return -1;
 
     conn->type = ACCEPT;
-    // Multishot accept: Keep issuing accepts!
     io_uring_prep_multishot_accept(sqe, state->server_fd, NULL, NULL, 0);
     io_uring_sqe_set_data(sqe, conn);
     return io_uring_submit(&state->ring) < 0 ? -1 : 0;

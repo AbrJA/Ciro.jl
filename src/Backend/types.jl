@@ -1,6 +1,4 @@
-# ══════════════════════════════════════════════════════════════════════════════
 # Core Types — all concrete, trim=safe
-# ══════════════════════════════════════════════════════════════════════════════
 
 """I/O operation type matching C enum: ACCEPT=0, READ=1, WRITE=2"""
 @enum EventType::Cint begin

@@ -20,7 +20,7 @@ export AsyncExecutor, shed_count, pending_count
 
 include("executor.jl")
 
-# ── Transport contract ─────────────────────────────────────────────────────
+# Transport contract
 
 """
     AbstractTransport
@@ -52,7 +52,7 @@ end
 
 export AbstractTransport, TransportToken
 
-# ── Application ────────────────────────────────────────────────────────────
+# Application
 
 mutable struct Application{R <: AbstractRouter, E <: AbstractExecutor,
                            L <: AbstractLogger, C <: AbstractCatcher,
@@ -87,7 +87,7 @@ function Interface.freeze!(app::Application)
     return app
 end
 
-# ── Dispatch ───────────────────────────────────────────────────────────────
+# Dispatch
 
 """
     dispatch(router, executor, catcher, request) -> Response
@@ -225,7 +225,7 @@ dispatch_async(router::AbstractRouter, executor::AbstractExecutor,
     end
 end
 
-# ── Serving ────────────────────────────────────────────────────────────────
+# Serving
 
 function serve!(app::Application)
     app.running && throw(ArgumentError("application is already running"))
@@ -251,7 +251,7 @@ function stop!(app::Application)
     return app
 end
 
-# ── FakeTransport ──────────────────────────────────────────────────────────
+# FakeTransport
 
 mutable struct FakeTransport <: AbstractTransport
     pending   :: Vector{Pair{TransportToken, Request}}

@@ -1,10 +1,4 @@
-# ══════════════════════════════════════════════════════════════════════════════
 # UringIO — the io_uring adapter
-#
-# Owns the ring, the connection/buffer pools, per-connection pending writes, and
-# the handle→state tables. The HTTP state machine lives in `HTTP` and only
-# touches this through the `io_*` seam.
-# ══════════════════════════════════════════════════════════════════════════════
 
 const _MAX_POOLED_STATES = 256
 const _SWEEP_INTERVAL    = 0.1   # seconds
@@ -23,7 +17,7 @@ mutable struct ConnEntry
     pending :: Union{Nothing, PendingWrite}
 end
 
-# ── Async outbound messages (worker → event loop) ───────────────────────────
+# Async outbound messages (worker → event loop)
 # Workers may not touch connection state directly: every response, stream head,
 # chunk and terminal event crosses through an adapter-owned thread-safe queue
 # and is delivered on the event-loop thread.
@@ -62,6 +56,26 @@ end
     return
 end
 
+# Connection shedding (max_connections)
+# Over-limit connections get an immediate 503 + Retry-After before the close,
+# mirroring the async executor's overload behavior.
+
+const _SHED_503_BYTES = let
+    resp = Response(503, ["Content-Type" => "text/plain", "Retry-After" => "1",
+                          "Connection" => "close"], "Service Unavailable")
+    buf = Vector{UInt8}(undef, 256)
+    n = serialize_response!(buf, resp)
+    resize!(buf, n)
+    buf
+end
+
+@inline function _report_shed(io::AbstractIO)
+    t = io_telemetry(io)
+    telemetry_active(t) || return
+    telemetry_response!(t, Methods.UNKNOWN, "", 503, length(_SHED_503_BYTES), 0.0)
+    return
+end
+
 """
     _run_stream(outbound, st, gen, stream)
 
@@ -79,6 +93,16 @@ function _run_stream(outbound::Channel, st::HTTPConn, gen::UInt64, stream::Strea
         false
     end
     started || return
+
+    if st.stream_head
+        # HEAD: the head was sent without body framing; never run the body
+        # (an SSE body would otherwise run forever discarding chunks).
+        try
+            put!(outbound, _StreamEnd(st, gen))
+        catch
+        end
+        return
+    end
 
     send = bytes -> begin
         ok = try
@@ -142,7 +166,7 @@ function UringIO(server::S, engine::Engine) where {S <: Server}
                       Channel{_Outbound}(Inf))
 end
 
-# ── AbstractIO implementation ───────────────────────────────────────────────
+# AbstractIO implementation
 
 io_config(io::UringIO)          = io.cfg
 io_running(io::UringIO)::Bool   = io.server.runtime.running[]
@@ -282,7 +306,7 @@ function _shrink_buffers!(st::HTTPConn)
     return
 end
 
-# ── Worker startup ──────────────────────────────────────────────────────────
+# Worker startup
 
 function _start_workers(server::Server, queue_depth::Int, nworkers::Int)
     if server.config.backend === :sockets
@@ -312,7 +336,7 @@ function _start_uring_workers(server::Server, queue_depth::Int, nworkers::Int)
     start_backend!(backend, factory, server.config.port; running=server.runtime.running)
 end
 
-# ── Event pump ──────────────────────────────────────────────────────────────
+# Event pump
 
 @inline function _handle_event(io::UringIO, event::CompletionEvent,
                                accept_conn::Connection)
@@ -333,7 +357,6 @@ end
         return
     end
 
-    # The completing operation is done; the state machine re-arms as needed.
     st.inflight = :none
 
     if res < 0
@@ -349,10 +372,24 @@ end
     nothing
 end
 
+const _MSG_NOSIGNAL = Cint(0x4000)   # Linux
+
+"""Answer an over-limit connection with 503 + Retry-After, then close it."""
+function _shed_connection(io::UringIO, client_fd::Cint)
+    _report_shed(io)
+    n = length(_SHED_503_BYTES)
+    GC.@preserve _SHED_503_BYTES begin
+        ccall(:send, Cssize_t, (Cint, Ptr{UInt8}, Csize_t, Cint),
+              client_fd, pointer(_SHED_503_BYTES), n, _MSG_NOSIGNAL)
+    end
+    close_fd!(client_fd)
+    return
+end
+
 function _on_accept(io::UringIO, client_fd::Cint)
     if Threads.atomic_add!(io.server.runtime.conn_count, 1) + 1 > io.server.config.max_connections
         Threads.atomic_sub!(io.server.runtime.conn_count, 1)
-        close_fd!(client_fd)
+        _shed_connection(io, client_fd)
         return
     end
 
@@ -372,7 +409,7 @@ function _on_accept(io::UringIO, client_fd::Cint)
     return
 end
 
-# ── Tick: drain and deadline sweep ──────────────────────────────────────────
+# Tick: drain and deadline sweep
 
 """Reply delivery, connection draining and deadline sweep, once per tick."""
 function _worker_tick!(io::UringIO)
@@ -447,7 +484,6 @@ function _sweep_expired!(io::UringIO)
     return
 end
 
-# ── Request Dispatch ────────────────────────────────────────────────────────
 # Delegates to the single Runtime pipeline (shared with Application/FakeTransport).
 
 @inline _dispatch(server::Server, req::Request)::Response =

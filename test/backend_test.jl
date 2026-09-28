@@ -19,7 +19,6 @@ const LIB_AVAILABLE = isfile(Ciro.Backend._LIB)
         @test evt.result == 42
         @test evt.op_type == READ
 
-        # Connection equality
         c1 = Connection(Ptr{Cvoid}(100))
         c2 = Connection(Ptr{Cvoid}(100))
         c3 = Connection(Ptr{Cvoid}(200))
@@ -53,7 +52,6 @@ const LIB_AVAILABLE = isfile(Ciro.Backend._LIB)
         release!(pool, buf1)
         release!(pool, buf2)  # pool full, buf2 is not stored
 
-        # Only one buffer in pool
         buf3 = acquire!(pool)
         @test buf3 === buf1
         buf4 = acquire!(pool)
@@ -66,7 +64,6 @@ const LIB_AVAILABLE = isfile(Ciro.Backend._LIB)
         buf = acquire!(pool)
         @test length(buf) == 2048
 
-        # Shrink buffer, then release and reacquire
         resize!(buf, 100)
         release!(pool, buf)
 
@@ -78,17 +75,14 @@ const LIB_AVAILABLE = isfile(Ciro.Backend._LIB)
     @testset "PendingWrites" begin
         pw = PendingWrites(; max_fd=128)
 
-        # Empty by default
         @test pop_pending!(pw, 5) === nothing
         @test should_close!(pw, 5) == false
 
-        # Store and retrieve
         buf = Vector{UInt8}(undef, 64)
         set_pending!(pw, 10, buf)
         @test pop_pending!(pw, 10) === buf
         @test pop_pending!(pw, 10) === nothing  # cleared after pop
 
-        # Close tracking
         mark_close!(pw, 20)
         @test should_close!(pw, 20) == true
         @test should_close!(pw, 20) == false  # cleared after check
@@ -98,7 +92,6 @@ const LIB_AVAILABLE = isfile(Ciro.Backend._LIB)
         set_pending!(pw, 200, big_buf)
         @test pop_pending!(pw, 200) === big_buf
 
-        # Partial write tracking
         data = collect(UInt8, codeunits("abcdef"))
         set_pending!(pw, 30, data, 6)
         total, sent, done = advance_pending!(pw, 30, 2)

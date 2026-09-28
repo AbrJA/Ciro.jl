@@ -1,12 +1,6 @@
-# ══════════════════════════════════════════════════════════════════════════════
 # SocketsIO — portable blocking-socket adapter
-#
-# The second `AbstractIO` implementation, and the proof that the HTTP seam is
-# transport-agnostic: no C, no io_uring, runs anywhere `Sockets` does. One
-# connection task blocks on `readavailable`, drives the HTTP state machine, and
-# performs blocking writes; all tasks are `@async` (single-threaded), so the
-# handle tables are plain Dicts without locks.
-# ══════════════════════════════════════════════════════════════════════════════
+# All tasks are `@async` (single-threaded), so the handle tables are plain
+# Dicts without locks.
 
 mutable struct SocketsEntry
     sock     :: Sockets.TCPSocket
@@ -35,7 +29,7 @@ function SocketsIO(server::S, listener::Sockets.TCPServer) where {S <: Server}
                         HTTPConn{Sockets.TCPSocket}[], 0.0)
 end
 
-# ── AbstractIO implementation ───────────────────────────────────────────────
+# AbstractIO implementation
 
 io_config(io::SocketsIO)        = io.cfg
 io_running(io::SocketsIO)::Bool = io.server.runtime.running[]
@@ -153,8 +147,6 @@ function _sockets_deliver(io::SocketsIO, st::HTTPConn, msg::_Outbound)
     return
 end
 
-# ── Per-connection task ─────────────────────────────────────────────────────
-
 function _sockets_connection(io::SocketsIO, st::HTTPConn, entry::SocketsEntry)
     id = objectid(st.handle)
     try
@@ -181,10 +173,13 @@ function _sockets_connection(io::SocketsIO, st::HTTPConn, entry::SocketsEntry)
                 _sockets_deliver(io, st, take!(entry.reply))
             end
 
-            # Drain synchronous write completions, including pipelined responses.
+            # Clear `inflight` first, mirroring the uring adapter's completion
+            # handler: `http_on_write`/`http_stream_end` treat `:none` as "no
+            # operation outstanding" when deciding to resume the connection.
             while entry.wrote > 0 && !st.retired
                 n = entry.wrote
                 entry.wrote = 0
+                st.inflight = :none
                 http_on_write(io, st, n)
             end
         end
@@ -198,7 +193,7 @@ function _sockets_connection(io::SocketsIO, st::HTTPConn, entry::SocketsEntry)
     return
 end
 
-# ── Driver ──────────────────────────────────────────────────────────────────
+# Driver
 
 function _sockets_accept_loop(io::SocketsIO)
     while io.server.runtime.running[]
@@ -211,6 +206,12 @@ function _sockets_accept_loop(io::SocketsIO)
         if Threads.atomic_add!(io.server.runtime.conn_count, 1) + 1 >
            io.server.config.max_connections
             Threads.atomic_sub!(io.server.runtime.conn_count, 1)
+            _report_shed(io)
+            try
+                write(sock, _SHED_503_BYTES)
+                flush(sock)
+            catch
+            end
             close(sock)
             continue
         end

@@ -1,8 +1,6 @@
-# ══════════════════════════════════════════════════════════════════════════════
 # Resource Pools — zero-allocation hot paths via pre-allocated flat arrays
-# ══════════════════════════════════════════════════════════════════════════════
 
-# ── Connection Pool ─────────────────────────────────────────────────────────
+# Connection Pool
 
 """
     ConnectionPool(; max_size=1024)
@@ -33,7 +31,7 @@ end
     nothing
 end
 
-# ── Buffer Pool ─────────────────────────────────────────────────────────────
+# Buffer Pool
 
 """
     BufferPool(; max_size=256, buffer_capacity=65536)
@@ -54,7 +52,6 @@ BufferPool(; max_size::Int=256, buffer_capacity::Int=65536) =
 @inline function acquire!(pool::BufferPool)::Vector{UInt8}
     if !isempty(pool.pool)
         buf = pop!(pool.pool)
-        # Ensure minimum capacity
         length(buf) < pool.capacity && resize!(buf, pool.capacity)
         return buf
     end
@@ -67,7 +64,7 @@ end
     nothing
 end
 
-# ── Pending Writes Tracker ──────────────────────────────────────────────────
+# Pending Writes Tracker
 # Flat array indexed by fd — O(1) lookup, no hashing.
 
 """

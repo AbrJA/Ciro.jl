@@ -1,15 +1,4 @@
-# ══════════════════════════════════════════════════════════════════════════════
 # AsyncExecutor — run slow handlers off the event-loop thread
-#
-# A bounded pool of worker tasks executes handlers (model inference, blocking
-# work). The dispatch call returns immediately; the response is delivered
-# through the adapter's reply callback, which is thread-safe.
-#
-# The request/context is COPIED before crossing the worker boundary (the
-# zero-copy views are only valid on the event-loop thread), following the
-# copy-on-escape rule. Requests beyond `max_pending` are shed with 503 +
-# `Retry-After`.
-# ══════════════════════════════════════════════════════════════════════════════
 
 """
     AsyncExecutor(; worker_threads=2, max_pending=256)

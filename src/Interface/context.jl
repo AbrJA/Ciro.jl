@@ -1,6 +1,4 @@
-# ══════════════════════════════════════════════════════════════════════════════
 # RequestContext — the single argument passed to every handler
-# ══════════════════════════════════════════════════════════════════════════════
 
 """
     RequestContext
@@ -40,8 +38,7 @@ RequestContext(request::PicoHTTPParser.Request, params) =
     RequestContext(Request(request), params)
 RequestContext(request::PicoHTTPParser.Request) = RequestContext(Request(request))
 
-# Kept as a source-level alias while the internal modules are migrated. New
-# code should use RequestContext.
+# Source-level alias kept while internal modules migrate; new code should use RequestContext.
 const Context = RequestContext
 
 export RequestContext, Context

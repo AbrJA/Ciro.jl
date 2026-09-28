@@ -1,11 +1,4 @@
-# ══════════════════════════════════════════════════════════════════════════════
 # Event Loop — composable, users provide their own handler
-# ══════════════════════════════════════════════════════════════════════════════
-#
-# The event loop is NOT a black box. Users call `run_eventloop!` with a
-# handler function that receives CompletionEvents. This enables building
-# arbitrary protocols (HTTP, WebSocket, gRPC, etc.) on top.
-# ══════════════════════════════════════════════════════════════════════════════
 
 """
     run_eventloop!(handler, engine; running=Ref(true), batch_size=64,
@@ -38,7 +31,6 @@ function run_eventloop!(handler::H, engine::Engine;
 
         if event !== nothing
             handler(event)
-            # Drain remaining completions in a batch
             for _ in 2:batch_size
                 next = poll_completion(engine)
                 next === nothing && break
@@ -115,8 +107,7 @@ function run_eventloop_threaded!(handler_factory::F, port::Integer;
         end
     end
 
-    # Wait for all workers to finish. If one fails (including an interrupt),
-    # stop the others and let them drain before propagating.
+    # If a worker fails, stop the others and let them drain before propagating.
     try
         for t in tasks
             wait(t)

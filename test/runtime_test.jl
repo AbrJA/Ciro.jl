@@ -81,6 +81,25 @@ using PicoHTTPParser
         @test dispatch(app, Request("GET", "/other")).status == 404
     end
 
+    @testset "Custom routers can carry route limits" begin
+        struct LimitedRouter <: AbstractRouter end
+        Ciro.Interface.route(::LimitedRouter, method::UInt8, path::AbstractString) =
+            (method == Methods.POST && path == "/limited") ?
+                RouteResult(Endpoint(_ -> text("ok");
+                                     limits=RouteLimits(max_body_size=3)), ()) :
+                RouteResult()
+
+        captures = Pair{Symbol,UnitRange{Int}}[]
+        res = route!(LimitedRouter(), Methods.POST, "/limited", captures)
+        @test route_limits(res.handler) == RouteLimits(max_body_size=3)
+
+        # The default route! fallback preserves limits, so adapters that route
+        # early through io_route enforce them for custom routers too.
+        resp = dispatch(LimitedRouter(), SyncExecutor(), DefaultCatcher(),
+                        Request("POST", "/limited"), captures)
+        @test resp.status == 200
+    end
+
     @testset "Freeze semantics" begin
         router = Trie()
         app = Application(; router)
@@ -218,6 +237,8 @@ using PicoHTTPParser
 
         router = Trie()
         get!(router, "/slow", _ -> text("slow"))
+        get!(router, "/num", _ -> 42)
+        get!(router, "/users/:id::Int", ctx -> text("id=$(param(ctx, Int, :id))"))
         get!(router, "/boom", _ -> error("handler exploded"))
 
         ex = AsyncExecutor(worker_threads=2, max_pending=8)
@@ -242,6 +263,18 @@ using PicoHTTPParser
             resp = take!(replies)
             @test resp.status == 405
             @test contains(header(resp, "Allow"), "GET")
+
+            # Non-Response returns are normalized on the worker too.
+            dispatch_async(router, ex, DefaultCatcher(), Request("GET", "/num"),
+                           r -> put!(replies, r))
+            resp = take!(replies)
+            @test resp.status == 200 && String(resp.body) == "42"
+
+            # Route params survive copy-on-escape: `param` must still find them.
+            dispatch_async(router, ex, DefaultCatcher(), Request("GET", "/users/42"),
+                           r -> put!(replies, r))
+            resp = take!(replies)
+            @test resp.status == 200 && String(resp.body) == "id=42"
 
             # Handler errors are intercepted on the worker thread.
             dispatch_async(router, ex, DefaultCatcher(), Request("GET", "/boom"),

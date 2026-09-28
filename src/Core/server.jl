@@ -1,6 +1,4 @@
-# ══════════════════════════════════════════════════════════════════════════════
 # Server — immutable Config + mutable Runtime + collaborators
-# ══════════════════════════════════════════════════════════════════════════════
 
 """
     ServerConfig
@@ -104,6 +102,17 @@ function Server(;
 end
 
 """
+Event-loop workers that can safely run alongside an executor. An async executor
+needs at least one thread that is not occupied by an engine loop: with
+`nworkers == nthreads` (and more than one thread) the engine loops starve the
+executor's tasks and handlers never run. `SyncExecutor` is unaffected.
+"""
+function _effective_nworkers(executor::AbstractExecutor, nworkers::Int, nthreads::Int)::Int
+    (isasync(executor) && nthreads > 1 && nworkers >= nthreads) || return nworkers
+    return nthreads - 1
+end
+
+"""
     start!(server; queue_depth=4096, nworkers=nthreads())
 
 Start the server. Blocks until [`stop!`](@ref) is called or an interrupt
@@ -120,10 +129,12 @@ closed, and workers exit once every connection is released (or after
 function start!(server::Server; queue_depth::Int=4096, nworkers::Int=nthreads())
     freeze!(server.router)
     server.runtime.running[] = true
-    if isasync(server.executor) && nthreads() <= nworkers
+    requested = nworkers
+    nworkers = _effective_nworkers(server.executor, nworkers, nthreads())
+    if nworkers != requested
         log!(server.logger, Warn,
-             "async handlers share threads with $nworkers event loop(s); " *
-             "run Julia with more threads than workers (e.g. --threads=$(nworkers + 1))")
+             "async executor: reducing nworkers from $requested to $nworkers so a " *
+             "thread stays free for handlers (run Julia with more threads than workers)")
     end
     start_executor!(server.executor)
     log!(server.logger, Info, "Ciro starting on $(server.config.host):$(server.config.port)")

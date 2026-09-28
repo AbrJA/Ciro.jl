@@ -44,6 +44,15 @@ using Ciro
         strm.body(w)
         out = String(take!(io))
         @test out == "id: 1\nevent: tick\ndata: one\n\nretry: 1000\ndata: two\ndata: lines\n\n"
+
+        # Keepalive comments are written raw, not framed as data.
+        io2 = IOBuffer()
+        strm2 = sse() do send
+            sse_comment(send, "keepalive")
+        end
+        w2 = Ciro.StreamWriter(b -> (write(io2, b); true), () -> nothing, :open)
+        strm2.body(w2)
+        @test String(take!(io2)) == ": keepalive\n\n"
     end
 
     @testset "StreamWriter contract" begin
@@ -60,6 +69,17 @@ using Ciro
 
         failing = Ciro.StreamWriter(_ -> false, () -> nothing, :open)
         @test_throws Ciro.StreamClosedError write(failing, "x")
+    end
+
+    @testset "StreamWriter IO contract (Char/byte writes)" begin
+        sent = Vector{UInt8}[]
+        w = Ciro.StreamWriter(b -> (push!(sent, b); true), () -> nothing, :open)
+        print(w, "a")          # String write -> Ptr/UInt path
+        print(w, ' ')          # Char write -> Ref/UInt path
+        write(w, UInt8('!'))   # single byte
+        println(w, "b")        # String + newline
+        close(w)
+        @test String(reduce(vcat, sent)) == "a !b\n"
     end
 
     @testset "worker/loop stream protocol" begin

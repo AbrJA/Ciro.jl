@@ -1,6 +1,4 @@
-# ══════════════════════════════════════════════════════════════════════════════
 # HTTP Method Constants (bitmask-friendly: each method has a unique bit)
-# ══════════════════════════════════════════════════════════════════════════════
 
 module Methods
     const GET     = UInt8(1)

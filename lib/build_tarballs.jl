@@ -1,6 +1,5 @@
 # Build script for BinaryBuilder.jl
 # Run with: julia build_tarballs.jl --deploy=local
-#
 # See: https://docs.binarybuilder.org
 
 using BinaryBuilder

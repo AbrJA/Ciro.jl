@@ -15,7 +15,7 @@ module Backend
 
 import ..Interface: AbstractBackend, start_backend!, stop_backend!
 
-# ── Library path (module-level const required by ccall + juliac) ─────────────
+# Library path (module-level const required by ccall + juliac)
 # In production this becomes Ciro_jll.libciro
 const _LIB = normpath(joinpath(@__DIR__, "..", "..", "lib", "ciro.so"))
 
@@ -39,14 +39,11 @@ function __init__()
     return
 end
 
-# ── Includes ────────────────────────────────────────────────────────────────
 include("types.jl")
 include("connection.jl")
 include("engine.jl")
 include("pool.jl")
 include("eventloop.jl")
-
-# ── IOUringBackend — concrete AbstractBackend ───────────────────────────────
 
 """
     IOUringBackend <: AbstractBackend
@@ -81,7 +78,7 @@ function stop_backend!(::IOUringBackend)
     nothing  # Stopping is handled via the `running` atomic flag
 end
 
-# ── Public API ──────────────────────────────────────────────────────────────
+# Public API
 export IOUringBackend,
        Engine, Connection, ConnectionPool, BufferPool,
        EventType, ACCEPT, READ, WRITE,

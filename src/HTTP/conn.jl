@@ -1,10 +1,4 @@
-# ══════════════════════════════════════════════════════════════════════════════
 # Per-connection HTTP state
-#
-# `HTTPConn` is transport-agnostic: `handle` is opaque to this module and is
-# only ever passed back to the adapter (`io_*` methods). No fds, rings, or
-# pools appear here.
-# ══════════════════════════════════════════════════════════════════════════════
 
 const _INITIAL_RBUF = 4096
 

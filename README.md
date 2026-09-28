@@ -27,15 +27,13 @@
 - 📊 **Observability**: opt-in `ServerMetrics` counters and one-line `AccessLog`, plus
   an `AbstractTelemetry` seam for custom metrics/tracing.
 - 🛡️ **Strict framing & limits**: header/body/idle timeouts, size and connection caps;
-  obs-fold, duplicate `Content-Length`, and CL+TE are rejected; header injection is
-  impossible through `Response`.
+  obs-fold, duplicate `Content-Length`, and CL+TE are rejected; `Expect:
+  100-continue` is honored; over-limit connections get `503` + `Retry-After`;
+  header injection is impossible through `Response`.
 - 🌊 **Graceful shutdown**: `stop!` (or SIGINT) stops accepting, flushes in-flight
   writes, closes idle connections, and drains within `shutdown_timeout`.
 - 🗺️ **Trie router** with typed params, groups, wildcards, and 405 + `Allow`.
 - 🧩 **Modular internals**: `Interface → Router → Runtime → HTTP → Backend → Core`.
-
-> 📖 `ARCHITECTURE.md` is the design guide · `docs/DESIGN_REVIEW.md` the audit and
-> staged plan · `WORKLOG.md` the progress tracker.
 
 ---
 
@@ -81,13 +79,17 @@ server = Server(; router, port=8080)
 start!(server)
 ```
 
-Run the included ML demo (needs `Pkg.add("JSON")`):
+### 📂 Examples
+
+[`examples/playground`](examples/playground) is one app that exercises the
+library end to end — routing, typed params, SSE and chunked streaming, async vs
+sync executors, per-route limits, telemetry, admin — with a UI to click through
+it all (see [`examples/README.md`](examples/README.md)):
 
 ```bash
-julia --project=. -t4 server.jl
-curl http://localhost:3001/health
-curl -X POST http://localhost:3001/api/v1/predict \
-  -H 'Content-Type: application/json' -d '{"features":[1.0,2.0,3.0]}'
+julia --project=. --threads=8 examples/playground/server.jl
+# async executor  http://localhost:8080
+# sync executor   http://localhost:8081   (same routes; shows blocking)
 ```
 
 ---
@@ -184,8 +186,8 @@ get!(router, "/audit", ctx -> begin
 end)
 ```
 
-> `body(ctx)` / `rawbody(ctx)` already return owned copies.
-> Lifetime rules: `ARCHITECTURE.md` §4.4.
+> `body(ctx)` / `rawbody(ctx)` already return owned copies; retain one if the
+> request must outlive the handler.
 
 ### ⏱️ Async Handlers — Slow Work Off the Event Loop
 
@@ -304,21 +306,8 @@ adapters pass the same wire acceptance suite.
 julia --project=. -e 'using Pkg; Pkg.test()'
 ```
 
-The suite includes **Aqua + JET**, allocation budgets, and **wire-level acceptance
-tests** that run real servers over sockets for both backends.
-
----
-
-## 📈 Benchmarks
-
-```bash
-(cd benchmarks/khttp && cargo build --release)
-./benchmarks/khttp/target/release/server &
-julia --project=. benchmarks/ciro_bench.jl &
-./benchmarks/run_bench.sh
-```
-
-Requires [oha](https://github.com/hatoo/oha) (`cargo install oha`).
+The suite includes **Aqua + JET** and **wire-level acceptance tests** that run
+real servers over sockets for both backends.
 
 ---
 
@@ -334,7 +323,8 @@ Requires [oha](https://github.com/hatoo/oha) (`cargo install oha`).
 - 📐 Route params are **zero-allocation on the served path** (ranges into the request
   path, resolved by `param`; `copy(ctx)` to retain). The public `route` helper still
   returns owned strings; compiled routing is on the roadmap. Streaming/SSE requires
-  `AsyncExecutor` and occupies a worker per open stream (HTTP/1.1 only; no HTTP/2).
+  `AsyncExecutor` and occupies a worker per open stream; push-based streaming for
+  high fan-out is slated for the v2 design review (HTTP/1.1 only; no HTTP/2).
 
 ---
 

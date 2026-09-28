@@ -1,8 +1,6 @@
-# ══════════════════════════════════════════════════════════════════════════════
 # Request Utilities — headers, cookies, body, path, query, params
-# ══════════════════════════════════════════════════════════════════════════════
 
-# ── Header Utilities ────────────────────────────────────────────────────────
+# Header Utilities
 
 """Zero-allocation case-insensitive header key comparison."""
 @inline function _hdr_key_eq(a, key::String)::Bool
@@ -52,13 +50,12 @@ end
 @inline hasheader(req::PicoHTTPParser.Request, key::String)::Bool =
     hasheader(Request(req), key)
 
-# Context overloads — delegate to ctx.request
 header(ctx::RequestContext, key::String, default::String="")::String  = header(ctx.request, key, default)
 hasheader(ctx::RequestContext, key::String)::Bool                       = hasheader(ctx.request, key)
 
 export header, hasheader
 
-# ── Body Utilities ──────────────────────────────────────────────────────────
+# Body Utilities
 
 """Get request body as String (one owned copy, safe to retain)."""
 function body(req::Request)::String
@@ -81,14 +78,13 @@ end
 
 content_type(req::PicoHTTPParser.Request)::String = content_type(Request(req))
 
-# Context overloads
 body(ctx::RequestContext)::String         = body(ctx.request)
 rawbody(ctx::RequestContext)::Vector{UInt8} = rawbody(ctx.request)
 content_type(ctx::RequestContext)::String  = content_type(ctx.request)
 
 export body, rawbody, content_type
 
-# ── Path & Query ────────────────────────────────────────────────────────────
+# Path & Query
 
 """Get the path portion (before `?`) from a request."""
 @inline path(req::Request) = req.path
@@ -115,14 +111,13 @@ end
 
 queryparams(req::PicoHTTPParser.Request)::Dict{String,String} = queryparams(Request(req))
 
-# Context overloads
 @inline path(ctx::RequestContext)                             = path(ctx.request)
 @inline query(ctx::RequestContext)::String                    = query(ctx.request)
 queryparams(ctx::RequestContext)::Dict{String,String}         = queryparams(ctx.request)
 
 export path, query, queryparams
 
-# ── Route Parameter Access ──────────────────────────────────────────────────
+# Route Parameter Access
 
 # Trie captures are byte ranges into `ctx.request.path`; custom routers and
 # manual contexts may supply strings or views directly.
@@ -147,11 +142,11 @@ end
     return nothing
 end
 
-"""Owned `name => value` pairs, used by `copy(ctx)` to retain values."""
+"""Owned `name => value` pairs, used by `copy(ctx)` to retain values.
+Keys stay as supplied (Symbols for Trie matches), so `param` still finds them."""
 function _materialize_params(ctx::RequestContext)
-    return Pair{String,String}[
-        String(k) => String(_capture(ctx, v)) for (k, v) in ctx.params
-    ]
+    isempty(ctx.params) && return ()
+    return [k => String(_capture(ctx, v)) for (k, v) in ctx.params]
 end
 
 export param

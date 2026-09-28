@@ -36,14 +36,14 @@ using .Runtime
 using .Backend: IOUringBackend
 import PicoHTTPParser
 
-# ── Public API ──────────────────────────────────────────────────────────────
+# Public API
 # Types
 export RequestContext, Context, Request, Response, Endpoint, RouteResult, Methods
 export RouteLimits, route_limits
 
 # Response builders
 export text, html, json, redirect, fail
-export Stream, StreamWriter, StreamClosedError, stream, sse
+export Stream, StreamWriter, StreamClosedError, stream, sse, sse_comment
 
 # Request access
 export header, hasheader, body, rawbody, content_type
@@ -74,7 +74,7 @@ export Application, AbstractTransport, TransportToken, FakeTransport
 export dispatch, dispatch_async, handle, run_once!, serve!, enqueue!, response_for
 export send_response!, close!, transport_state
 
-# ── Precompilation ──────────────────────────────────────────────────────────
+# Precompilation
 using PrecompileTools
 
 @setup_workload begin
@@ -84,17 +84,14 @@ using PrecompileTools
         register!(router, Methods.GET, "/users/:id::Int", ctx -> json("{\"id\":1}"))
         register!(router, Methods.POST, "/data", ctx -> text("created"; status=201))
 
-        # Simulate dispatch hot path
         raw = Vector{UInt8}("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
         req = PicoHTTPParser.parse_request(raw)
         server = Server(; router, port=19999)
         resp = Core._dispatch(server, req)
 
-        # Serialize response
         buf = Vector{UInt8}(undef, 4096)
         Core.serialize_response!(buf, resp)
 
-        # Route with params
         raw2 = Vector{UInt8}("GET /users/42 HTTP/1.1\r\nHost: localhost\r\n\r\n")
         req2 = PicoHTTPParser.parse_request(raw2)
         Core._dispatch(server, req2)

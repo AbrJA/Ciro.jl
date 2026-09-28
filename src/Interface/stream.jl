@@ -1,11 +1,4 @@
-# ══════════════════════════════════════════════════════════════════════════════
 # Streaming responses — chunked bodies and Server-Sent Events
-#
-# A `Stream` is produced incrementally by a `Stream` body running on an
-# async-executor worker. Bytes written to the `StreamWriter` are framed as
-# HTTP/1.1 chunks (or sent raw when the user supplies a Content-Length) and
-# flushed to the connection with backpressure.
-# ══════════════════════════════════════════════════════════════════════════════
 
 """
     Stream(body; status=200, headers=Pair{String,String}[])
@@ -81,14 +74,30 @@ struct StreamClosedError <: Exception end
 Base.showerror(io::IO, ::StreamClosedError) =
     print(io, "stream closed: the client disconnected or the server is shutting down")
 
-function Base.unsafe_write(w::StreamWriter, p::Ptr{UInt8}, n::UInt)::Int
+# The IO contract calls `unsafe_write` with both `Int` (String/Vector writes)
+# and `UInt` (single-byte/Char writes through `Ref`); support both or
+# `print(w, ' ')` falls back to "does not support byte I/O".
+@inline function _stream_unsafe_write(w::StreamWriter, p::Ptr{UInt8}, n::Integer)::Int
     w.state === :closed && throw(StreamClosedError())
-    n == 0 && return 0
+    n <= 0 && return 0
     len = Int(n)
     bytes = Vector{UInt8}(undef, len)
     GC.@preserve bytes unsafe_copyto!(pointer(bytes), p, len)
     w.send(bytes) || throw(StreamClosedError())
     return len
+end
+
+Base.unsafe_write(w::StreamWriter, p::Ptr{UInt8}, n::UInt)::Int =
+    _stream_unsafe_write(w, p, n)
+Base.unsafe_write(w::StreamWriter, p::Ptr{UInt8}, n::Int)::Int =
+    _stream_unsafe_write(w, p, n)
+
+# Base's generic `write(::IO, ::UInt8)` errors; concrete IOs specialize it, and
+# Char writes (e.g. `print(w, ' ')`) route through it.
+function Base.write(w::StreamWriter, x::UInt8)::Int
+    w.state === :closed && throw(StreamClosedError())
+    w.send(UInt8[x]) || throw(StreamClosedError())
+    return 1
 end
 
 function Base.close(w::StreamWriter)
@@ -132,7 +141,8 @@ end
     sse(body; status=200, headers=...) -> Stream
 
 Build a Server-Sent Events response (`Content-Type: text/event-stream`).
-`body` receives an [`SSESender`](@ref):
+`body` receives an [`SSESender`](@ref); **each call to the sender emits one
+event** — do not include SSE framing (`event:`/`data:` lines) yourself:
 
 ```julia
 get!(router, "/events", ctx -> sse() do send
@@ -143,6 +153,8 @@ get!(router, "/events", ctx -> sse() do send
     end
 end)
 ```
+
+Use [`sse_comment`](@ref) for keepalive comments.
 """
 function sse(body::F; status::Int=200,
              headers::AbstractVector{<:Pair}=Pair{String,String}[]) where {F}
@@ -157,4 +169,15 @@ function sse(body::F; status::Int=200,
     return Stream(status, hs, framed)
 end
 
-export Stream, StreamWriter, StreamClosedError, stream, sse, SSESender
+"""
+    sse_comment(s::SSESender, text)
+
+Write an SSE comment line (`: text`) — useful as a keepalive so proxies and
+clients see traffic while no events are flowing.
+"""
+function sse_comment(s::SSESender, text::AbstractString)
+    write(s.io, ": " * text * "\n\n")
+    return nothing
+end
+
+export Stream, StreamWriter, StreamClosedError, stream, sse, SSESender, sse_comment

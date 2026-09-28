@@ -1,20 +1,10 @@
-# ══════════════════════════════════════════════════════════════════════════════
-# Wire-level acceptance tests
+# Wire-level acceptance tests: executable spec for the transport contract,
+# talking to a real server over real sockets. Known P0 defects are pinned with
+# @test_broken and promoted to @test when a fix lands.
 #
-# These tests talk to a real server over real sockets. They are the executable
-# specification for the transport contract. Known P0 defects are pinned with
-# @test_broken: when a fix lands, the test flips to a failure and must be
-# promoted to @test.
-#
-# Requirements: Linux + lib/ciro.so built. Tests are skipped when lib is absent.
-#
-# The server runs in a separate Julia process. Two reasons:
-#   1. It mirrors production deployment (`julia server.jl`).
-#   2. The current event loop never yields, so an in-process worker can occupy
-#      the thread Julia's scheduler needs, deadlocking an in-process client.
-#      (Tracked as a Stage 1 defect; the subprocess keeps this suite deterministic
-#      while the client itself also uses raw blocking libc sockets, not libuv.)
-# ══════════════════════════════════════════════════════════════════════════════
+# Requires Linux + lib/ciro.so (skipped otherwise). The server runs in a
+# separate Julia process because the current event loop never yields, which
+# would deadlock an in-process client occupying the scheduler's thread.
 
 using Test
 using Ciro
@@ -26,7 +16,7 @@ if !_LIB_OK
     @info "Skipping wire acceptance tests" linux=Sys.islinux() lib_available=_LIB_OK
 end
 
-# ── raw blocking socket test client ─────────────────────────────────────────
+# raw blocking socket test client
 
 const _AF_INET = Cint(2)
 const _SOCK_STREAM = Cint(1)
@@ -166,12 +156,16 @@ Blocking (yielding) client for in-process servers. The raw `TestClient` would
 stall the Julia scheduler while the server shares this process, so in-process
 tests use libuv sockets, which yield while the server tasks run.
 """
-function _julia_request(port::Integer, data::AbstractString)
+function _julia_request(port::Integer, data::AbstractString; full::Bool=false)
     sock = Sockets.connect(Sockets.IPv4("127.0.0.1"), port)
     try
         write(sock, data)
         result = Ref("")
-        task = @async (result[] = String(readuntil(sock, "\r\n\r\n")))
+        task = @async begin
+            head = readuntil(sock, "\r\n\r\n")
+            rest = full ? read(sock) : UInt8[]
+            result[] = String(head) * String(rest)
+        end
         timedwait(() -> istaskdone(task), 10.0) == :ok ||
             error("in-process request to port $port timed out")
         return result[]
@@ -208,13 +202,14 @@ function _wait_ready(port::Integer)
     error("wire test server did not become ready on port $port")
 end
 
-# ── server subprocess ───────────────────────────────────────────────────────
+# server subprocess
 
 const _SERVER_SRC = raw"""
 using Ciro
 router = Trie()
 get!(router, "/hello", _ -> text("hello"))
 get!(router, "/head", _ -> text("content"))
+get!(router, "/num", _ -> 42)
 post!(router, "/echo", ctx -> text(body(ctx)))
 get!(router, "/inject", _ -> redirect("/x\r\nX-Injected: yes"))
 get!(router, "/slow", _ -> (sleep(0.3); text("slow")))
@@ -241,6 +236,8 @@ end)
 post!(router, "/tiny", ctx -> text(body(ctx)); limits=RouteLimits(max_body_size=8))
 post!(router, "/big", ctx -> text(body(ctx)); limits=RouteLimits(max_body_size=1024))
 post!(router, "/quick", ctx -> text(body(ctx)); limits=RouteLimits(body_timeout_ms=150))
+post!(router, "/tiny/:name", ctx -> text(body(ctx)); limits=RouteLimits(max_body_size=4))
+post!(router, "/tinyfile/*", ctx -> text("wild"); limits=RouteLimits(max_body_size=4))
 start!(Server(; router, port=PORT EXTRA); nworkers=2)
 """
 
@@ -261,8 +258,6 @@ function _kill_server(proc)
     end
     return
 end
-
-# ── suite ───────────────────────────────────────────────────────────────────
 
 @testset "Wire acceptance" begin
     if !_LIB_OK
@@ -330,7 +325,6 @@ end
             end
 
             @testset "chunked request bodies" begin
-                # Complete chunked body in one segment.
                 resp = roundtrip(port,
                     "POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n" *
                     "5\r\nhello\r\n0\r\n\r\n")
@@ -399,6 +393,33 @@ end
                 end
             end
 
+            @testset "Expect: 100-continue" begin
+                # Content-Length body: the client waits for the interim 100.
+                c = TestClient(port; timeout=10.0)
+                try
+                    _send(c, "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n" *
+                             "Expect: 100-continue\r\nConnection: close\r\n\r\n")
+                    @test startswith(read_response(c), "HTTP/1.1 100 Continue")
+                    _send(c, "hello")
+                    resp = read_response(c)
+                    @test startswith(resp, "HTTP/1.1 200") && endswith(resp, "hello")
+                finally
+                    _close(c)
+                end
+
+                c = TestClient(port; timeout=10.0)
+                try
+                    _send(c, "POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n" *
+                             "Expect: 100-continue\r\nConnection: close\r\n\r\n")
+                    @test startswith(read_response(c), "HTTP/1.1 100 Continue")
+                    _send(c, "5\r\nhello\r\n0\r\n\r\n")
+                    resp = read_response(c)
+                    @test startswith(resp, "HTTP/1.1 200") && endswith(resp, "hello")
+                finally
+                    _close(c)
+                end
+            end
+
             @testset "body larger than one read buffer (P0)" begin
                 payload = repeat("a", 70_000)
                 c = TestClient(port; timeout=5.0)
@@ -432,6 +453,17 @@ end
                 @test startswith(resp, "HTTP/1.1 200")
                 @test !occursin("content", resp)
                 @test occursin("Content-Length: 7", resp)
+
+                # Auto-HEAD normalizes non-Response GET handlers instead of 500.
+                resp = roundtrip(port, "HEAD /num HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+                                 expect_body=false)
+                @test startswith(resp, "HTTP/1.1 200")
+                @test occursin("Content-Length: 2", resp)
+
+                # A streaming GET on a sync server is a 500 for HEAD too.
+                @test startswith(roundtrip(port, "HEAD /stream HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+                                           expect_body=false),
+                                 "HTTP/1.1 500")
             end
 
             @testset "CRLF header injection (P0 security)" begin
@@ -489,6 +521,19 @@ end
                         @test startswith(resp, "HTTP/1.1 413")
                     end
 
+                    @testset "Expect: 100-continue with a final 413" begin
+                        # Over the limit: the final response comes without the
+                        # interim 100 (RFC 9110 allows rejecting early).
+                        c = TestClient(limited_port; timeout=3.0)
+                        try
+                            _send(c, "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 1000\r\n" *
+                                     "Expect: 100-continue\r\nConnection: close\r\n\r\n")
+                            @test startswith(read_response(c), "HTTP/1.1 413")
+                        finally
+                            _close(c)
+                        end
+                    end
+
                     @testset "per-route body limit" begin
                         # Stricter than the server-wide 64: rejected early.
                         @test startswith(roundtrip(limited_port,
@@ -507,6 +552,16 @@ end
                             "POST /big HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\nConnection: close\r\n\r\n" *
                             repeat("b", 100)),
                             "HTTP/1.1 200")
+                        # Param and wildcard routes carry their own limits.
+                        @test startswith(roundtrip(limited_port,
+                            "POST /tiny/x HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc"),
+                            "HTTP/1.1 200")
+                        @test startswith(roundtrip(limited_port,
+                            "POST /tiny/x HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nConnection: close\r\n\r\nabcde"),
+                            "HTTP/1.1 413")
+                        @test startswith(roundtrip(limited_port,
+                            "POST /tinyfile/a/b HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nConnection: close\r\n\r\nabcde"),
+                            "HTTP/1.1 413")
                     end
 
                     @testset "per-route body timeout" begin
@@ -589,7 +644,6 @@ end
                         _close(c)
                     end
 
-                    # chunked body
                     resp = roundtrip(sock_port,
                         "POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n" *
                         "5\r\nhello\r\n0\r\n\r\n")
@@ -605,6 +659,19 @@ end
                     @test startswith(roundtrip(sock_port,
                         "POST /tiny HTTP/1.1\r\nHost: x\r\nContent-Length: 9\r\nConnection: close\r\n\r\n123456789"),
                         "HTTP/1.1 413")
+
+                    # Expect: 100-continue on this backend too
+                    c = TestClient(sock_port; timeout=10.0)
+                    try
+                        _send(c, "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n" *
+                                 "Expect: 100-continue\r\nConnection: close\r\n\r\n")
+                        @test startswith(read_response(c), "HTTP/1.1 100 Continue")
+                        _send(c, "hello")
+                        resp = read_response(c)
+                        @test startswith(resp, "HTTP/1.1 200") && endswith(resp, "hello")
+                    finally
+                        _close(c)
+                    end
                 finally
                     _kill_server(sp)
                 end
@@ -708,6 +775,47 @@ end
                         finally
                             _close(c)
                         end
+
+                        # HEAD: non-Response normalized, stream headers only and
+                        # the connection stays usable afterwards.
+                        c = TestClient(async_port; timeout=10.0)
+                        try
+                            _send(c, "HEAD /num HTTP/1.1\r\nHost: x\r\n\r\n")
+                            hs = String(copy(_recv_until_headers(c)))
+                            @test startswith(hs, "HTTP/1.1 200")
+                            @test occursin("Content-Length: 2", hs)
+
+                            _send(c, "HEAD /stream HTTP/1.1\r\nHost: x\r\n\r\n")
+                            hs = String(copy(_recv_until_headers(c)))
+                            @test startswith(hs, "HTTP/1.1 200")
+                            @test !occursin("chunked", lowercase(hs))
+
+                            _send(c, "GET /hello HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                            r = read_response(c)
+                            @test startswith(r, "HTTP/1.1 200") && endswith(r, "hello")
+                        finally
+                            _close(c)
+                        end
+
+                        # Per-route limits are enforced before dispatch on async
+                        # routes too (the request never reaches a worker).
+                        @test startswith(roundtrip(async_port,
+                            "POST /tiny HTTP/1.1\r\nHost: x\r\nContent-Length: 9\r\nConnection: close\r\n\r\n123456789";
+                            timeout=10.0),
+                            "HTTP/1.1 413")
+
+                        # Expect: 100-continue works with async handlers as well.
+                        c = TestClient(async_port; timeout=10.0)
+                        try
+                            _send(c, "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n" *
+                                     "Expect: 100-continue\r\nConnection: close\r\n\r\n")
+                            @test startswith(read_response(c), "HTTP/1.1 100 Continue")
+                            _send(c, "hello")
+                            r = read_response(c)
+                            @test startswith(r, "HTTP/1.1 200") && endswith(r, "hello")
+                        finally
+                            _close(c)
+                        end
                     finally
                         _kill_server(ap)
                     end
@@ -749,6 +857,22 @@ end
                             _close(c)
                         end
                         sleep(0.5)
+                        @test startswith(roundtrip(shed_port,
+                            "GET /hello HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"; timeout=10.0),
+                            "HTTP/1.1 200")
+
+                        # HEAD on an infinite stream answers immediately and
+                        # frees the only worker (otherwise the next request
+                        # would be shed with 503).
+                        c = TestClient(shed_port; timeout=10.0)
+                        try
+                            _send(c, "HEAD /forever HTTP/1.1\r\nHost: x\r\n\r\n")
+                            hs = String(copy(_recv_until_headers(c)))
+                            @test startswith(hs, "HTTP/1.1 200")
+                        finally
+                            _close(c)
+                        end
+                        sleep(0.2)
                         @test startswith(roundtrip(shed_port,
                             "GET /hello HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"; timeout=10.0),
                             "HTTP/1.1 200")
@@ -814,14 +938,115 @@ end
                     stop!(lserver)
                     timedwait(() -> istaskdone(ltask), 5.0)
                 end
+
+                # Async executor + streams: metrics cover the async delivery
+                # path, a 3xx, a completed stream, and an aborted stream.
+                ametrics = ServerMetrics()
+                aport = port + 12
+                arouter = Trie()
+                get!(arouter, "/hello", _ -> text("hello"))
+                get!(arouter, "/redirect", _ -> redirect("/x"))
+                get!(arouter, "/stream", _ -> stream() do w
+                    print(w, "abc")
+                end)
+                get!(arouter, "/forever", _ -> stream() do w
+                    while true
+                        write(w, "x")
+                        sleep(0.05)
+                    end
+                end)
+                aserver = Server(; router=arouter, port=aport, backend=:sockets,
+                                 telemetry=ametrics,
+                                 executor=AsyncExecutor(worker_threads=2, max_pending=8))
+                atask = Threads.@spawn start!(aserver; nworkers=1)
+                try
+                    _wait_ready(aport)
+                    @test startswith(_julia_request(aport,
+                        "GET /hello HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"; full=true),
+                        "HTTP/1.1 200")
+                    @test startswith(_julia_request(aport,
+                        "GET /redirect HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"; full=true),
+                        "HTTP/1.1 302")
+                    @test startswith(_julia_request(aport,
+                        "GET /stream HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"; full=true),
+                        "HTTP/1.1 200")
+
+                    # Abort a stream mid-body: the server reports it on retire.
+                    _julia_request(aport, "GET /forever HTTP/1.1\r\nHost: x\r\n\r\n")
+                    @test timedwait(() -> metrics_snapshot(ametrics).responses >= 4, 8.0) == :ok
+                    s = metrics_snapshot(ametrics)
+                    @test s.requests == 4
+                    @test s.status_2xx == 3    # hello, completed stream, aborted stream
+                    @test s.status_3xx == 1    # redirect
+                    @test s.responses == 4
+                    @test s.bytes_out > 0
+                finally
+                    stop!(aserver)
+                    timedwait(() -> istaskdone(atask), 5.0)
+                end
+            end
+
+            @testset "async executor with nworkers == nthreads" begin
+                # Default nworkers (2) equals the server's thread count: start!
+                # must leave a thread free for handlers, otherwise this request
+                # hangs and times out.
+                cap_port = port + 13
+                cap = _start_server(cap_port; threads=2,
+                    extra=", executor=AsyncExecutor(worker_threads=2, max_pending=8)")
+                try
+                    _wait_ready(cap_port)
+                    resp = roundtrip(cap_port,
+                        "GET /slow HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+                        timeout=10.0)
+                    @test resp !== nothing && startswith(resp, "HTTP/1.1 200")
+                finally
+                    _kill_server(cap)
+                end
+            end
+
+            @testset "max_connections shedding (both backends)" begin
+                for backend in (:uring, :sockets)
+                    cap_port = port + (backend === :uring ? 10 : 11)
+                    cap = _start_server(cap_port;
+                        extra=", max_connections=1, backend=:$backend")
+                    try
+                        _wait_ready(cap_port)
+                        # Hold one connection open (retrying in case the
+                        # readiness probe's close has not been released yet).
+                        held = nothing
+                        for _ in 1:20
+                            c = TestClient(cap_port; timeout=10.0)
+                            try
+                                _send(c, "GET /hello HTTP/1.1\r\nHost: x\r\n\r\n")
+                                if startswith(read_response(c), "HTTP/1.1 200")
+                                    held = c
+                                    break
+                                end
+                            catch
+                            end
+                            _close(c)
+                            sleep(0.1)
+                        end
+                        @test held !== nothing
+                        try
+                            resp = roundtrip(cap_port,
+                                "GET /hello HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+                                timeout=10.0)
+                            @test startswith(resp, "HTTP/1.1 503")
+                            @test occursin("Retry-After: 1", resp)
+                        finally
+                            held === nothing || _close(held)
+                        end
+                    finally
+                        _kill_server(cap)
+                    end
+                end
             end
 
             @testset "stop! drains and returns" begin
                 # Exercise the supported API directly: start a server, then
                 # stop it from another task and require start! to return after
-                # the drain. Wire behavior itself is covered by the subprocess
-                # servers above; keeping this test socket-free makes it
-                # deterministic under Pkg.test's bounds-checked scheduler.
+                # the drain; socket-free keeps it deterministic under Pkg.test.
                 drain_port = port + 2
                 router = Trie()
                 get!(router, "/hello", _ -> text("hello"))

@@ -1,17 +1,6 @@
-# ══════════════════════════════════════════════════════════════════════════════
 # HTTP connection state machine
-#
-# Entry points called by an adapter (via the AbstractIO seam):
-#   http_on_read(io, st, src, n)
-#   http_on_write(io, st, n)
-#   http_retire(io, st) / http_finalize(io, st) / http_expired(st, now)
-#   http_deliver_response(io, st, response)   # async executors only
-#
-# The machine only touches the outside world through `io_*` methods; it has no
-# knowledge of fds, rings, or pools.
-# ══════════════════════════════════════════════════════════════════════════════
 
-# ── Entry points ────────────────────────────────────────────────────────────
+# Entry points
 
 """Bytes `n`..end of a completed read are at `src` (adapter-owned memory)."""
 function http_on_read(io::AbstractIO, st::HTTPConn, src::Ptr{UInt8}, n::Int)
@@ -65,7 +54,7 @@ function _set_deadline!(io::AbstractIO, st::HTTPConn)
     return
 end
 
-# ── Per-route limits (early routing) ────────────────────────────────────────
+# Per-route limits (early routing)
 
 """Route the request as soon as its head is parsed, so per-route limits apply
 before the body is read. The result is reused by dispatch (routing once)."""
@@ -100,7 +89,7 @@ end
 @inline http_expired(st::HTTPConn, now::Float64)::Bool =
     !st.retired && st.deadline != 0.0 && now > st.deadline
 
-# ── Telemetry ───────────────────────────────────────────────────────────────
+# Telemetry
 
 """Start observing the request whose head was just parsed."""
 @inline function _telemetry_begin(io::AbstractIO, st::HTTPConn)
@@ -146,6 +135,10 @@ function http_on_write(io::AbstractIO, st::HTTPConn, n::Int)
         st.stream_ack = nothing
         st.stream_final && _resume_connection(io, st)
         return
+    elseif st.phase == :body
+        # Interim 100-continue flushed: continue reading the body.
+        _pump(io, st)
+        return
     end
 
     _resume_connection(io, st)
@@ -175,7 +168,7 @@ function _resume_connection(io::AbstractIO, st::HTTPConn)
     return
 end
 
-# ── Response delivery ───────────────────────────────────────────────────────
+# Response delivery
 
 """
     http_deliver_response(io, st, response)
@@ -199,7 +192,7 @@ function io_dispatch_async(io::AbstractIO, st::HTTPConn, req::Request)::Bool
     return false
 end
 
-# ── Streaming ───────────────────────────────────────────────────────────────
+# Streaming
 
 """Release a worker blocked on a stream handshake (`false` if it already left)."""
 @inline function _put_ack!(ack::Union{Nothing, Channel{Bool}}, ok::Bool)
@@ -340,7 +333,7 @@ function http_finalize(io::AbstractIO, st::HTTPConn)
     return
 end
 
-# ── Parsing state machine ───────────────────────────────────────────────────
+# Parsing state machine
 
 """Returns `:need_more` when more input is required, `:done` otherwise."""
 function _process(io::AbstractIO, st::HTTPConn)
@@ -358,6 +351,10 @@ function _process(io::AbstractIO, st::HTTPConn)
             return :done
         end
         st.header_len = head_length(st.hbuf)
+        # Method/version drive framing decisions made before dispatch
+        # (per-route limits, Expect, HEAD body suppression).
+        st.http11 = UInt8(minor_version(st.hbuf)) >= 1
+        st.stream_head = Methods.from_string(request_method(st.hbuf, st.rbuf)) == Methods.HEAD
         st.route = _early_route(io, st)
         _telemetry_begin(io, st)
         _prepare_body(io, st) || return :done
@@ -372,6 +369,9 @@ function _process(io::AbstractIO, st::HTTPConn)
         elseif st.rlen < st.header_len + st.body_need
             return :need_more
         end
+        # An interim 100-continue write may still be in flight; its completion
+        # re-pumps and dispatches (http_on_write handles the :body phase).
+        st.inflight == :none || return :need_more
         st.phase = :writing
     end
 
@@ -415,13 +415,11 @@ function _prepare_body(io::AbstractIO, st::HTTPConn)
             st.bodylen = 0
             st.chunklen = 0
             st.fed = st.header_len
-            return true
+        else
+            _respond_and_close(io, st, fail(501, "Not Implemented"))
+            return false
         end
-        _respond_and_close(io, st, fail(501, "Not Implemented"))
-        return false
-    end
-
-    if cl !== nothing
+    elseif cl !== nothing
         if cl > _effective_max_body(io, st)
             _respond_and_close(io, st, fail(413, "Content Too Large"))
             return false
@@ -429,6 +427,30 @@ function _prepare_body(io::AbstractIO, st::HTTPConn)
         st.body_need = cl
     else
         st.body_need = 0
+    end
+
+    # Expect: 100-continue — invite the body. Rejections above (400/413/501)
+    # are final responses and deliberately skip the interim 100.
+    if st.http11 && (st.chunked || st.body_need > 0)
+        expect = PicoHTTPParser.header(st.hbuf, st.rbuf, "expect")
+        if expect !== nothing && contains_token_ci(expect, "100-continue")
+            _queue_continue(io, st) || return false
+        end
+    end
+    return true
+end
+
+const _CONTINUE_BYTES = Vector{UInt8}(codeunits("HTTP/1.1 100 Continue\r\n\r\n"))
+
+"""Queue the interim `100 Continue` so the client starts sending the body."""
+function _queue_continue(io::AbstractIO, st::HTTPConn)::Bool
+    out = io_acquire_buffer(io)
+    n = length(_CONTINUE_BYTES)
+    length(out) < n && resize!(out, n)
+    copyto!(out, 1, _CONTINUE_BYTES, 1, n)
+    if io_write(io, st, out, n) != 0
+        http_finalize(io, st)
+        return false
     end
     return true
 end
@@ -477,7 +499,6 @@ function _feed_chunked!(io::AbstractIO, st::HTTPConn)
         return :partial
     end
 
-    # :done — leftover bytes are the start of the next (pipelined) request.
     # Keep them in `carry`, not `rbuf`: the request head still has to be read
     # from `rbuf` by `_complete_request`, and overwriting it here would corrupt
     # the method/target views.
@@ -496,13 +517,11 @@ function _feed_chunked!(io::AbstractIO, st::HTTPConn)
     return :done
 end
 
-# ── Request completion and response ─────────────────────────────────────────
+# Request completion and response
 
 function _complete_request(io::AbstractIO, st::HTTPConn)
     req = _build_request(st)
     st.close_after = wants_close(req)
-    st.http11 = req.minor_version >= 1
-    st.stream_head = req.method == "HEAD"
     st.stream_chunked = false
     st.stream_final = false
     st.stream_ack = nothing
@@ -587,7 +606,7 @@ function _respond_and_close(io::AbstractIO, st::HTTPConn, response::Response)
     return
 end
 
-# ── Connection close detection ──────────────────────────────────────────────
+# Connection close detection
 
 @inline wants_close(req::PicoHTTPParser.Request)::Bool = wants_close(Request(req))
 @inline wants_close(::Nothing)::Bool = true
