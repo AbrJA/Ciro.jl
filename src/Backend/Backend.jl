@@ -1,0 +1,106 @@
+"""
+    Backend
+
+Low-level async I/O engine built on Linux io_uring.
+Provides completion-based primitives (accept, read, write) that higher-level
+packages (HTTP servers, WebSockets, databases) can build upon.
+
+Design principles:
+- Zero-allocation hot paths (pooled connections & buffers)
+- trim=safe: no eval, no reflection, all concrete types
+- Thread-per-core: one Engine per thread, no cross-thread sharing
+- Composable: event loop is a simple function users can wrap/extend
+"""
+module Backend
+
+import ..Interface: AbstractBackend, start_backend!, stop_backend!
+
+# ── Library path (module-level const required by ccall + juliac) ─────────────
+# In production this becomes Ciro_jll.libciro
+const _LIB = normpath(joinpath(@__DIR__, "..", "..", "lib", "ciro.so"))
+
+"""
+    _LIB_AVAILABLE
+
+Whether the native io_uring library was found at load time. Never call a native
+symbol without checking this first: `using Ciro` and the transport-independent
+pipeline must work without the backend present.
+"""
+const _LIB_AVAILABLE = Ref(false)
+
+function __init__()
+    _LIB_AVAILABLE[] = isfile(_LIB)
+    if !_LIB_AVAILABLE[] && Sys.islinux()
+        @warn """Ciro: native library not found at $_LIB
+        The io_uring backend requires compiling the C library:
+          cd lib && make
+        Without it, `start!()` will fail."""
+    end
+    return
+end
+
+# ── Includes ────────────────────────────────────────────────────────────────
+include("types.jl")
+include("connection.jl")
+include("engine.jl")
+include("pool.jl")
+include("eventloop.jl")
+
+# ── IOUringBackend — concrete AbstractBackend ───────────────────────────────
+
+"""
+    IOUringBackend <: AbstractBackend
+
+Linux io_uring backend (kernel ≥ 5.19). Thread-per-core with SO_REUSEPORT.
+This is the default backend used by `Server`.
+"""
+struct IOUringBackend <: AbstractBackend
+    queue_depth :: Int
+    nworkers    :: Int
+    host        :: String
+    backlog     :: Int
+end
+
+IOUringBackend(; queue_depth::Int=4096, nworkers::Int=Threads.nthreads(),
+               host::AbstractString="0.0.0.0", backlog::Int=8192) =
+    IOUringBackend(queue_depth, nworkers, String(host), backlog)
+
+function start_backend!(backend::IOUringBackend, handler_factory::F, port::Integer;
+                                   running::Threads.Atomic{Bool}=Threads.Atomic{Bool}(true)) where {F}
+    _LIB_AVAILABLE[] ||
+        error("Ciro: native library not found at $_LIB. Compile with: cd lib && make")
+    run_eventloop_threaded!(handler_factory, port;
+                            nthreads=backend.nworkers,
+                            queue_depth=backend.queue_depth,
+                            host=backend.host,
+                            backlog=backend.backlog,
+                            running)
+end
+
+function stop_backend!(::IOUringBackend)
+    nothing  # Stopping is handled via the `running` atomic flag
+end
+
+# ── Public API ──────────────────────────────────────────────────────────────
+export IOUringBackend,
+       Engine, Connection, ConnectionPool, BufferPool,
+       EventType, ACCEPT, READ, WRITE,
+       CompletionEvent,
+       # Engine lifecycle
+       init_engine, close_engine!,
+       # Operations
+       queue_accept!, queue_multishot_accept!, queue_read!, queue_write!,
+       submit!, wait_completion, poll_completion,
+       # Fast-path combined operations
+       accept_and_queue_read!, queue_write_and_close!, queue_read_reuse!,
+       # Connection management
+       create_connection, free_connection!,
+       configure_socket!, close_fd!, shutdown_fd!, conn_fd, conn_buffer, set_conn_fd!, set_conn_op!,
+       # Pools
+       acquire!, release!,
+    PendingWrites, set_pending!, pop_pending!, advance_pending!, pending_slice,
+    mark_close!, should_close!,
+       # Event loop
+       run_eventloop!, run_eventloop_threaded!
+
+end # module Backend

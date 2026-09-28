@@ -1,74 +1,547 @@
-module RouterTests
 using Test
+using Ciro
+using PicoHTTPParser
 
-include(joinpath(@__DIR__, "../src/Ciro.jl"))
-using .Ciro.Routers
-using .Ciro.Tries
-using .Ciro.Types
 
-@testset "Router HTTP Methods" begin
-    router = Router(RouterTrie(), Function[])
+@testset "Router" begin
 
-    handler_get() = "get"
-    handler_post() = "post"
-    handler_put() = "put"
-    handler_delete() = "delete"
-    handler_patch() = "patch"
-    handler_options() = "options"
-    handler_head() = "head"
+    @testset "Static routes" begin
+        r = Trie()
+        get!(r, "/", req -> text("root"))
+        get!(r, "/about", req -> text("about"))
+        post!(r, "/items", req -> text("created"))
 
-    # Test all HTTP method insertions
-    Tries.insert!(router.trie, "GET", "/test", handler_get)
-    Tries.insert!(router.trie, "POST", "/test", handler_post)
-    Tries.insert!(router.trie, "PUT", "/test", handler_put)
-    Tries.insert!(router.trie, "DELETE", "/test", handler_delete)
-    Tries.insert!(router.trie, "PATCH", "/test", handler_patch)
-    Tries.insert!(router.trie, "OPTIONS", "/test", handler_options)
-    Tries.insert!(router.trie, "HEAD", "/test", handler_head)
+        @test matched(route(r, Methods.GET, "/"))
+        @test matched(route(r, Methods.GET, "/about"))
+        @test matched(route(r, Methods.POST, "/items"))
 
-    # Verify each method resolves correctly
-    h, _ = Tries.lookup(router.trie, "GET", "/test")
-    @test h == handler_get
+        # No match — 404
+        @test not_found(route(r, Methods.GET, "/missing"))
 
-    h, _ = Tries.lookup(router.trie, "POST", "/test")
-    @test h == handler_post
+        # Method not allowed — 405
+        result = route(r, Methods.DELETE, "/")
+        @test method_not_allowed(result)
+        @test result.allowed & Methods.bitmask(Methods.GET) != 0
 
-    h, _ = Tries.lookup(router.trie, "PUT", "/test")
-    @test h == handler_put
+        result2 = route(r, Methods.POST, "/")
+        @test method_not_allowed(result2)
+    end
 
-    h, _ = Tries.lookup(router.trie, "DELETE", "/test")
-    @test h == handler_delete
+    @testset "Path parameters" begin
+        r = Trie()
+        get!(r, "/users/:id", req -> text("user"))
+        get!(r, "/users/:id/posts/:post_id", req -> text("post"))
 
-    h, _ = Tries.lookup(router.trie, "PATCH", "/test")
-    @test h == handler_patch
+        # Single param
+        result = route(r, Methods.GET, "/users/42")
+        @test matched(result)
+        raw = Vector{UInt8}("GET /users/42 HTTP/1.1\r\nHost: x\r\n\r\n")
+        req = PicoHTTPParser.parse_request(raw)
+        ctx = Context(req, result.params)
+        resp = result.handler(ctx)
+        @test resp.status == 200
+        @test param(ctx, :id) == "42"
 
-    h, _ = Tries.lookup(router.trie, "OPTIONS", "/test")
-    @test h == handler_options
+        # Multiple params (captures resolve against the routed path)
+        result2 = route(r, Methods.GET, "/users/7/posts/99")
+        @test matched(result2)
+        raw2 = Vector{UInt8}("GET /users/7/posts/99 HTTP/1.1\r\nHost: x\r\n\r\n")
+        req2 = PicoHTTPParser.parse_request(raw2)
+        ctx2 = Context(req2, result2.params)
+        resp2 = result2.handler(ctx2)
+        @test param(ctx2, :id) == "7"
+        @test param(ctx2, :post_id) == "99"
 
-    h, _ = Tries.lookup(router.trie, "HEAD", "/test")
-    @test h == handler_head
+        # No match — wrong depth
+        @test not_found(route(r, Methods.GET, "/users"))
+        @test not_found(route(r, Methods.GET, "/users/1/posts"))
+    end
+
+    @testset "Wildcard routes" begin
+        r = Trie()
+        get!(r, "/files/*", req -> text("wildcard"))
+        get!(r, "/exact", req -> text("exact"))
+
+        @test matched(route(r, Methods.GET, "/files/a"))
+        @test matched(route(r, Methods.GET, "/files/a/b/c"))
+        @test matched(route(r, Methods.GET, "/exact"))
+        @test not_found(route(r, Methods.GET, "/other"))
+    end
+
+    @testset "Wildcard routes respect methods" begin
+        r = Trie()
+        get!(r, "/assets/*", _ -> text("get"))
+        post!(r, "/assets/*", _ -> text("post"))
+
+        get_result = route(r, Methods.GET, "/assets/app.js")
+        post_result = route(r, Methods.POST, "/assets/app.js")
+        delete_result = route(r, Methods.DELETE, "/assets/app.js")
+
+        @test matched(get_result)
+        @test get_result.handler(Ciro.RequestContext(Ciro.Request("GET", "/assets/app.js"))).body == UInt8[0x67, 0x65, 0x74]
+        @test matched(post_result)
+        @test post_result.handler(Ciro.RequestContext(Ciro.Request("POST", "/assets/app.js"))).body == UInt8[0x70, 0x6f, 0x73, 0x74]
+        @test method_not_allowed(delete_result)
+        @test delete_result.allowed & Methods.bitmask(Methods.GET) != 0
+        @test delete_result.allowed & Methods.bitmask(Methods.POST) != 0
+    end
+
+    @testset "Frozen router" begin
+        r = Trie()
+        get!(r, "/ready", _ -> text("ready"))
+        @test freeze!(r) === r
+        @test_throws ArgumentError get!(r, "/late", _ -> text("late"))
+        @test matched(route(r, Methods.GET, "/ready"))
+    end
+
+    @testset "Endpoint metadata" begin
+        r = Trie()
+        endpoint = Endpoint(_ -> text("ok"); metadata=:model)
+        get!(r, "/predict", endpoint)
+        result = route(r, Methods.GET, "/predict")
+
+        @test matched(result)
+        @test result.handler isa Endpoint
+        @test result.handler.metadata === :model
+        @test result.handler(Context(Ciro.Request("GET", "/predict"))).status == 200
+    end
+
+    @testset "Priority: static > param > wildcard" begin
+        r = Trie()
+        get!(r, "/items/special", req -> text("static"))
+        get!(r, "/items/:id", req -> text("param"))
+        get!(r, "/items/*", req -> text("wildcard"))
+
+        raw = Vector{UInt8}("GET /items/special HTTP/1.1\r\nHost: x\r\n\r\n")
+        req = PicoHTTPParser.parse_request(raw)
+
+        # Static wins over param
+        result = route(r, Methods.GET, "/items/special")
+        @test matched(result)
+        resp = result.handler(Context(req, result.params))
+        @test String(copy(resp.body)) == "static"
+
+        # Param for other values
+        result2 = route(r, Methods.GET, "/items/123")
+        @test matched(result2)
+        resp2 = result2.handler(Context(req, result2.params))
+        @test String(copy(resp2.body)) == "param"
+
+        # Wildcard for deeper paths
+        result3 = route(r, Methods.GET, "/items/a/b")
+        @test matched(result3)
+        resp3 = result3.handler(Context(req, result3.params))
+        @test String(copy(resp3.body)) == "wildcard"
+    end
+
+    @testset "Multiple methods same path" begin
+        r = Trie()
+        get!(r, "/resource", req -> text("get"))
+        post!(r, "/resource", req -> text("post"))
+        put!(r, "/resource", req -> text("put"))
+        delete!(r, "/resource", req -> text("delete"))
+
+        raw = Vector{UInt8}("GET /resource HTTP/1.1\r\nHost: x\r\n\r\n")
+        req = PicoHTTPParser.parse_request(raw)
+
+        r1 = route(r, Methods.GET, "/resource")
+        @test String(r1.handler(Context(req, r1.params)).body) == "get"
+
+        r2 = route(r, Methods.POST, "/resource")
+        @test String(r2.handler(Context(req, r2.params)).body) == "post"
+
+        r3 = route(r, Methods.PUT, "/resource")
+        @test String(r3.handler(Context(req, r3.params)).body) == "put"
+
+        r4 = route(r, Methods.DELETE, "/resource")
+        @test String(r4.handler(Context(req, r4.params)).body) == "delete"
+    end
+
+    @testset "Handler invocation with params" begin
+        r = Trie()
+        get!(r, "/hello/:name", ctx -> text("Hello, $(param(ctx, :name))!"))
+
+        raw = Vector{UInt8}("GET /hello/Julia HTTP/1.1\r\nHost: x\r\n\r\n")
+        req = PicoHTTPParser.parse_request(raw)
+
+        result = route(r, Methods.GET, "/hello/Julia")
+        resp = result.handler(Context(req, result.params))
+        @test resp.status == 200
+        @test String(copy(resp.body)) == "Hello, Julia!"
+    end
+
+    @testset "Trailing slashes normalized" begin
+        r = Trie()
+        get!(r, "/path", req -> text("no-slash"))
+
+        @test matched(route(r, Methods.GET, "/path/"))
+        @test matched(route(r, Methods.GET, "/path"))
+    end
+
+    @testset "Typed parameters (:id::Int)" begin
+        r = Trie()
+        get!(r, "/users/:id::Int", ctx -> text("user $(param(ctx, :id))"))
+        get!(r, "/files/:name", ctx -> text("file $(param(ctx, :name))"))
+
+        raw = Vector{UInt8}("GET /users/42 HTTP/1.1\r\nHost: x\r\n\r\n")
+        req = PicoHTTPParser.parse_request(raw)
+
+        # Valid integer
+        result = route(r, Methods.GET, "/users/42")
+        @test matched(result)
+        ctx = Context(req, result.params)
+        resp = result.handler(ctx)
+        @test String(copy(resp.body)) == "user 42"
+        @test param(ctx, Int, :id) == 42
+
+        # Invalid integer → no match on this param, falls through
+        @test not_found(route(r, Methods.GET, "/users/abc"))
+
+        # Negative integer
+        result2 = route(r, Methods.GET, "/users/-5")
+        @test matched(result2)
+
+        # Untyped param accepts anything
+        result3 = route(r, Methods.GET, "/files/report.pdf")
+        @test matched(result3)
+        resp3 = result3.handler(Context(req, result3.params))
+        @test String(copy(resp3.body)) == "file report.pdf"
+    end
+
+    @testset "Route groups" begin
+        r = Trie()
+        group!(r, "/api/v1") do g
+            get!(g, "/users", req -> text("users list"))
+            post!(g, "/users", req -> text("user created"))
+            get!(g, "/items/:id", ctx -> text("item $(param(ctx, :id))"))
+        end
+
+        raw = Vector{UInt8}("GET /api/v1/users HTTP/1.1\r\nHost: x\r\n\r\n")
+        req = PicoHTTPParser.parse_request(raw)
+
+        result = route(r, Methods.GET, "/api/v1/users")
+        @test matched(result)
+        @test String(result.handler(Context(req, result.params)).body) == "users list"
+
+        result2 = route(r, Methods.POST, "/api/v1/users")
+        @test matched(result2)
+        @test String(result2.handler(Context(req, result2.params)).body) == "user created"
+
+        result3 = route(r, Methods.GET, "/api/v1/items/77")
+        @test matched(result3)
+        @test String(result3.handler(Context(req, result3.params)).body) == "item 77"
+
+        # Outside group → 404
+        @test not_found(route(r, Methods.GET, "/api/v1/other"))
+    end
+
+    @testset "405 with Allow header in dispatch" begin
+        router = Trie()
+        get!(router, "/api/items", req -> text("list"))
+        post!(router, "/api/items", req -> text("create"))
+
+        server = Server(; router, port=19996)
+
+        # PUT /api/items → 405
+        raw = Vector{UInt8}("PUT /api/items HTTP/1.1\r\nHost: x\r\n\r\n")
+        req = PicoHTTPParser.parse_request(raw)
+        resp = Ciro.Core._dispatch(server, req)
+        @test resp.status == 405
+        allow_hdr = header(resp, "Allow")
+        @test contains(allow_hdr, "GET")
+        @test contains(allow_hdr, "POST")
+
+        # GET /nonexistent → 404
+        raw2 = Vector{UInt8}("GET /nonexistent HTTP/1.1\r\nHost: x\r\n\r\n")
+        req2 = PicoHTTPParser.parse_request(raw2)
+        resp2 = Ciro.Core._dispatch(server, req2)
+        @test resp2.status == 404
+    end
+
+    @testset "HEAD auto-generated from GET" begin
+        r = Trie()
+        get!(r, "/page", req -> text("hello"))
+
+        raw = Vector{UInt8}("HEAD /page HTTP/1.1\r\nHost: x\r\n\r\n")
+        req = PicoHTTPParser.parse_request(raw)
+
+        result = route(r, Methods.HEAD, "/page")
+        @test matched(result)
+        resp = result.handler(Context(req, result.params))
+        @test resp.status == 200
+        @test isempty(resp.body)  # HEAD = no body
+    end
+
+    @testset "Typed parameters - Float64" begin
+        r = Trie()
+        get!(r, "/scores/:val::Float64", ctx -> text("score: $(param(ctx, :val))"))
+
+        # Valid float
+        result = route(r, Methods.GET, "/scores/3.14")
+        @test matched(result)
+
+        # Integer is valid float
+        result2 = route(r, Methods.GET, "/scores/42")
+        @test matched(result2)
+
+        # Negative float
+        result3 = route(r, Methods.GET, "/scores/-1.5")
+        @test matched(result3)
+
+        # Invalid float
+        @test not_found(route(r, Methods.GET, "/scores/abc"))
+
+        # Double dot invalid
+        @test not_found(route(r, Methods.GET, "/scores/1.2.3"))
+    end
+
+    @testset "Typed parameters - UUID" begin
+        r = Trie()
+        get!(r, "/items/:uuid::UUID", ctx -> text("uuid"))
+
+        # Valid UUID length (36 chars)
+        result = route(r, Methods.GET, "/items/550e8400-e29b-41d4-a716-446655440000")
+        @test matched(result)
+
+        # Invalid UUID length
+        @test not_found(route(r, Methods.GET, "/items/short"))
+        @test not_found(route(r, Methods.GET, "/items/too-long-string-that-is-not-a-valid-uuid"))
+    end
+
+    @testset "Nested route groups" begin
+        r = Trie()
+        group!(r, "/api") do api
+            group!(api, "/v2") do v2
+                get!(v2, "/items", ctx -> text("nested items"))
+                get!(v2, "/items/:id::Int", ctx -> text("item $(param(ctx, :id))"))
+            end
+        end
+
+        @test matched(route(r, Methods.GET, "/api/v2/items"))
+        @test matched(route(r, Methods.GET, "/api/v2/items/5"))
+        @test not_found(route(r, Methods.GET, "/api/v2/items/abc"))
+        @test not_found(route(r, Methods.GET, "/api/v3/items"))
+    end
+
+    @testset "Empty path segments handled" begin
+        r = Trie()
+        get!(r, "/a/b/c", ctx -> text("abc"))
+
+        # Double slashes are treated as empty segments (skipped)
+        @test matched(route(r, Methods.GET, "/a/b/c"))
+        @test matched(route(r, Methods.GET, "//a//b//c"))
+    end
+
+    @testset "All HTTP methods" begin
+        r = Trie()
+        get!(r, "/r", ctx -> text("get"))
+        post!(r, "/r", ctx -> text("post"))
+        put!(r, "/r", ctx -> text("put"))
+        delete!(r, "/r", ctx -> text("delete"))
+        patch!(r, "/r", ctx -> text("patch"))
+        head!(r, "/r", ctx -> text("head"))
+        options!(r, "/r", ctx -> text("options"))
+
+        @test matched(route(r, Methods.GET, "/r"))
+        @test matched(route(r, Methods.POST, "/r"))
+        @test matched(route(r, Methods.PUT, "/r"))
+        @test matched(route(r, Methods.DELETE, "/r"))
+        @test matched(route(r, Methods.PATCH, "/r"))
+        @test matched(route(r, Methods.HEAD, "/r"))
+        @test matched(route(r, Methods.OPTIONS, "/r"))
+    end
+
+    @testset "Wildcard at root" begin
+        r = Trie()
+        get!(r, "/*", ctx -> text("catch-all"))
+
+        @test matched(route(r, Methods.GET, "/anything"))
+        @test matched(route(r, Methods.GET, "/deep/nested/path"))
+    end
+
+    @testset "Prefix normalization in groups" begin
+        r = Trie()
+        # Without leading slash
+        group!(r, "api") do g
+            get!(g, "/test", ctx -> text("ok"))
+        end
+        @test matched(route(r, Methods.GET, "/api/test"))
+
+        # With trailing slash
+        group!(r, "/v1/") do g
+            get!(g, "/data", ctx -> text("data"))
+        end
+        @test matched(route(r, Methods.GET, "/v1/data"))
+    end
+
+    @testset "Multiple params same level" begin
+        r = Trie()
+        get!(r, "/a/:x/b/:y/c/:z", ctx -> text("$(param(ctx, :x))-$(param(ctx, :y))-$(param(ctx, :z))"))
+
+        result = route(r, Methods.GET, "/a/1/b/2/c/3")
+        @test matched(result)
+        raw = Vector{UInt8}("GET /a/1/b/2/c/3 HTTP/1.1\r\nHost: x\r\n\r\n")
+        req = PicoHTTPParser.parse_request(raw)
+        ctx = Context(req, result.params)
+        @test param(ctx, :x) == "1"
+        @test param(ctx, :y) == "2"
+        @test param(ctx, :z) == "3"
+    end
+
+    @testset "Register and match root" begin
+        r = Trie()
+        get!(r, "/", ctx -> text("root"))
+        post!(r, "/", ctx -> text("post root"))
+
+        @test matched(route(r, Methods.GET, "/"))
+        @test matched(route(r, Methods.POST, "/"))
+        @test method_not_allowed(route(r, Methods.DELETE, "/"))
+    end
+
+    @testset "Long paths" begin
+        r = Trie()
+        get!(r, "/a/b/c/d/e/f/g/h", ctx -> text("deep"))
+
+        @test matched(route(r, Methods.GET, "/a/b/c/d/e/f/g/h"))
+        @test not_found(route(r, Methods.GET, "/a/b/c/d/e/f/g"))
+        @test not_found(route(r, Methods.GET, "/a/b/c/d/e/f/g/h/i"))
+    end
+
+    @testset "Param with special chars" begin
+        r = Trie()
+        get!(r, "/files/:name", ctx -> text(param(ctx, :name)))
+
+        # Params can contain dots, dashes, underscores
+        result = route(r, Methods.GET, "/files/my-file_v2.tar.gz")
+        @test matched(result)
+        raw = Vector{UInt8}("GET /files/my-file_v2.tar.gz HTTP/1.1\r\nHost: x\r\n\r\n")
+        req = PicoHTTPParser.parse_request(raw)
+        ctx = Context(req, result.params)
+        @test param(ctx, :name) == "my-file_v2.tar.gz"
+    end
+
+    @testset "405 bitmask includes all methods" begin
+        r = Trie()
+        get!(r, "/m", ctx -> text("g"))
+        post!(r, "/m", ctx -> text("p"))
+        put!(r, "/m", ctx -> text("u"))
+
+        result = route(r, Methods.DELETE, "/m")
+        @test method_not_allowed(result)
+        # Bitmask should have GET, POST, PUT + auto-HEAD
+        mask = result.allowed
+        @test (mask & Methods.bitmask(Methods.GET)) != 0
+        @test (mask & Methods.bitmask(Methods.POST)) != 0
+        @test (mask & Methods.bitmask(Methods.PUT)) != 0
+        @test (mask & Methods.bitmask(Methods.HEAD)) != 0
+    end
+
+    @testset "Group proxy - all methods" begin
+        r = Trie()
+        group!(r, "/g") do g
+            get!(g, "/x", ctx -> text("g"))
+            post!(g, "/x", ctx -> text("p"))
+            put!(g, "/x", ctx -> text("u"))
+            delete!(g, "/x", ctx -> text("d"))
+            patch!(g, "/x", ctx -> text("pa"))
+            head!(g, "/x", ctx -> text("h"))
+            options!(g, "/x", ctx -> text("o"))
+        end
+
+        @test matched(route(r, Methods.GET, "/g/x"))
+        @test matched(route(r, Methods.POST, "/g/x"))
+        @test matched(route(r, Methods.PUT, "/g/x"))
+        @test matched(route(r, Methods.DELETE, "/g/x"))
+        @test matched(route(r, Methods.PATCH, "/g/x"))
+        @test matched(route(r, Methods.HEAD, "/g/x"))
+        @test matched(route(r, Methods.OPTIONS, "/g/x"))
+    end
+
+    @testset "routing allocation budget and inference" begin
+        r = Trie()
+        get!(r, "/fixed", _ -> text("ok"))
+        get!(r, "/users/:id::Int", _ -> text("u"))
+        freeze!(r)
+
+        # Consume the result inside the measured function: returning the
+        # non-isbits RouteResult across the measurement boundary boxes it on
+        # older Julia, which would measure the harness, not routing.
+        static_route() = (res = route(r, Methods.GET, "/fixed"); matched(res) ? 1 : 0)
+        param_route()  = (res = route(r, Methods.GET, "/users/42"); length(res.params))
+        static_route(); param_route()
+
+        @test (@allocated static_route()) <= 64
+        @test (@allocated param_route()) <= 256
+        @test @inferred(route(r, Methods.GET, "/fixed")) isa RouteResult
+    end
+
+    @testset "scratch route! is zero-allocation" begin
+        r = Trie()
+        get!(r, "/fixed", _ -> text("ok"))
+        get!(r, "/users/:id::Int", _ -> text("u"))
+        freeze!(r)
+
+        captures = Pair{Symbol,UnitRange{Int}}[]
+        route!(r, Methods.GET, "/fixed", captures)      # warm capacity
+        route!(r, Methods.GET, "/users/42", captures)
+
+        static!() = (res = route!(r, Methods.GET, "/fixed", captures); matched(res) ? 1 : 0)
+        param!()  = (res = route!(r, Methods.GET, "/users/42", captures); length(res.params))
+        static!(); param!()
+
+        @test (@allocated static!()) == 0
+        @test (@allocated param!()) == 0
+        @test @inferred(route!(r, Methods.GET, "/users/42", captures)) isa RouteResult
+
+        # The served result aliases the scratch; ranges resolve against the
+        # routed path via the context and `copy(ctx)` materializes strings.
+        result = route!(r, Methods.GET, "/users/42", captures)
+        @test result.params === captures
+        req = Request("GET", "/users/42")
+        ctx = RequestContext(req, result.params)
+        @test param(ctx, :id) == "42"
+        @test param(ctx, Int, :id) == 42
+        @test copy(ctx).params == ["id" => "42"]
+        @test @inferred(param(ctx, :id)) isa String
+        @test @inferred(dispatch(r, SyncExecutor(), DefaultCatcher(), req, captures)) isa Response
+
+        # Public `route` params are owned strings, independent of any request.
+        owned = route(r, Methods.GET, "/users/42")
+        @test owned.params == [:id => "42"]
+        other = RequestContext(Request("GET", "/other/x"), owned.params)
+        @test param(other, :id) == "42"
+        @test isempty(route(r, Methods.GET, "/fixed").params)
+    end
+
+    @testset "per-route limits" begin
+        r = Trie()
+        get!(r, "/small", _ -> text("s");
+             limits=RouteLimits(max_body_size=16, body_timeout_ms=250))
+        post!(r, "/plain", _ -> text("p"))
+        group!(r, "/api") do g
+            post!(g, "/up", _ -> text("u"); limits=RouteLimits(max_body_size=4))
+        end
+
+        result = route(r, Methods.GET, "/small")
+        @test result.handler isa Endpoint
+        @test route_limits(result.handler) == RouteLimits(max_body_size=16, body_timeout_ms=250)
+
+        # Auto-HEAD inherits the GET route's limits.
+        head_result = route(r, Methods.HEAD, "/small")
+        @test route_limits(head_result.handler) == RouteLimits(max_body_size=16, body_timeout_ms=250)
+
+        # Group proxy routes carry their limits.
+        @test route_limits(route(r, Methods.POST, "/api/up").handler) ==
+              RouteLimits(max_body_size=4)
+
+        # Routes without limits inherit the server configuration.
+        @test route_limits(route(r, Methods.POST, "/plain").handler) === nothing
+        @test route_limits(nothing) === nothing
+        @test route_limits(_ -> text("x")) === nothing
+
+        @test_throws ArgumentError RouteLimits(max_body_size=-2)
+        @test_throws ArgumentError RouteLimits(body_timeout_ms=-2)
+        @test RouteLimits().max_body_size == -1
+        @test RouteLimits().body_timeout_ms == -1
+    end
 end
-
-@testset "lookup! with Pre-allocated Params" begin
-    router = RouterTrie()
-
-    handler() = "handler"
-    Tries.insert!(router, "GET", "/users/:id/posts/:post_id", handler)
-
-    # Test with pre-allocated dict
-    params = Dict{String,String}()
-    h, p = Tries.lookup!(router, "GET", "/users/123/posts/456", params)
-
-    @test h == handler
-    @test p["id"] == "123"
-    @test p["post_id"] == "456"
-    @test p === params  # Same dict instance (no allocation)
-
-    # Reuse the dict
-    empty!(params)
-    h, p = Tries.lookup!(router, "GET", "/users/789/posts/101", params)
-    @test p["id"] == "789"
-    @test p["post_id"] == "101"
-end
-
-end # module
