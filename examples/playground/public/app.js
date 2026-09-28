@@ -2,6 +2,7 @@
 
 const $ = (id) => document.getElementById(id);
 const PORTS = window.CIRO_PORTS ?? { async: Number(location.port), sync: Number(location.port) + 1 };
+const THINK_MS = window.CIRO_THINK_MS ?? 400;
 
 const state = { executor: "async", es: null, reader: null };
 
@@ -152,12 +153,18 @@ async function slowAndPing() {
   const health = await request("/healthz", {}, 5000);
   const ping = Math.round(performance.now() - t1);
   const slowRes = await slow;
+  const slowMs = Math.round(performance.now() - t0);
+  const responsive = ping < 150;
+  const verdict = state.executor === "async"
+    ? (responsive
+        ? "→ executor=async: the handler ran on a worker; the engine stayed responsive"
+        : "→ executor=async: health was slow (workers saturated?)")
+    : (responsive
+        ? "→ executor=sync: not blocked — expected only with :uring and one worker"
+        : "→ executor=sync: the handler ran on the engine; health waited for it");
   $("predict-out").textContent =
-    `slow handler: HTTP ${slowRes.status} in ${Math.round(performance.now() - t0)} ms\n` +
-    `health during: HTTP ${health.status} in ${ping} ms\n` +
-    (ping < 150
-      ? "→ async: the event loop stayed responsive"
-      : "→ sync: the slow handler blocked other requests");
+    `slow handler: HTTP ${slowRes.status} in ${slowMs} ms (think ${THINK_MS} ms)\n` +
+    `health during: HTTP ${health.status} in ${ping} ms\n` + verdict;
 }
 
 // ── Upload, routes, admin ───────────────────────────────────────────────────

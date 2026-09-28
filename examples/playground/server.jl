@@ -258,9 +258,10 @@ function build_playground(;
     _post!(path, h; kw...) = post!(router, path, WithCORS(h); kw...)
     _options!(path)        = options!(router, path, cors_preflight)
 
-    # Page (with both ports injected) and assets
+    # Page (with both ports and the think time injected) and assets
     page = replace(read(joinpath(PUBLIC_DIR, "index.html"), String),
-                   "__CIRO_PORTS__" => "{\"async\":$(ports[1]),\"sync\":$(ports[2])}")
+                   "__CIRO_PORTS__"    => "{\"async\":$(ports[1]),\"sync\":$(ports[2])}",
+                   "__CIRO_THINK_MS__" => string(round(Int, think_s * 1000)))
     _get!("/", _ -> html(page))
     _get!("/static/*", serve_static)
 

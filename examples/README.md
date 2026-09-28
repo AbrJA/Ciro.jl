@@ -96,7 +96,18 @@ curl -s localhost:8080/admin/stats -H 'X-Admin-Token: demo-token'
 - **Async vs sync:** the async server runs slow handlers on workers, so other
   requests stay responsive. On the sync server with `:uring` and one worker
   (`CIRO_WORKERS=1`), a slow handler blocks the engine — press **Slow + ping
-  health** on both to see it.
+  health** on both to see it. Expected numbers (think = `CIRO_THINK_MS`,
+  default 400 ms):
+
+  | server | slow handler | health during | verdict |
+  |---|---|---|---|
+  | async `:8080` | ≈ think | a few ms | responsive |
+  | sync `:8081` (`:uring`, 1 worker) | ≈ think | ≈ think − 30 ms | blocked |
+
+  The verdict line now states the selected executor; if the numbers contradict
+  it, the page says so. With `:sockets` each connection has its own task, so a
+  sync handler blocks only its own connection and health stays fast — the
+  blocking demo needs `:uring` with one engine, as the example starts it.
 - **Each open stream holds one async worker** for its lifetime; the pool
   (`CIRO_WORKER_THREADS`, default 32) is the concurrent-stream ceiling.
 - **SSE framing:** `sse()`'s sender emits one event per call — pass data, not
@@ -106,5 +117,6 @@ curl -s localhost:8080/admin/stats -H 'X-Admin-Token: demo-token'
   `OPTIONS` preflight for the paths the UI calls with `DELETE` or
   `X-Admin-Token`. (A built-in CORS helper is a candidate for the library
   backlog; the example shows the pattern for now.)
-- The example is tested by `test/playground_test.jl` (48 assertions, real
-  clients, `:uring` when the native library is present) as part of `Pkg.test()`.
+- The playground is a **manual** tool: run it, click around, watch it under
+  load. It is deliberately not part of `Pkg.test()` — use it to find real-world
+  issues, not as CI coverage.

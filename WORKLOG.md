@@ -12,7 +12,7 @@ State at pause:
 - `dev`: Stages 0–2.5, async executor, streaming/SSE, zero-alloc route params,
   telemetry, per-route limits, audit fixes, 503 shedding, `Expect:
   100-continue`, and the single `examples/playground` committed. `Pkg.test()` →
-  **962 passed, 0 failed on both Julia 1.10.12 and 1.13.0**; acceptance 167/167
+  **910 passed, 0 failed on both Julia 1.10.12 and 1.13.0**; acceptance 167/167
   (both backends); PicoHTTPParser `0.3.0` resolves from General.
 - Uncommitted (this session): none (this section describes the committed state).
 
@@ -27,11 +27,10 @@ State at pause:
   telemetry (Prometheus + JSON + access-log tail), admin token + maintenance
   drain, `copy(ctx)` audit, custom logger/catcher/telemetry, static files,
   shedding, and graceful shutdown.
-- `test/playground_test.jl` drives it with real clients (48 + 4 assertions) on
-  `:uring` when the native library is present: incremental SSE with time gaps,
-  chunked body de-framed, responsiveness during a slow handler, sync blocking,
-  10-way concurrency, abort recovery, 200/503 shedding, routing/limits/admin.
-  Passes with 1 and 4 threads.
+- The playground is **manual-only**: the user drives it to probe real-world
+  behavior. It is deliberately kept out of `Pkg.test()` (the earlier
+  `test/playground_test.jl` was removed); its checks (SSE timing, sync
+  blocking, shedding, admin) are reproduced by hand via the UI/curl.
 - Bugs found and fixed while building it:
   - `StreamWriter` only implemented `unsafe_write(::Ptr{UInt8}, ::UInt)`, so
     `print(w, ' ')`/`write(w, UInt8)` hit Base's "does not support byte I/O"
@@ -41,8 +40,7 @@ State at pause:
   - Two servers in one process add a second engine: with the async server
     capped to `nthreads-1`, the sync engine took the last thread and starved
     the async workers (streams stalled after one token). The example budgets
-    `max(1, min(requested, nthreads-2))` async engines and prints it; a unit
-    test pins the budget.
+    `max(1, min(requested, nthreads-2))` async engines and prints it.
 - CORS + ports fix: the two servers are different origins, so routes are
   wrapped in `WithCORS` and `OPTIONS` preflight is registered for the paths the
   UI calls with `DELETE`/`X-Admin-Token` (a root `OPTIONS` wildcard would turn
@@ -53,7 +51,7 @@ State at pause:
   "async" silently hit the sync server.
 - The `JSON` test extra was removed (no example needs it now).
 - Earlier fixes kept: `copy(ctx)` param keys (Symbols), async worker cap.
-- Gates: `Pkg.test()` 962; acceptance 167/167.
+- Gates: `Pkg.test()` 910 (playground is manual-only); acceptance 167/167.
 
 ### Gap-closing iteration (committed, this session)
 - `b123167` — `max_connections` overflow is answered with a pre-serialized

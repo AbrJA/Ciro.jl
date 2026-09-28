@@ -227,9 +227,9 @@ Everything in §3.3 is implemented, plus the `HTTP`/`Backend` extraction:
   reported to telemetry.
 - Example: `examples/playground` — one app that exercises the library end to end
   (routing, typed params, SSE/chunked streaming, async vs sync executors,
-  per-route limits, telemetry, admin, static files) with a UI; driven by
-  `test/playground_test.jl` (real clients, `:uring` when available).
-- Gates: `Pkg.test()` → 926 passed, 0 failed on Julia 1.10.12 and 1.13.0;
+  per-route limits, telemetry, admin, static files) with a UI. Manual tool only:
+  run it to probe real-world behavior; it is not part of `Pkg.test()`.
+- Gates: `Pkg.test()` → 910 passed, 0 failed on Julia 1.10.12 and 1.13.0;
   acceptance 167/167, also under `--check-bounds=yes`.
 
 Still open: compiled routing, HTTP/2/TLS (see §4.2 and §9).
