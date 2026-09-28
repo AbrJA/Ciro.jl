@@ -1,4 +1,3 @@
-# ══════════════════════════════════════════════════════════════════════════════
 # Ciro.jl — C library Makefile
 #
 # Targets:
@@ -12,30 +11,27 @@
 #     prefix  — set by BB (e.g. /workspace/destdir)
 #     DLEXT   — set by BB (so / dylib / dll)
 #   Example: make install prefix=/workspace/destdir DLEXT=so
-# ══════════════════════════════════════════════════════════════════════════════
 
 CC      := gcc
 SRC     := ciro.c
 LIB     := ciro.so
 
-# ── Compiler flags ───────────────────────────────────────────────────────────
+# Compiler flags
 CFLAGS_COMMON := -fPIC -std=c11 -Wall -Wextra -Wpedantic
 CFLAGS_RELEASE := -O3 -march=native -DNDEBUG
 CFLAGS_DEBUG   := -O0 -g3 -fsanitize=address,undefined
 
-# ── liburing linkage ─────────────────────────────────────────────────────────
+# liburing linkage
 # Use pkg-config when available; fall back to plain -luring.
 URING_CFLAGS := $(shell pkg-config --cflags liburing 2>/dev/null)
 URING_LIBS   := $(shell pkg-config --libs   liburing 2>/dev/null || echo -luring)
 
-# ── BinaryBuilder install path ───────────────────────────────────────────────
+# BinaryBuilder install path
 prefix  ?= $(abspath ..)
 DLEXT   ?= so
 DESTLIB  = $(prefix)/lib/libciro.$(DLEXT)
 
-# ══════════════════════════════════════════════════════════════════════════════
 # Rules
-# ══════════════════════════════════════════════════════════════════════════════
 
 .PHONY: all debug clean install check-deps
 

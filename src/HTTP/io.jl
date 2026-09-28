@@ -1,13 +1,6 @@
-# ══════════════════════════════════════════════════════════════════════════════
 # AbstractIO — the byte-transport seam
-#
-# The HTTP layer consumes this contract; a backend adapter implements it
-# (io_uring today; blocking sockets + Timer later). The HTTP layer never sees
-# fds, rings, or pools.
-#
 # Return-code convention: 0 is success, non-zero is fatal for the connection
 # (the caller retires it). No operation may be silently dropped.
-# ══════════════════════════════════════════════════════════════════════════════
 
 """
     AbstractIO

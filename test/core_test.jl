@@ -7,7 +7,6 @@ using PicoHTTPParser
     @testset "Response serialization" begin
         buf = Vector{UInt8}(undef, 4096)
 
-        # Simple 200 text response
         resp = text("Hello")
         n = Ciro.Core.serialize_response!(buf, resp)
         output = String(copy(buf[1:n]))
@@ -16,21 +15,18 @@ using PicoHTTPParser
         @test contains(output, "Content-Length: 5\r\n")
         @test endswith(output, "\r\n\r\nHello")
 
-        # 404 error
         resp = fail(404, "Not Found")
         n = Ciro.Core.serialize_response!(buf, resp)
         output = String(copy(buf[1:n]))
         @test startswith(output, "HTTP/1.1 404 Not Found\r\n")
         @test contains(output, "Content-Length: 9\r\n")
 
-        # Empty body (204)
         resp = Response(204, Pair{String,String}[], UInt8[])
         n = Ciro.Core.serialize_response!(buf, resp)
         output = String(copy(buf[1:n]))
         @test startswith(output, "HTTP/1.1 204 No Content\r\n")
         @test contains(output, "Content-Length: 0\r\n")
 
-        # Response with multiple headers
         resp = Response(200, [
             "Content-Type" => "text/html",
             "X-Custom" => "value",
@@ -61,7 +57,6 @@ using PicoHTTPParser
         router = Trie()
         get!(router, "/", req -> text("hi"))
 
-        # Default parameters
         server = Server(; router)
         @test server.config.host == "0.0.0.0"
         @test server.config.port == 8080
@@ -72,7 +67,6 @@ using PicoHTTPParser
         @test server.executor isa SyncExecutor
         @test server.runtime.running[] == false
 
-        # Custom parameters
         server2 = Server(; router, port=3000, host="127.0.0.1", max_body_size=5_000_000)
         @test server2.config.port == 3000
         @test server2.config.host == "127.0.0.1"
@@ -103,20 +97,17 @@ using PicoHTTPParser
 
         server = Server(; router, port=19998)
 
-        # Normal dispatch
         raw = Vector{UInt8}("GET /ok HTTP/1.1\r\nHost: x\r\n\r\n")
         req = PicoHTTPParser.parse_request(raw)
         resp = Ciro.Core._dispatch(server, req)
         @test resp.status == 200
         @test String(copy(resp.body)) == "200"
 
-        # 404 for unregistered
         raw2 = Vector{UInt8}("GET /missing HTTP/1.1\r\nHost: x\r\n\r\n")
         req2 = PicoHTTPParser.parse_request(raw2)
         resp2 = Ciro.Core._dispatch(server, req2)
         @test resp2.status == 404
 
-        # Error handler catches exceptions
         raw3 = Vector{UInt8}("GET /error HTTP/1.1\r\nHost: x\r\n\r\n")
         req3 = PicoHTTPParser.parse_request(raw3)
         resp3 = Ciro.Core._dispatch(server, req3)
@@ -130,7 +121,6 @@ using PicoHTTPParser
         @test resp4.status == 200
         @test String(copy(resp4.body)) == "42"
 
-        # 405 for wrong method on existing path
         raw5 = Vector{UInt8}("POST /ok HTTP/1.1\r\nHost: x\r\n\r\n")
         req5 = PicoHTTPParser.parse_request(raw5)
         resp5 = Ciro.Core._dispatch(server, req5)
@@ -327,28 +317,22 @@ using PicoHTTPParser
         post!(router, "/upload", ctx -> text("ok"))
         server = Server(; router, port=19990, max_body_size=10)
 
-        # bytes_read is determined by what the C engine reads; we simulate via _handle_read
-        # Instead test the direct check: bytes_read > max_body_size → 413
-        # We do this by checking the condition in _dispatch indirectly:
-        # The dispatch itself doesn't check body size (that's in _handle_read).
-        # Test the 413 response builder is correct.
+        # Body-size enforcement lives in _handle_read, not _dispatch; this only
+        # verifies the 413 response builder used there.
         resp_413 = fail(413, "Content Too Large")
         @test resp_413.status == 413
         @test String(copy(resp_413.body)) == "Content Too Large"
     end
 
     @testset "_wants_close - case insensitive" begin
-        # Lower-case connection header
         raw = Vector{UInt8}("GET / HTTP/1.1\r\nhost: x\r\nconnection: close\r\n\r\n")
         req = PicoHTTPParser.parse_request(raw)
         @test Ciro.Core._wants_close(req) == true
 
-        # Mixed case value
         raw2 = Vector{UInt8}("GET / HTTP/1.1\r\nHost: x\r\nConnection: Close\r\n\r\n")
         req2 = PicoHTTPParser.parse_request(raw2)
         @test Ciro.Core._wants_close(req2) == true
 
-        # keep-alive
         raw3 = Vector{UInt8}("GET / HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n")
         req3 = PicoHTTPParser.parse_request(raw3)
         @test Ciro.Core._wants_close(req3) == false
@@ -376,7 +360,6 @@ using PicoHTTPParser
 
     @testset "Serialization - custom status codes" begin
         buf = Vector{UInt8}(undef, 4096)
-        # Known status
         resp = Response(201, ["Content-Type" => "text/plain"], "created")
         n = Ciro.Core.serialize_response!(buf, resp)
         output = String(copy(buf[1:n]))

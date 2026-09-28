@@ -1,6 +1,4 @@
-# ══════════════════════════════════════════════════════════════════════════════
 # Response Type & Builders
-# ══════════════════════════════════════════════════════════════════════════════
 
 """
     Response
@@ -61,7 +59,7 @@ function _validate_headers(headers::Vector{Pair{String,String}})
     return nothing
 end
 
-# ── Response Builders ───────────────────────────────────────────────────────
+# Response Builders
 
 function text(body::String; status::Int=200)
     Response(status, ["Content-Type" => "text/plain; charset=utf-8"], body)
@@ -89,9 +87,7 @@ end
 
 export Response, text, html, json, redirect, fail
 
-# ══════════════════════════════════════════════════════════════════════════════
 # Status Line Constants
-# ══════════════════════════════════════════════════════════════════════════════
 
 const STATUS = let
     v = fill("", 600)

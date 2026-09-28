@@ -15,7 +15,7 @@ function check(name::String, budget::Int, f)
     return
 end
 
-# ── Routing ─────────────────────────────────────────────────────────────────
+# Routing
 
 router = Trie()
 get!(router, "/fixed", _ -> text("ok"))
@@ -34,7 +34,7 @@ const _CAPTURES = Pair{Symbol,UnitRange{Int}}[]
 check("route! static", 16, () -> (res = route!(router, Methods.GET, "/fixed", _CAPTURES); matched(res) ? 1 : 0))
 check("route! param", 16, () -> (res = route!(router, Methods.GET, "/users/42", _CAPTURES); length(res.params)))
 
-# ── Request construction (zero-copy views) ──────────────────────────────────
+# Request construction (zero-copy views)
 
 raw = Vector{UInt8}(
     "GET /users/42 HTTP/1.1\r\nHost: x\r\nAccept: */*\r\nUser-Agent: bench\r\n\r\n")
@@ -46,7 +46,7 @@ st.header_len = head_length(st.hbuf)
 
 check("request build (views)", 800, () -> _build_request(st))
 
-# ── Response builders ───────────────────────────────────────────────────────
+# Response builders
 
 check("text response", 512, () -> text("hello"))
 check("fail response", 512, () -> fail(404, "Not Found"))

@@ -1,9 +1,4 @@
-# Public request value owned by Ciro. Parser-specific representations are
-# converted at the boundary and are not exposed to handlers.
-#
-# Handlers receive views into the connection buffer by default (zero-copy);
-# `body(ctx)`/`rawbody(ctx)` return owned copies. A view is only valid until
-# the handler returns — retain a copy if it must escape.
+# Public request value owned by Ciro; views die when the handler returns — copy to retain.
 
 using StringViews: StringView
 

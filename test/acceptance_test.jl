@@ -1,20 +1,10 @@
-# ══════════════════════════════════════════════════════════════════════════════
-# Wire-level acceptance tests
+# Wire-level acceptance tests: executable spec for the transport contract,
+# talking to a real server over real sockets. Known P0 defects are pinned with
+# @test_broken and promoted to @test when a fix lands.
 #
-# These tests talk to a real server over real sockets. They are the executable
-# specification for the transport contract. Known P0 defects are pinned with
-# @test_broken: when a fix lands, the test flips to a failure and must be
-# promoted to @test.
-#
-# Requirements: Linux + lib/ciro.so built. Tests are skipped when lib is absent.
-#
-# The server runs in a separate Julia process. Two reasons:
-#   1. It mirrors production deployment (`julia server.jl`).
-#   2. The current event loop never yields, so an in-process worker can occupy
-#      the thread Julia's scheduler needs, deadlocking an in-process client.
-#      (Tracked as a Stage 1 defect; the subprocess keeps this suite deterministic
-#      while the client itself also uses raw blocking libc sockets, not libuv.)
-# ══════════════════════════════════════════════════════════════════════════════
+# Requires Linux + lib/ciro.so (skipped otherwise). The server runs in a
+# separate Julia process because the current event loop never yields, which
+# would deadlock an in-process client occupying the scheduler's thread.
 
 using Test
 using Ciro
@@ -26,7 +16,7 @@ if !_LIB_OK
     @info "Skipping wire acceptance tests" linux=Sys.islinux() lib_available=_LIB_OK
 end
 
-# ── raw blocking socket test client ─────────────────────────────────────────
+# raw blocking socket test client
 
 const _AF_INET = Cint(2)
 const _SOCK_STREAM = Cint(1)
@@ -212,7 +202,7 @@ function _wait_ready(port::Integer)
     error("wire test server did not become ready on port $port")
 end
 
-# ── server subprocess ───────────────────────────────────────────────────────
+# server subprocess
 
 const _SERVER_SRC = raw"""
 using Ciro
@@ -268,8 +258,6 @@ function _kill_server(proc)
     end
     return
 end
-
-# ── suite ───────────────────────────────────────────────────────────────────
 
 @testset "Wire acceptance" begin
     if !_LIB_OK
@@ -337,7 +325,6 @@ end
             end
 
             @testset "chunked request bodies" begin
-                # Complete chunked body in one segment.
                 resp = roundtrip(port,
                     "POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n" *
                     "5\r\nhello\r\n0\r\n\r\n")
@@ -420,7 +407,6 @@ end
                     _close(c)
                 end
 
-                # Chunked body.
                 c = TestClient(port; timeout=10.0)
                 try
                     _send(c, "POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n" *
@@ -658,7 +644,6 @@ end
                         _close(c)
                     end
 
-                    # chunked body
                     resp = roundtrip(sock_port,
                         "POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n" *
                         "5\r\nhello\r\n0\r\n\r\n")
@@ -1061,9 +1046,7 @@ end
             @testset "stop! drains and returns" begin
                 # Exercise the supported API directly: start a server, then
                 # stop it from another task and require start! to return after
-                # the drain. Wire behavior itself is covered by the subprocess
-                # servers above; keeping this test socket-free makes it
-                # deterministic under Pkg.test's bounds-checked scheduler.
+                # the drain; socket-free keeps it deterministic under Pkg.test.
                 drain_port = port + 2
                 router = Trie()
                 get!(router, "/hello", _ -> text("hello"))

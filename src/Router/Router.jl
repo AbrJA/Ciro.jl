@@ -9,9 +9,7 @@ export Trie, get!, post!, put!, delete!, patch!, head!, options!, group!, freeze
 
 import Base: get!, put!, delete!
 
-# ══════════════════════════════════════════════════════════════════════════════
 # Parameter Spec — parsed at registration time, validated at match time
-# ══════════════════════════════════════════════════════════════════════════════
 
 struct ParamSpec
     name :: Symbol
@@ -62,10 +60,6 @@ end
     return true
 end
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Trie Node
-# ══════════════════════════════════════════════════════════════════════════════
-
 mutable struct TrieNode
     children    :: Dict{String, TrieNode}
     param_child :: Union{Nothing, Tuple{ParamSpec, TrieNode}}
@@ -75,10 +69,6 @@ end
 
 TrieNode() = TrieNode(Dict{String,TrieNode}(), nothing, Dict{UInt8,Any}(), Dict{UInt8,Any}())
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Router Struct
-# ══════════════════════════════════════════════════════════════════════════════
-
 mutable struct Trie <: AbstractRouter
     root :: TrieNode
     frozen :: Bool
@@ -86,9 +76,7 @@ end
 
 Trie() = Trie(TrieNode(), false)
 
-# ══════════════════════════════════════════════════════════════════════════════
 # Route Registration
-# ══════════════════════════════════════════════════════════════════════════════
 
 function Interface.register!(trie::Trie, method::UInt8, pattern::String, handler;
                              limits::Union{Nothing,RouteLimits}=nothing)
@@ -165,7 +153,7 @@ function Interface.freeze!(trie::Trie)
     return trie
 end
 
-# ── Convenience registration ────────────────────────────────────────────────
+# Convenience registration
 
 Base.get!(r::Trie, p::String, h; limits=nothing)     = (register!(r, Methods.GET, p, h; limits); r)
 post!(r::Trie, p::String, h; limits=nothing)    = (register!(r, Methods.POST, p, h; limits); r)
@@ -175,9 +163,7 @@ patch!(r::Trie, p::String, h; limits=nothing)   = (register!(r, Methods.PATCH, p
 head!(r::Trie, p::String, h; limits=nothing)    = (register!(r, Methods.HEAD, p, h; limits); r)
 options!(r::Trie, p::String, h; limits=nothing) = (register!(r, Methods.OPTIONS, p, h; limits); r)
 
-# ══════════════════════════════════════════════════════════════════════════════
 # Route Groups — prefix-based organization
-# ══════════════════════════════════════════════════════════════════════════════
 
 """
     group!(router, prefix) do r
@@ -207,20 +193,16 @@ patch!(g::_GroupProxy, p::String, h; limits=nothing)   = (register!(g.trie, Meth
 head!(g::_GroupProxy, p::String, h; limits=nothing)    = (register!(g.trie, Methods.HEAD, g.prefix * p, h; limits); g.trie)
 options!(g::_GroupProxy, p::String, h; limits=nothing) = (register!(g.trie, Methods.OPTIONS, g.prefix * p, h; limits); g.trie)
 
-# Nested groups
 group!(f::Function, g::_GroupProxy, prefix::String) = group!(f, g.trie, g.prefix * _normalize_prefix(prefix))
 
 function _normalize_prefix(prefix::String)::String
-    # Ensure prefix starts with / and doesn't end with /
     p = startswith(prefix, '/') ? prefix : "/" * prefix
     endswith(p, '/') ? p[1:end-1] : p
 end
 
 export group!
 
-# ══════════════════════════════════════════════════════════════════════════════
 # Route Dispatch — returns RouteResult (type-stable)
-# ══════════════════════════════════════════════════════════════════════════════
 
 function Interface.route(trie::Trie, method::UInt8, path::AbstractString)::RouteResult
     # Owned string captures: the result is self-contained and safe to keep.
@@ -242,19 +224,15 @@ function Interface.route!(trie::Trie, method::UInt8, path::AbstractString,
                                    RouteResult(handler, captures)
     end
 
-    # No handler found — check if path exists with other methods (→ 405)
     allowed_mask = _find_allowed_path(trie.root, path, 1, len)
     if allowed_mask != 0x00
         return RouteResult(allowed_mask)
     end
 
-    # No path match at all → 404
     return RouteResult()
 end
 
-# ══════════════════════════════════════════════════════════════════════════════
 # Internal: Zero-alloc Trie Matching (inline segment iteration)
-# ══════════════════════════════════════════════════════════════════════════════
 
 # Captured values: ranges (zero-alloc scratch) or owned strings (public route).
 @inline _capture_value(::AbstractVector{Pair{Symbol,UnitRange{Int}}}, path, span) = span
@@ -263,17 +241,14 @@ end
 
 function _match_path(node::TrieNode, path::AbstractString, pos::Int, len::Int,
                      method::UInt8, captured::C) where {C <: AbstractVector}
-    # Skip leading slashes
     while pos <= len && @inbounds(codeunit(path, pos)) == UInt8('/')
         pos += 1
     end
 
-    # End of path — check handlers at this node
     if pos > len
         return get(node.handlers, method, nothing)
     end
 
-    # Extract current segment boundaries (zero-alloc SubString)
     seg_start = pos
     while pos <= len && @inbounds(codeunit(path, pos)) != UInt8('/')
         pos += 1
@@ -310,7 +285,6 @@ end
 
 """Build a bitmask of all methods registered for a path (for 405 Allow header)."""
 function _find_allowed_path(node::TrieNode, path::AbstractString, pos::Int, len::Int)::UInt8
-    # Skip leading slashes
     while pos <= len && @inbounds(codeunit(path, pos)) == UInt8('/')
         pos += 1
     end
@@ -350,9 +324,7 @@ function _find_allowed_path(node::TrieNode, path::AbstractString, pos::Int, len:
     return mask
 end
 
-# ══════════════════════════════════════════════════════════════════════════════
 # Path Splitting (used only at registration time, not in hot path)
-# ══════════════════════════════════════════════════════════════════════════════
 
 function _split_path(path::String)::Vector{String}
     segments = String[]

@@ -25,7 +25,6 @@ echo "========================================================"
 echo "Duration: $DURATION | Connections: $CONNECTIONS"
 echo ""
 
-# Verify servers are up
 if ! curl -sf "http://127.0.0.1:${CIRO_PORT}/" > /dev/null; then
     echo "ERROR: Ciro.jl server not running on :${CIRO_PORT}"
     echo "  Start with: julia --threads=auto --project=. benchmarks/ciro_bench.jl"
@@ -89,7 +88,7 @@ run_bench_verbose() {
 KA_HDR=()                               # keep-alive: HTTP/1.1 default
 CL_HDR=(-H "Connection: close")        # force new TCP connection per request
 
-# ── Summary table ─────────────────────────────────────────────────────────────
+# Summary table
 
 echo "┌─────────────────────────────────────────────────────────────┐"
 echo "│  Endpoint              Server       Mode          req/s     │"
@@ -113,7 +112,7 @@ run_bench "Ciro.jl  close     " "$CIRO_PORT"  "POST" "/user" "${CL_HDR[@]}"
 run_bench "khttp    keep-alive" "$KHTTP_PORT" "POST" "/user" "${KA_HDR[@]}"
 run_bench "khttp    close     " "$KHTTP_PORT" "POST" "/user" "${CL_HDR[@]}"
 
-# ── Verbose detail for GET / ──────────────────────────────────────────────────
+# Verbose detail for GET /
 
 echo ""
 echo "========================================================"

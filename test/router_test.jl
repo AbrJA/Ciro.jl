@@ -15,10 +15,8 @@ using PicoHTTPParser
         @test matched(route(r, Methods.GET, "/about"))
         @test matched(route(r, Methods.POST, "/items"))
 
-        # No match — 404
         @test not_found(route(r, Methods.GET, "/missing"))
 
-        # Method not allowed — 405
         result = route(r, Methods.DELETE, "/")
         @test method_not_allowed(result)
         @test result.allowed & Methods.bitmask(Methods.GET) != 0
@@ -32,7 +30,6 @@ using PicoHTTPParser
         get!(r, "/users/:id", req -> text("user"))
         get!(r, "/users/:id/posts/:post_id", req -> text("post"))
 
-        # Single param
         result = route(r, Methods.GET, "/users/42")
         @test matched(result)
         raw = Vector{UInt8}("GET /users/42 HTTP/1.1\r\nHost: x\r\n\r\n")
@@ -52,7 +49,6 @@ using PicoHTTPParser
         @test param(ctx2, :id) == "7"
         @test param(ctx2, :post_id) == "99"
 
-        # No match — wrong depth
         @test not_found(route(r, Methods.GET, "/users"))
         @test not_found(route(r, Methods.GET, "/users/1/posts"))
     end
@@ -121,13 +117,11 @@ using PicoHTTPParser
         resp = result.handler(Context(req, result.params))
         @test String(copy(resp.body)) == "static"
 
-        # Param for other values
         result2 = route(r, Methods.GET, "/items/123")
         @test matched(result2)
         resp2 = result2.handler(Context(req, result2.params))
         @test String(copy(resp2.body)) == "param"
 
-        # Wildcard for deeper paths
         result3 = route(r, Methods.GET, "/items/a/b")
         @test matched(result3)
         resp3 = result3.handler(Context(req, result3.params))
@@ -186,7 +180,6 @@ using PicoHTTPParser
         raw = Vector{UInt8}("GET /users/42 HTTP/1.1\r\nHost: x\r\n\r\n")
         req = PicoHTTPParser.parse_request(raw)
 
-        # Valid integer
         result = route(r, Methods.GET, "/users/42")
         @test matched(result)
         ctx = Context(req, result.params)
@@ -197,7 +190,6 @@ using PicoHTTPParser
         # Invalid integer → no match on this param, falls through
         @test not_found(route(r, Methods.GET, "/users/abc"))
 
-        # Negative integer
         result2 = route(r, Methods.GET, "/users/-5")
         @test matched(result2)
 
@@ -231,7 +223,6 @@ using PicoHTTPParser
         @test matched(result3)
         @test String(result3.handler(Context(req, result3.params)).body) == "item 77"
 
-        # Outside group → 404
         @test not_found(route(r, Methods.GET, "/api/v1/other"))
     end
 
@@ -242,7 +233,6 @@ using PicoHTTPParser
 
         server = Server(; router, port=19996)
 
-        # PUT /api/items → 405
         raw = Vector{UInt8}("PUT /api/items HTTP/1.1\r\nHost: x\r\n\r\n")
         req = PicoHTTPParser.parse_request(raw)
         resp = Ciro.Core._dispatch(server, req)
@@ -251,7 +241,6 @@ using PicoHTTPParser
         @test contains(allow_hdr, "GET")
         @test contains(allow_hdr, "POST")
 
-        # GET /nonexistent → 404
         raw2 = Vector{UInt8}("GET /nonexistent HTTP/1.1\r\nHost: x\r\n\r\n")
         req2 = PicoHTTPParser.parse_request(raw2)
         resp2 = Ciro.Core._dispatch(server, req2)
@@ -291,22 +280,17 @@ using PicoHTTPParser
         r = Trie()
         get!(r, "/scores/:val::Float64", ctx -> text("score: $(param(ctx, :val))"))
 
-        # Valid float
         result = route(r, Methods.GET, "/scores/3.14")
         @test matched(result)
 
-        # Integer is valid float
         result2 = route(r, Methods.GET, "/scores/42")
         @test matched(result2)
 
-        # Negative float
         result3 = route(r, Methods.GET, "/scores/-1.5")
         @test matched(result3)
 
-        # Invalid float
         @test not_found(route(r, Methods.GET, "/scores/abc"))
 
-        # Double dot invalid
         @test not_found(route(r, Methods.GET, "/scores/1.2.3"))
     end
 
@@ -314,11 +298,9 @@ using PicoHTTPParser
         r = Trie()
         get!(r, "/items/:uuid::UUID", ctx -> text("uuid"))
 
-        # Valid UUID length (36 chars)
         result = route(r, Methods.GET, "/items/550e8400-e29b-41d4-a716-446655440000")
         @test matched(result)
 
-        # Invalid UUID length
         @test not_found(route(r, Methods.GET, "/items/short"))
         @test not_found(route(r, Methods.GET, "/items/too-long-string-that-is-not-a-valid-uuid"))
     end
@@ -376,13 +358,11 @@ using PicoHTTPParser
 
     @testset "Prefix normalization in groups" begin
         r = Trie()
-        # Without leading slash
         group!(r, "api") do g
             get!(g, "/test", ctx -> text("ok"))
         end
         @test matched(route(r, Methods.GET, "/api/test"))
 
-        # With trailing slash
         group!(r, "/v1/") do g
             get!(g, "/data", ctx -> text("data"))
         end

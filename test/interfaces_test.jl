@@ -332,7 +332,6 @@ const _status = Ciro.Interface.status
         @test contains(hdr, "PATCH")
         @test contains(hdr, "HEAD")
         @test contains(hdr, "OPTIONS")
-        # Empty mask → empty string
         @test Methods.allow_header(0x00) == ""
     end
 
@@ -365,7 +364,6 @@ const _status = Ciro.Interface.status
         qp = queryparams(req)
         @test qp["verbose"] == ""
 
-        # Multiple params including duplicated key (last wins with Dict)
         raw2 = Vector{UInt8}("GET /p?a=1&b=2&c=3 HTTP/1.1\r\nHost: x\r\n\r\n")
         req2 = PicoHTTPParser.parse_request(raw2)
         qp2 = queryparams(req2)
@@ -381,19 +379,16 @@ const _status = Ciro.Interface.status
     end
 
     @testset "RouteResult predicates" begin
-        # not_found
         r404 = RouteResult()
         @test not_found(r404)
         @test !matched(r404)
         @test !method_not_allowed(r404)
 
-        # method_not_allowed
         r405 = RouteResult(0x03)  # GET + POST allowed
         @test method_not_allowed(r405)
         @test !matched(r405)
         @test !not_found(r405)
 
-        # matched
         rOk = RouteResult(ctx -> text("ok"), Pair{Symbol,String}[])
         @test matched(rOk)
         @test !not_found(rOk)
@@ -401,7 +396,6 @@ const _status = Ciro.Interface.status
     end
 
     @testset "Response body type stability" begin
-        # All builders produce Vector{UInt8} body
         @test text("hello").body isa Vector{UInt8}
         @test html("<p>x</p>").body isa Vector{UInt8}
         @test json("{}").body isa Vector{UInt8}
@@ -416,7 +410,6 @@ const _status = Ciro.Interface.status
         @test r.body == Vector{UInt8}("hello")
         @test r.status == 200
 
-        # Empty string body
         r2 = Response(204, Pair{String,String}[], "")
         @test isempty(r2.body)
     end
@@ -427,7 +420,6 @@ const _status = Ciro.Interface.status
         @test Methods.from_string("POST") != Methods.from_string("HEAD")
         @test Methods.from_string("PATCH") != Methods.from_string("DELETE")
 
-        # Single char strings
         @test Methods.from_string("G") == Methods.UNKNOWN
         @test Methods.from_string("P") == Methods.UNKNOWN
         @test Methods.from_string("GETS") == Methods.UNKNOWN
@@ -435,7 +427,6 @@ const _status = Ciro.Interface.status
     end
 
     @testset "Methods - allow_header formatting" begin
-        # Single method
         @test Methods.allow_header(Methods.bitmask(Methods.GET)) == "GET"
         # Multiple methods preserved in order
         mask = Methods.bitmask(Methods.GET) | Methods.bitmask(Methods.POST) | Methods.bitmask(Methods.DELETE)
@@ -443,7 +434,6 @@ const _status = Ciro.Interface.status
         @test contains(hdr, "GET")
         @test contains(hdr, "POST")
         @test contains(hdr, "DELETE")
-        # Empty mask
         @test Methods.allow_header(0x00) == ""
     end
 
@@ -461,7 +451,6 @@ const _status = Ciro.Interface.status
         @test _status(429) == "HTTP/1.1 429 Too Many Requests\r\n"
         @test _status(502) == "HTTP/1.1 502 Bad Gateway\r\n"
         @test _status(503) == "HTTP/1.1 503 Service Unavailable\r\n"
-        # Out of range
         @test contains(_status(0), "HTTP/1.1 0")
         @test contains(_status(999), "HTTP/1.1 999")
     end
@@ -469,7 +458,6 @@ const _status = Ciro.Interface.status
     @testset "Header case insensitivity" begin
         raw = Vector{UInt8}("GET / HTTP/1.1\r\ncontent-type: text/html\r\nX-CUSTOM: val\r\n\r\n")
         req = PicoHTTPParser.parse_request(raw)
-        # Case-insensitive match
         @test header(req, "Content-Type") == "text/html"
         @test header(req, "CONTENT-TYPE") == "text/html"
         @test header(req, "x-custom") == "val"
@@ -483,12 +471,10 @@ const _status = Ciro.Interface.status
         req = PicoHTTPParser.parse_request(raw)
         ctx = Context(req, [:val => "3.14", :neg => "-42", :empty => ""])
 
-        # Float64 parsing
         @test param(ctx, Float64, :val) == 3.14
         @test param(ctx, Float64, :neg) == -42.0
         @test param(ctx, Float64, :empty) === nothing
 
-        # Int parsing of negative
         @test param(ctx, Int, :neg) == -42
         @test param(ctx, Int, :empty) === nothing
     end

@@ -1,11 +1,4 @@
-# ══════════════════════════════════════════════════════════════════════════════
 # Streaming responses — chunked bodies and Server-Sent Events
-#
-# A `Stream` is produced incrementally by a `Stream` body running on an
-# async-executor worker. Bytes written to the `StreamWriter` are framed as
-# HTTP/1.1 chunks (or sent raw when the user supplies a Content-Length) and
-# flushed to the connection with backpressure.
-# ══════════════════════════════════════════════════════════════════════════════
 
 """
     Stream(body; status=200, headers=Pair{String,String}[])

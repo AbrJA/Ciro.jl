@@ -1,8 +1,4 @@
-# ══════════════════════════════════════════════════════════════════════════════
 # HTTPConfig — HTTP-level limits and deadlines
-#
-# Validated by the Server at construction; the HTTP layer only reads it.
-# ══════════════════════════════════════════════════════════════════════════════
 
 """
     HTTPConfig

@@ -1,8 +1,6 @@
-# ══════════════════════════════════════════════════════════════════════════════
 # Zero-copy response serialization
-# ══════════════════════════════════════════════════════════════════════════════
 
-# ── Cached Date Header (refreshed every second, RFC 5322 format) ────────────
+# Cached Date Header (refreshed every second, RFC 5322 format)
 # Thread-safety: _DATE_SEC is an Atomic so the stale-check is race-free.
 # _DATE_LOCK serialises the string update; after the lock the new string is
 # visible to all threads because `lock` issues a memory barrier.
@@ -35,11 +33,9 @@ function serialize_response!(buf::Vector{UInt8}, response::Response)::Int
     sl = status(response.status)
     sl_len = sizeof(sl)
 
-    # Body length
     body_data = response.body
     body_len = length(body_data)
 
-    # Calculate total size needed
     headers_len = 0
     for (k, v) in response.headers
         headers_len += sizeof(k) + 2 + sizeof(v) + 2  # "key: value\r\n"
@@ -59,15 +55,12 @@ function serialize_response!(buf::Vector{UInt8}, response::Response)::Int
 
     total = sl_len + headers_len + body_len
 
-    # Ensure buffer is large enough
     length(buf) < total && resize!(buf, total)
 
     cursor = 1
 
-    # Status line
     cursor = _write_str!(buf, cursor, sl)
 
-    # Headers
     for (k, v) in response.headers
         cursor = _write_str!(buf, cursor, k)
         cursor = _write_lit!(buf, cursor, ": ")
@@ -89,7 +82,6 @@ function serialize_response!(buf::Vector{UInt8}, response::Response)::Int
 
     cursor = _write_lit!(buf, cursor, "\r\n")
 
-    # Body
     if body_len > 0
         GC.@preserve body_data begin
             unsafe_copyto!(pointer(buf, cursor), pointer(body_data), body_len)
@@ -100,7 +92,7 @@ function serialize_response!(buf::Vector{UInt8}, response::Response)::Int
     return cursor - 1  # bytes written
 end
 
-# ── Streaming serialization ─────────────────────────────────────────────────
+# Streaming serialization
 
 """
     serialize_head!(buf, code, headers, chunked, close) -> Int
@@ -208,7 +200,7 @@ function serialize_raw!(buf::Vector{UInt8}, data::Vector{UInt8})::Int
     return n
 end
 
-# ── Zero-copy write helpers ─────────────────────────────────────────────────
+# Zero-copy write helpers
 
 @inline function _write_str!(buf::Vector{UInt8}, cursor::Int, s::String)::Int
     n = sizeof(s)

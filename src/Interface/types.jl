@@ -1,6 +1,4 @@
-# ══════════════════════════════════════════════════════════════════════════════
 # Abstract Types — Extension Points
-# ══════════════════════════════════════════════════════════════════════════════
 
 """
     AbstractRouter
@@ -61,9 +59,7 @@ function intercept end
 
 export AbstractCatcher, intercept
 
-# ══════════════════════════════════════════════════════════════════════════════
 # Backend Abstraction — enables alternative I/O backends
-# ══════════════════════════════════════════════════════════════════════════════
 
 """
     AbstractBackend
@@ -83,9 +79,7 @@ function stop_backend! end
 
 export AbstractBackend, start_backend!, stop_backend!
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Route Result — Type-stable return from route()
-# ══════════════════════════════════════════════════════════════════════════════
+# Route Result — type-stable return from route()
 
 """
     RouteResult
@@ -113,19 +107,17 @@ end
 
 const _NO_PARAMS = ()
 
-# Constructors for each outcome
 @inline RouteResult() = RouteResult(nothing, _NO_PARAMS, 0x00)
 @inline RouteResult(allowed::UInt8) = RouteResult(nothing, _NO_PARAMS, allowed)
 @inline RouteResult(handler, params) = RouteResult(handler, params, 0x00)
 
-# Status predicates — branch-free, inlinable
 @inline matched(r::RouteResult)::Bool = r.handler !== nothing
 @inline not_found(r::RouteResult)::Bool = r.handler === nothing && r.allowed == 0x00
 @inline method_not_allowed(r::RouteResult)::Bool = r.handler === nothing && r.allowed != 0x00
 
 export RouteResult, matched, not_found, method_not_allowed
 
-# ── Handler execution ───────────────────────────────────────────────────────
+# Handler execution
 
 """Execution policy for route endpoints."""
 abstract type AbstractExecutor end
@@ -158,9 +150,7 @@ function stop! end
 
 export stop!
 
-# ══════════════════════════════════════════════════════════════════════════════
 # Default Implementations
-# ══════════════════════════════════════════════════════════════════════════════
 
 """Silent logger — all calls optimize away."""
 struct NullLogger <: AbstractLogger end

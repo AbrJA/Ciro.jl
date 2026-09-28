@@ -1,17 +1,6 @@
-# ══════════════════════════════════════════════════════════════════════════════
 # HTTP connection state machine
-#
-# Entry points called by an adapter (via the AbstractIO seam):
-#   http_on_read(io, st, src, n)
-#   http_on_write(io, st, n)
-#   http_retire(io, st) / http_finalize(io, st) / http_expired(st, now)
-#   http_deliver_response(io, st, response)   # async executors only
-#
-# The machine only touches the outside world through `io_*` methods; it has no
-# knowledge of fds, rings, or pools.
-# ══════════════════════════════════════════════════════════════════════════════
 
-# ── Entry points ────────────────────────────────────────────────────────────
+# Entry points
 
 """Bytes `n`..end of a completed read are at `src` (adapter-owned memory)."""
 function http_on_read(io::AbstractIO, st::HTTPConn, src::Ptr{UInt8}, n::Int)
@@ -65,7 +54,7 @@ function _set_deadline!(io::AbstractIO, st::HTTPConn)
     return
 end
 
-# ── Per-route limits (early routing) ────────────────────────────────────────
+# Per-route limits (early routing)
 
 """Route the request as soon as its head is parsed, so per-route limits apply
 before the body is read. The result is reused by dispatch (routing once)."""
@@ -100,7 +89,7 @@ end
 @inline http_expired(st::HTTPConn, now::Float64)::Bool =
     !st.retired && st.deadline != 0.0 && now > st.deadline
 
-# ── Telemetry ───────────────────────────────────────────────────────────────
+# Telemetry
 
 """Start observing the request whose head was just parsed."""
 @inline function _telemetry_begin(io::AbstractIO, st::HTTPConn)
@@ -179,7 +168,7 @@ function _resume_connection(io::AbstractIO, st::HTTPConn)
     return
 end
 
-# ── Response delivery ───────────────────────────────────────────────────────
+# Response delivery
 
 """
     http_deliver_response(io, st, response)
@@ -203,7 +192,7 @@ function io_dispatch_async(io::AbstractIO, st::HTTPConn, req::Request)::Bool
     return false
 end
 
-# ── Streaming ───────────────────────────────────────────────────────────────
+# Streaming
 
 """Release a worker blocked on a stream handshake (`false` if it already left)."""
 @inline function _put_ack!(ack::Union{Nothing, Channel{Bool}}, ok::Bool)
@@ -344,7 +333,7 @@ function http_finalize(io::AbstractIO, st::HTTPConn)
     return
 end
 
-# ── Parsing state machine ───────────────────────────────────────────────────
+# Parsing state machine
 
 """Returns `:need_more` when more input is required, `:done` otherwise."""
 function _process(io::AbstractIO, st::HTTPConn)
@@ -510,7 +499,6 @@ function _feed_chunked!(io::AbstractIO, st::HTTPConn)
         return :partial
     end
 
-    # :done — leftover bytes are the start of the next (pipelined) request.
     # Keep them in `carry`, not `rbuf`: the request head still has to be read
     # from `rbuf` by `_complete_request`, and overwriting it here would corrupt
     # the method/target views.
@@ -529,7 +517,7 @@ function _feed_chunked!(io::AbstractIO, st::HTTPConn)
     return :done
 end
 
-# ── Request completion and response ─────────────────────────────────────────
+# Request completion and response
 
 function _complete_request(io::AbstractIO, st::HTTPConn)
     req = _build_request(st)
@@ -618,7 +606,7 @@ function _respond_and_close(io::AbstractIO, st::HTTPConn, response::Response)
     return
 end
 
-# ── Connection close detection ──────────────────────────────────────────────
+# Connection close detection
 
 @inline wants_close(req::PicoHTTPParser.Request)::Bool = wants_close(Request(req))
 @inline wants_close(::Nothing)::Bool = true

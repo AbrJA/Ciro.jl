@@ -25,7 +25,7 @@ async function request(path, opts = {}, timeoutMs = 15000) {
 const admin = (path, opts = {}) =>
   request(path, { ...opts, headers: { "X-Admin-Token": token(), ...(opts.headers ?? {}) } });
 
-// ── Probes, metrics, prometheus ─────────────────────────────────────────────
+// Probes, metrics, prometheus
 
 async function refreshProbes() {
   const h = await request("/healthz");
@@ -74,7 +74,7 @@ async function refreshLog() {
     : '<div class="muted">no requests yet</div>';
 }
 
-// ── Generate: SSE deltas and chunked text ───────────────────────────────────
+// Generate: SSE deltas and chunked text
 
 function genQuery() {
   return `prompt=${encodeURIComponent($("prompt").value)}&style=${$("style").value}`;
@@ -129,7 +129,7 @@ async function streamTxt() {
   }
 }
 
-// ── Predict: slow handler, concurrency, async vs sync ───────────────────────
+// Predict: slow handler, concurrency, async vs sync
 
 async function predict(n = 1) {
   const body = $("features").value;
@@ -167,7 +167,7 @@ async function slowAndPing() {
     `health during: HTTP ${health.status} in ${ping} ms\n` + verdict;
 }
 
-// ── Upload, routes, admin ───────────────────────────────────────────────────
+// Upload, routes, admin
 
 async function upload(bytes) {
   const { status, body } = await request("/api/v1/upload", {
@@ -211,7 +211,7 @@ async function adminAction(path, opts) {
   $("admin-out").textContent = `HTTP ${r.status}\n${r.body.slice(0, 700)}`;
 }
 
-// ── Wiring ──────────────────────────────────────────────────────────────────
+// Wiring
 
 $("executor").onchange = () => {
   state.executor = $("executor").value;

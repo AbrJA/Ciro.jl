@@ -1,10 +1,4 @@
-# ══════════════════════════════════════════════════════════════════════════════
 # UringIO — the io_uring adapter
-#
-# Owns the ring, the connection/buffer pools, per-connection pending writes, and
-# the handle→state tables. The HTTP state machine lives in `HTTP` and only
-# touches this through the `io_*` seam.
-# ══════════════════════════════════════════════════════════════════════════════
 
 const _MAX_POOLED_STATES = 256
 const _SWEEP_INTERVAL    = 0.1   # seconds
@@ -23,7 +17,7 @@ mutable struct ConnEntry
     pending :: Union{Nothing, PendingWrite}
 end
 
-# ── Async outbound messages (worker → event loop) ───────────────────────────
+# Async outbound messages (worker → event loop)
 # Workers may not touch connection state directly: every response, stream head,
 # chunk and terminal event crosses through an adapter-owned thread-safe queue
 # and is delivered on the event-loop thread.
@@ -62,7 +56,7 @@ end
     return
 end
 
-# ── Connection shedding (max_connections) ───────────────────────────────────
+# Connection shedding (max_connections)
 # Over-limit connections get an immediate 503 + Retry-After before the close,
 # mirroring the async executor's overload behavior.
 
@@ -172,7 +166,7 @@ function UringIO(server::S, engine::Engine) where {S <: Server}
                       Channel{_Outbound}(Inf))
 end
 
-# ── AbstractIO implementation ───────────────────────────────────────────────
+# AbstractIO implementation
 
 io_config(io::UringIO)          = io.cfg
 io_running(io::UringIO)::Bool   = io.server.runtime.running[]
@@ -312,7 +306,7 @@ function _shrink_buffers!(st::HTTPConn)
     return
 end
 
-# ── Worker startup ──────────────────────────────────────────────────────────
+# Worker startup
 
 function _start_workers(server::Server, queue_depth::Int, nworkers::Int)
     if server.config.backend === :sockets
@@ -342,7 +336,7 @@ function _start_uring_workers(server::Server, queue_depth::Int, nworkers::Int)
     start_backend!(backend, factory, server.config.port; running=server.runtime.running)
 end
 
-# ── Event pump ──────────────────────────────────────────────────────────────
+# Event pump
 
 @inline function _handle_event(io::UringIO, event::CompletionEvent,
                                accept_conn::Connection)
@@ -363,7 +357,6 @@ end
         return
     end
 
-    # The completing operation is done; the state machine re-arms as needed.
     st.inflight = :none
 
     if res < 0
@@ -416,7 +409,7 @@ function _on_accept(io::UringIO, client_fd::Cint)
     return
 end
 
-# ── Tick: drain and deadline sweep ──────────────────────────────────────────
+# Tick: drain and deadline sweep
 
 """Reply delivery, connection draining and deadline sweep, once per tick."""
 function _worker_tick!(io::UringIO)
@@ -491,7 +484,6 @@ function _sweep_expired!(io::UringIO)
     return
 end
 
-# ── Request Dispatch ────────────────────────────────────────────────────────
 # Delegates to the single Runtime pipeline (shared with Application/FakeTransport).
 
 @inline _dispatch(server::Server, req::Request)::Response =

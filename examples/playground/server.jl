@@ -1,5 +1,4 @@
 #!/usr/bin/env julia
-# ══════════════════════════════════════════════════════════════════════════════
 # Ciro.jl playground — one app that exercises the library end to end.
 #
 # Run:
@@ -15,7 +14,6 @@
 #   CIRO_PORT=8080  CIRO_BACKEND=uring|sockets  CIRO_WORKERS=<threads>
 #   CIRO_TOKEN_MS=40  CIRO_THINK_MS=400  CIRO_ADMIN_TOKEN=demo-token
 #   CIRO_WORKER_THREADS=32
-# ══════════════════════════════════════════════════════════════════════════════
 
 using Ciro
 using Dates
@@ -24,7 +22,7 @@ using Dates
 import Ciro: log!, telemetry_capture_path, telemetry_request!, telemetry_response!,
              telemetry_read!, telemetry_exception!
 
-# ── Service identity and mock model ─────────────────────────────────────────
+# Service identity and mock model
 
 const SERVICE = (name = "mock-model", version = "0.1.0")
 
@@ -88,7 +86,7 @@ function prometheus_text(m::ServerMetrics)
     return String(take!(io))
 end
 
-# ── Telemetry: metrics + access log with an in-memory tail ──────────────────
+# Telemetry: metrics + access log with an in-memory tail
 
 struct PlaygroundTelemetry <: AbstractTelemetry
     metrics  :: ServerMetrics
@@ -125,7 +123,7 @@ tail_lines(t::PlaygroundTelemetry) = lock(t.lock) do
     copy(t.tail)
 end
 
-# ── Extension points: logger, catcher, middleware ───────────────────────────
+# Extension points: logger, catcher, middleware
 
 struct ConsoleLogger <: AbstractLogger end
 log!(::ConsoleLogger, level::Severity, msg::String) =
@@ -184,7 +182,7 @@ function cors_preflight(_::Context)
                           "Access-Control-Max-Age" => "600"], UInt8[])
 end
 
-# ── Static files (traversal-guarded wildcard) ───────────────────────────────
+# Static files (traversal-guarded wildcard)
 
 const PUBLIC_DIR = joinpath(@__DIR__, "public")
 
@@ -203,7 +201,7 @@ function serve_static(ctx::Context)
                     read(file))
 end
 
-# ── Mock model ──────────────────────────────────────────────────────────────
+# Mock model
 
 function generate_text(prompt::String, style::String)::String
     base = isempty(prompt) ? "Hello from the Ciro playground." : "You asked: \"$prompt\"."
@@ -225,7 +223,7 @@ function parse_features(text::String)::Vector{Float64}
     return features
 end
 
-# ── Application factory ─────────────────────────────────────────────────────
+# Application factory
 
 """
     build_playground(; port, backend, executor, ...) -> Server
@@ -265,7 +263,6 @@ function build_playground(;
     _get!("/", _ -> html(page))
     _get!("/static/*", serve_static)
 
-    # Probes, metrics (Prometheus + JSON)
     _get!("/healthz", WithServiceHeader(_ ->
         json("{\"status\":\"ok\",\"service\":\"$(SERVICE.name)\"," *
              "\"uptime_s\":$(round(time() - started; digits = 1))}")))
@@ -278,7 +275,6 @@ function build_playground(;
         prometheus_text(telemetry.metrics)))
     _get!("/api/metrics", _ -> json(metrics_json(telemetry.metrics)))
 
-    # Routing: static, typed params, wildcard, 404/405, redirect
     _get!("/api/v1/models", _ -> json(models_json()))
     _get!("/api/v1/models/:id::Int", ctx -> begin
         id = param(ctx, Int, :id)
@@ -305,7 +301,6 @@ function build_playground(;
                     "\"latency_ms\":$(round((time() - t0) * 1000; digits = 1))}")
     end)
 
-    # Echo (query params + headers), upload with a per-route limit
     _get!("/api/v1/echo", ctx -> begin
         qp = queryparams(ctx)
         pairs = join(("\"$(json_escape(k))\":\"$(json_escape(v))\"" for (k, v) in qp), ",")
@@ -328,10 +323,8 @@ function build_playground(;
         return json("{\"audited\":true}")
     end)
 
-    # Custom catcher demo
     _get!("/api/v1/boom", _ -> error("intentional playground failure"))
 
-    # Streaming: SSE token deltas, and the same generation as chunked text
     _get!("/api/v1/generate", ctx -> begin
         qp = queryparams(ctx)
         text = generate_text(get(qp, "prompt", ""), get(qp, "style", "plain"))
@@ -357,7 +350,6 @@ function build_playground(;
         end
     end)
 
-    # Admin (token-protected)
     _get!("/admin/config", RequireToken(admin_token, _ -> json(
         "{\"service\":\"$(SERVICE.name)\",\"version\":\"$(SERVICE.version)\"," *
         "\"port\":$port,\"backend\":\"$backend\"," *
@@ -402,7 +394,7 @@ function build_playground(;
     return server
 end
 
-# ── Environment configuration ───────────────────────────────────────────────
+# Environment configuration
 
 function _env_int(key::String, default::Int)::Int
     raw = get(ENV, key, "")
