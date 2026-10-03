@@ -13,7 +13,7 @@ StringViews = "354b36f9-a18e-4713-926e-db85100087ba"
 [compat]
 Aqua = "0.8"
 Dates = "1"
-JET = "0.9, 0.10, 0.11"
+JET = "0.9, 0.10, 0.11, 0.12"
 PicoHTTPParser = "0.3"
 PrecompileTools = "1"
 Sockets = "1"
